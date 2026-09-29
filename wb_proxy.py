@@ -471,6 +471,7 @@ def _persist_usage(row, fail_label):
     except Exception as exc:
         log("%s: %s" % (fail_label, exc))
 
+
 def record_error(model, status, message, elapsed_ms=None, account=None,
                  usage=None, stream=None, ttft_ms=None, gen_ms=None, fp=None,
                  outcome="failed"):
@@ -489,6 +490,30 @@ def record_error(model, status, message, elapsed_ms=None, account=None,
     two never disagree about what the field means.
     """
     fields = _extract_usage(usage) or {}
+
+#: Upstream 14018 means the CodeBuddy account behind the key is out of credits.
+#: Nothing a retry can fix, and the English blob is easy to skim past, so say it
+#: in Chinese on the console and inside the message the client echoes.
+CREDIT_EXHAUSTED_HINT = (
+    "【额度已用完】上游 CodeBuddy 账号的 credit 已耗尽（错误码 14018）。"
+    "本地代理本身没有故障，重试不会恢复：需要充值或等额度周期重置。"
+    "用量/充值 https://www.codebuddy.ai/profile/usage")
+
+#: The bare substring matches inside longer numbers (an id containing 14018),
+#: so require the code to stand alone.
+_CREDIT_CODE_RE = re.compile(r"(?<!\d)14018(?!\d)")
+
+def credit_exhausted(text):
+    low = str(text or "").lower()
+    return bool(_CREDIT_CODE_RE.search(low)) or "credits exhausted" in low
+
+def upstream_error_message(code, detail):
+    """Passthrough error text, with the Chinese hint appended when credits are gone."""
+    msg = "upstream %s: %s" % (code, detail)
+    if credit_exhausted(detail):
+        msg += "  " + CREDIT_EXHAUSTED_HINT
+    return msg
+
     row = {
         "at": time.time(),
         "iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -517,6 +542,8 @@ def record_error(model, status, message, elapsed_ms=None, account=None,
         if elapsed_ms is not None:
             _usage["wall_ms_sum"] += elapsed_ms
             _usage["wall_samples"] += 1
+    if credit_exhausted(message):
+        log(CREDIT_EXHAUSTED_HINT, level="ERROR", tag="credit")
     _persist_usage(row, "error persist failed")
     dur = f" {elapsed_ms:.0f}ms" if elapsed_ms is not None else ""
     log(f"request error: model={model}{dur} status={status} msg={str(message)[:180]}", level="ERROR", tag="chat")
@@ -1624,7 +1651,7 @@ def add_log_entry(msg, level=None, tag=None):
     msg_str = str(msg).rstrip()
     if not level:
         lower = msg_str.lower()
-        if any(k in lower for k in ("error", "exception", "failed", "11128", "11101", "11140", "traceback", "errno", "fatal")):
+        if any(k in lower for k in ("error", "exception", "failed", "11128", "11101", "11140", "14018", "traceback", "errno", "fatal")):
             level = "ERROR"
         elif any(k in lower for k in ("warn", "warning", "retry", "timeout")):
             level = "WARN"
@@ -6576,9 +6603,14 @@ class Handler(BaseHTTPRequestHandler):
         except urllib.error.HTTPError as exc:
             detail = exc.read(600).decode("utf-8", "replace")
             record_error(model, exc.code, detail,
+<<<<<<< Updated upstream
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None))
             return self._error(exc.code, f"upstream {exc.code}: {detail}")
+=======
+                         elapsed_ms=int((time.time() - t_start) * 1000))
+            return self._error(exc.code, upstream_error_message(exc.code, detail))
+>>>>>>> Stashed changes
         except Exception as exc:
             message = str(exc)
             record_error(model, 502, message,
@@ -6833,9 +6865,14 @@ class Handler(BaseHTTPRequestHandler):
         except urllib.error.HTTPError as exc:
             detail = exc.read(600).decode("utf-8", "replace")
             record_error(model, exc.code, detail,
+<<<<<<< Updated upstream
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None))
             return self._error(exc.code, f"upstream {exc.code}: {detail}")
+=======
+                         elapsed_ms=int((time.time() - t_start) * 1000))
+            return self._error(exc.code, upstream_error_message(exc.code, detail))
+>>>>>>> Stashed changes
         except Exception as exc:
             message = str(exc)
             record_error(model, 502, message, elapsed_ms=int((time.time() - t_start) * 1000),
