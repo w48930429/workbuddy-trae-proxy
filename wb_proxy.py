@@ -6603,14 +6603,9 @@ class Handler(BaseHTTPRequestHandler):
         except urllib.error.HTTPError as exc:
             detail = exc.read(600).decode("utf-8", "replace")
             record_error(model, exc.code, detail,
-<<<<<<< Updated upstream
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None))
-            return self._error(exc.code, f"upstream {exc.code}: {detail}")
-=======
-                         elapsed_ms=int((time.time() - t_start) * 1000))
             return self._error(exc.code, upstream_error_message(exc.code, detail))
->>>>>>> Stashed changes
         except Exception as exc:
             message = str(exc)
             record_error(model, 502, message,
@@ -6865,14 +6860,9 @@ class Handler(BaseHTTPRequestHandler):
         except urllib.error.HTTPError as exc:
             detail = exc.read(600).decode("utf-8", "replace")
             record_error(model, exc.code, detail,
-<<<<<<< Updated upstream
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None))
-            return self._error(exc.code, f"upstream {exc.code}: {detail}")
-=======
-                         elapsed_ms=int((time.time() - t_start) * 1000))
             return self._error(exc.code, upstream_error_message(exc.code, detail))
->>>>>>> Stashed changes
         except Exception as exc:
             message = str(exc)
             record_error(model, 502, message, elapsed_ms=int((time.time() - t_start) * 1000),
