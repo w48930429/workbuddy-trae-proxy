@@ -1644,6 +1644,30 @@ LOG_BUFFER = deque(maxlen=2000)
 _LOG_LOCK = threading.Lock()
 _LOG_COUNTER = 0
 
+# 日志文件句柄（由 WB_PROXY_LOG_DIR 环境变量控制）
+_LOG_FILE = None
+_LOG_FILE_DATE = None
+_LOG_FILE_PATH = None
+
+def _ensure_log_file():
+    """如果设置了 WB_PROXY_LOG_DIR 环境变量，确保日志文件已打开（按日期轮转）"""
+    global _LOG_FILE, _LOG_FILE_DATE, _LOG_FILE_PATH
+    log_dir = os.environ.get("WB_PROXY_LOG_DIR")
+    if not log_dir:
+        return
+    today = time.strftime("%Y-%m-%d")
+    if _LOG_FILE and _LOG_FILE_DATE == today:
+        return
+    if _LOG_FILE:
+        try:
+            _LOG_FILE.close()
+        except:
+            pass
+    os.makedirs(log_dir, exist_ok=True)
+    _LOG_FILE_PATH = os.path.join(log_dir, f"wb_proxy_{today}.log")
+    _LOG_FILE = open(_LOG_FILE_PATH, "a", encoding="utf-8")
+    _LOG_FILE_DATE = today
+
 def add_log_entry(msg, level=None, tag=None):
     global _LOG_COUNTER
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -1686,6 +1710,14 @@ def add_log_entry(msg, level=None, tag=None):
             "msg": msg_str,
         }
         LOG_BUFFER.append(entry)
+    # 写日志文件（如果设置了 WB_PROXY_LOG_DIR）
+    try:
+        _ensure_log_file()
+        if _LOG_FILE:
+            _LOG_FILE.write(f"[{ts}] {level:7s} [{tag:10s}] {msg_str}\n")
+            _LOG_FILE.flush()
+    except:
+        pass
     return entry
 
 def log(msg, level=None, tag=None):
