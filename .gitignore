@@ -27,3 +27,13 @@ usage/*.bak*
 
 # Local Docker Compose override
 docker-compose.override.yml
+
+# ── Trae 扩展：运行态与凭证（绝不入库）──
+vault/
+trae_secrets.json
+wb28087.*.log
+wb28086.*.log
+ag-proxy*.log
+ag-proxy.pid
+*.pid
+_trae-api/ (上游参考项目副本，独立仓库)

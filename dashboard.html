@@ -497,6 +497,30 @@ a:hover{text-decoration:underline}
   </div>
     <div id="accounts"></div>
   </section>
+  <!-- Trae 账号区域 -->
+  <section>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+      <h2>Trae 账号<em id="traeAcctCount"></em></h2>
+      <div class="toolbar">
+        <button class="sec" onclick="startTraeOAuth()">+ 添加账号 (OAuth)</button>
+        <button class="sec" onclick="traeCheckinAll(this)">每日签到</button>
+        <button class="sec" onclick="traeExport(this)">导出账号</button>
+        <button class="sec" onclick="document.getElementById('traeImportFile').click()">导入账号</button>
+        <input type="file" id="traeImportFile" accept=".json" style="display:none" onchange="traeImportFilePicked(this)">
+        <button class="sec" onclick="traeRefreshCredits(this)">刷新积分</button>
+        <button class="sec" onclick="traeSetAll(false, this)">全部停用</button>
+        <button class="sec" onclick="traeSetAll(true, this)">全部启用</button>
+        <button class="sec" id="traePriorityBtn" onclick="traeTogglePriority(this)">扣分顺序: WB 优先</button>
+        <button class="sec" onclick="openTraeGuide()">获取 Token 说明</button>
+      </div>
+    </div>
+    <div id="trae-accounts" style="min-height:60px">
+      <div class="hint" style="color:var(--dim);text-align:center;padding:20px">
+        点击「+ 添加账号 (OAuth)」登录，或「导入账号」批量导入；登录后自动参与 failover 调度
+      </div>
+    </div>
+    <div id="traeCards" style="display:none;margin-top:14px"></div>
+  </section>
 
   <!-- 融合后的：模型性能与用量矩阵 -->
   
@@ -4139,6 +4163,254 @@ function renderAnalytics(data){
     }
   }
 }
+
+// Trae 多账号管理（与 WorkBuddy 账号块同构）
+let TRAE_ACCOUNTS = [];
+
+async function loadTraeToken(){
+  try{
+    const r = await getJSON('/trae/accounts');
+    TRAE_ACCOUNTS = r.accounts || [];
+    renderTraeAccount();
+    traeRenderPriority();
+  }catch(e){
+    toast('Trae 账号加载失败: ' + e.message, 'bad');
+  }
+}
+
+async function traeRenderPriority(){
+  try{
+    const p = await getJSON('/trae/priority');
+    const btn = document.getElementById('traePriorityBtn');
+    if(btn) btn.textContent = p.priority === 'trae_first' ? '扣分顺序: Trae 优先' : '扣分顺序: WB 优先';
+  }catch(e){}
+}
+
+async function traeTogglePriority(btn){
+  const cur = (btn.textContent || '').includes('Trae') ? 'trae_first' : 'fallback';
+  const next = cur === 'trae_first' ? 'fallback' : 'trae_first';
+  if(btn){ btn.disabled = true; }
+  try{
+    await postJSON('/trae/priority', { priority: next });
+    btn.textContent = next === 'trae_first' ? '扣分顺序: Trae 优先' : '扣分顺序: WB 优先';
+    toast(next === 'trae_first'
+      ? '已切换：Trae 积分优先扣（流式请求仍走 WB，WB 耗尽自动落 Trae）'
+      : '已切换：WB/Code 积分优先，耗尽自动落 Trae', 'ok');
+  }catch(e){ toast('切换失败: ' + e.message, 'bad'); }
+  finally{ if(btn) btn.disabled = false; }
+}
+
+function traeStateBadge(a){
+  if(!a.enabled) return '<span class="badge off">已停用</span>';
+  if(a.expired) return '<span class="badge bad">已过期</span>';
+  return '<span class="badge ok">可用</span>';
+}
+
+function traeStatCards(){
+  const box = document.getElementById('traeCards');
+  if(!box) return;
+  const total = TRAE_ACCOUNTS.length;
+  const enabled = TRAE_ACCOUNTS.filter(a => a.enabled && !a.expired).length;
+  const disabled = total - enabled;
+  const poolSub = disabled ? (disabled + ' 个停用/过期') : '全部启用 · 状态健康';
+  const withCred = TRAE_ACCOUNTS.filter(a => a.credits);
+  const totRemain = withCred.reduce((s, a) => s + (a.credits.total || 0), 0);
+  const totLimit = withCred.reduce((s, a) => s + (a.credits.total_limit || 0), 0);
+  const general = withCred.reduce((s, a) => s + (a.credits.general || 0), 0);
+  const work = withCred.reduce((s, a) => s + (a.credits.work || 0), 0);
+  const pct = totLimit > 0 ? ((totRemain / totLimit) * 100).toFixed(1) + '%' : '';
+  box.style.display = TRAE_ACCOUNTS.length ? 'grid' : 'none';
+  box.innerHTML =
+    card('可用账号池', enabled + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">/ ' + total + ' 正常</span>', poolSub, 'accent') +
+    card('积分余额', fmt(totRemain) + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">积分</span>', '总积分 ' + fmt(totLimit) + ' · 剩余 ' + pct, 'accent2') +
+    card('通用 / Work 积分', fmt(general) + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">/ ' + fmt(work) + '</span>', '按积分包 product_id 分类', '') +
+    card('扣分顺序', (document.getElementById('traePriorityBtn') || {}).textContent || 'WB 优先', 'Trae 账号 ' + total + ' 个参与调度', '');
+}
+
+function traeRow(a){
+  const uidAttr = esc(String(a.user_id || '').replace(/[^\w.@-]/g, ''));
+  const state = traeStateBadge(a);
+  const cred = a.credits;
+  const credText = cred
+    ? ('<b style="color:var(--accent2)">' + cred.total + '</b> / ' + cred.total_limit
+       + '<div class="hint" style="color:var(--dim);font-size:10px;margin:1px 0 0">通用 ' + cred.general + ' · Work ' + cred.work + '</div>')
+    : (a.credits_error
+        ? '<span style="color:var(--warn);font-size:11px">查询失败</span>'
+        : '<span style="color:var(--dim)">未查询</span>');
+  const expires = a.expires_at ? new Date(a.expires_at * 1000).toLocaleDateString() : '?';
+  return '<tr>'
+    + '<td style="text-align:center;white-space:nowrap" data-label="版本"><span class="realm-badge-intl">Trae</span></td>'
+    + '<td style="text-align:left" data-label="账号">'
+    +   '<div style="font-weight:600;font-size:13px;color:var(--fg)">' + esc(a.user_name) + '</div>'
+    +   '<div class="mono" style="color:var(--dim);font-size:11px">' + esc(String(a.user_id).slice(0,14)) + ' · OAuth · 到期 ' + esc(expires) + '</div>'
+    + (a.credits_error ? '<div class="hint" style="color:var(--warn);margin:2px 0 0">' + esc(a.credits_error) + '</div>' : '')
+    + '</td>'
+    + '<td style="text-align:center" data-label="状态">' + state + '</td>'
+    + '<td style="text-align:left;white-space:nowrap" data-label="积分">' + credText + '</td>'
+    + '<td class="mono" style="text-align:left;font-size:11px;color:var(--dim)" data-label="Token">' + esc(String(a.token_mask || '')) + '</td>'
+    + '<td class="acct-actions" style="text-align:center;white-space:nowrap;vertical-align:middle">'
+    +   '<button class="sec mini" onclick="traeToggle(\'' + uidAttr + '\',' + (!a.enabled) + ', this)">' + (a.enabled ? '停用' : '启用') + '</button>'
+    +   '<button class="sec mini" onclick="traeCheckinOne(\'' + uidAttr + '\', this)">签到</button>'
+    +   '<button class="danger mini" onclick="traeDelete(\'' + uidAttr + '\', this)">删除</button>'
+    + '</td>'
+    + '</tr>';
+}
+
+function renderTraeAccount(){
+  const box = document.getElementById('trae-accounts');
+  const count = document.getElementById('traeAcctCount');
+  if(!box) return;
+  if(!TRAE_ACCOUNTS.length){
+    box.innerHTML = '<div style="text-align:center;padding:30px 16px">'
+      + '<div style="font-size:15px;margin-bottom:8px">还没有 Trae 账号</div>'
+      + '<div style="color:var(--dim);font-size:13px;margin-bottom:18px">'
+      +   '点击「+ 添加账号 (OAuth)」登录，或「导入账号」批量导入；'
+      +   '登录后自动参与 failover 调度（WorkBuddy 额度耗尽时接管）'
+      + '</div></div>';
+    if(count) count.textContent = '';
+    return;
+  }
+  const enabled = TRAE_ACCOUNTS.filter(a => a.enabled).length;
+  if(count) count.textContent = '（共 ' + TRAE_ACCOUNTS.length + ' 个，启用 ' + enabled + ' 个）';
+  box.innerHTML = '<div class="table-wrap"><table class="data-cards account-cards"><thead><tr>'
+    + '<th style="text-align:center;width:76px">版本</th>'
+    + '<th style="text-align:left">账号</th>'
+    + '<th style="text-align:center;width:84px">状态</th>'
+    + '<th style="text-align:left;width:130px">积分</th>'
+    + '<th class="mono" style="text-align:left;width:140px">Token</th>'
+    + '<th style="text-align:center;width:200px">操作</th>'
+    + '</tr></thead><tbody>'
+    + TRAE_ACCOUNTS.map(traeRow).join('')
+    + '</tbody></table></div>';
+  traeStatCards();
+}
+
+async function startTraeOAuth(){
+  try{
+    toast('正在启动 Trae OAuth 登录...', 'info');
+    const popup = window.open('about:blank', 'trae_oauth');
+    const r = await postJSON('/trae/oauth/start', {});
+    if(r.url){
+      toast('请在打开的页面中完成 Trae 授权', 'ok');
+      if(popup && !popup.closed){ popup.location.href = r.url; } else { window.open(r.url, '_blank'); }
+      const pollInterval = setInterval(async () => {
+        try{
+          const cb = await postJSON('/trae/oauth/callback', {});
+          if(cb.ok){
+            clearInterval(pollInterval);
+            try{ if(popup && !popup.closed) popup.close(); }catch(e){}
+            toast('Trae 登录成功: ' + (cb.user_name || ''), 'ok');
+            await loadTraeToken();
+          }
+        }catch(e){
+          if(e.message && !/timed? ?out|network|Failed to fetch/i.test(e.message)){
+            clearInterval(pollInterval);
+            try{ if(popup && !popup.closed) popup.close(); }catch(e2){}
+            toast('Trae 登录失败: ' + e.message, 'bad');
+          }
+        }
+      }, 2000);
+      setTimeout(() => clearInterval(pollInterval), 180000);
+    } else if(popup){ popup.close(); }
+  }catch(e){
+    toast('OAuth 启动失败: ' + e.message, 'bad');
+  }
+}
+
+async function traeToggle(uid, enable, btn){
+  if(btn){ btn.disabled = true; }
+  try{
+    await postJSON('/trae/enabled', { user_id: uid, enabled: enable });
+    await loadTraeToken();
+  }catch(e){ toast('操作失败: ' + e.message, 'bad'); if(btn) btn.disabled = false; }
+}
+
+async function traeDelete(uid, btn){
+  if(!confirm('删除该 Trae 账号？（vault 凭证一并清除）')) return;
+  if(btn){ btn.disabled = true; }
+  try{
+    await postJSON('/trae/account/delete', { user_id: uid });
+    await loadTraeToken();
+    toast('已删除', 'ok');
+  }catch(e){ toast('删除失败: ' + e.message, 'bad'); if(btn) btn.disabled = false; }
+}
+
+async function traeCheckinOne(uid, btn){
+  if(btn){ btn.disabled = true; btn.textContent = '...'; }
+  try{
+    const r = await postJSON('/trae/checkin', { user_id: uid });
+    const mine = (r.results || []).find(x => x.user_id === uid) || {};
+    toast('签到: ' + (mine.message || mine.status || '完成'), mine.status === 'success' ? 'ok' : (mine.status === 'already' ? 'info' : 'bad'));
+    await loadTraeToken();
+  }catch(e){ toast('签到失败: ' + e.message, 'bad'); }
+  finally{ if(btn){ btn.disabled = false; btn.textContent = '签到'; } }
+}
+
+async function traeCheckinAll(btn){
+  const old = btn ? btn.textContent : '';
+  if(btn){ btn.disabled = true; btn.textContent = '签到中...'; }
+  try{
+    const r = await postJSON('/trae/checkin', {});
+    const ok = (r.results || []).filter(x => x.status === 'success').length;
+    const already = (r.results || []).filter(x => /已签|已领取|重复/.test(x.message || '')).length;
+    const fail = (r.results || []).filter(x => x.status === 'fail').length;
+    toast('签到完成: 成功 ' + ok + ' · 已签 ' + already + ' · 失败 ' + fail, fail ? 'warn' : 'ok');
+    await loadTraeToken();
+  }catch(e){ toast('签到失败: ' + e.message, 'bad'); }
+  finally{ if(btn){ btn.disabled = false; btn.textContent = old; } }
+}
+
+async function traeRefreshCredits(btn){
+  const old = btn ? btn.textContent : '';
+  if(btn){ btn.disabled = true; btn.textContent = '刷新中...'; }
+  try{
+    await loadTraeToken();
+    toast('积分已刷新', 'ok');
+  }catch(e){ toast('刷新失败: ' + e.message, 'bad'); }
+  finally{ if(btn){ btn.disabled = false; btn.textContent = old; } }
+}
+
+async function traeSetAll(enable, btn){
+  const old = btn ? btn.textContent : '';
+  if(btn){ btn.disabled = true; }
+  try{
+    await postJSON('/trae/enabled/all', { enabled: enable });
+    await loadTraeToken();
+    toast(enable ? '已全部启用' : '已全部停用', 'ok');
+  }catch(e){ toast('操作失败: ' + e.message, 'bad'); }
+  finally{ if(btn){ btn.disabled = false; btn.textContent = old; } }
+}
+
+function traeExport(btn){
+  if(btn){ btn.disabled = true; }
+  getJSON('/trae/accounts/export').then(r => {
+    const blob = new Blob([JSON.stringify(r.accounts || [], null, 2)], {type: 'application/json'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'trae_accounts_' + new Date().toISOString().slice(0,10) + '.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }).catch(e => toast('导出失败: ' + e.message, 'bad')).finally(() => { if(btn) btn.disabled = false; });
+}
+
+function traeImportFilePicked(input){
+  const file = input.files && input.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    try{
+      const accounts = JSON.parse(reader.result);
+      if(!Array.isArray(accounts)) throw new Error('JSON 根必须是数组');
+      const r = await postJSON('/trae/accounts', { accounts });
+      toast('导入完成: ' + (r.imported || 0) + ' 个账号', 'ok');
+      await loadTraeToken();
+    }catch(e){ toast('导入失败: ' + e.message, 'bad'); }
+    finally{ input.value = ''; }
+  };
+  reader.readAsText(file);
+}
+
+window.addEventListener('load', () => { loadTraeToken(); });
 </script>
 </body>
 </html>

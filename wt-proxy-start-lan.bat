@@ -1,10 +1,14 @@
 @echo off
 setlocal EnableExtensions
 rem ===========================================================
-rem  WorkBuddy international proxy - launcher
-rem  Usage: double-click, or  start-wb-proxy.bat [port]
+rem  WorkBuddy proxy - LAN mode
 rem
-rem  ASCII-only on purpose: .bat files are read using the
+rem  Listens on every network interface so phones, laptops and
+rem  other PCs on the same network can use it.
+rem
+rem  An API key is REQUIRED in this mode.
+rem
+rem  ASCII-only on purpose: .bat files are parsed using the
 rem  console code page, so non-ASCII text breaks the parser.
 rem
 rem  NOTE: this script puts no %VAR% inside an if( ... ) block,
@@ -13,7 +17,8 @@ rem  All checks use if/errorlevel/goto instead.
 rem ===========================================================
 
 set "PORT=%~1"
-if "%PORT%"=="" set "PORT=8788"
+if "%PORT%"=="" set "PORT=28087"
+set "KEY=%~2"
 set "HERE=%~dp0"
 set "SCRIPT=%HERE%wb_proxy.py"
 
@@ -53,8 +58,6 @@ echo Options:
 echo   1. Use the packaged zip, which already contains python\
 echo   2. Install Python 3.9+ from https://www.python.org/downloads/
 echo      (tick "Add python.exe to PATH" during setup)
-echo   3. Edit this file and set PYEXE to a full path, e.g.
-echo        set "PYEXE=C:\Python312\python.exe"
 echo.
 pause
 exit /b 1
@@ -85,20 +88,28 @@ goto :eof
 
 :run
 echo ===========================================================
-echo   WorkBuddy proxy
+echo   WorkBuddy proxy - LAN MODE
 echo.
-echo   API      : http://127.0.0.1:%PORT%/v1
-echo   Dashboard: http://127.0.0.1:%PORT%/
+echo   Port %PORT% - your API address, dashboard link and API
+echo   key are printed below once the server is up.
 echo.
-echo   Python   : %PYEXE%
+echo   If other devices cannot connect, run allow-firewall.bat
+echo   once as administrator.
 echo.
 echo   Keep this window open. Closing it stops the server.
-echo   Press Ctrl+C to stop.
 echo ===========================================================
 echo.
 
-"%PYEXE%" "%SCRIPT%" --port %PORT%
+rem Pass --api-key only when the user supplied one; otherwise the gateway
+rem mints a random key on first run and prints it below.
+if "%KEY%"=="" goto run_nokey
+"%PYEXE%" "%SCRIPT%" --port %PORT% --lan --api-key %KEY%
+goto after_run
 
+:run_nokey
+"%PYEXE%" "%SCRIPT%" --port %PORT% --lan
+
+:after_run
 echo.
 echo [server exited]
 pause

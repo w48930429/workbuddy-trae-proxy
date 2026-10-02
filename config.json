@@ -1,0 +1,67 @@
+{
+  "upstreams": {
+    "workbuddy": {
+      "enabled": true,
+      "base_url": "https://www.workbuddy.ai",
+      "chat_path": "/v2/chat/completions",
+      "models_path": "/v2/enterprises/personal/models"
+    },
+    "trae": {
+      "enabled": true,
+      "base_url": "https://trae-api-sg.mchost.guru",
+      "chat_path": "/api/ide/v1/chat",
+      "models_path": "/api/ide/v1/model_list"
+    }
+  },
+  "trae_device": {
+    "app_id": "",
+    "device_brand": "",
+    "device_cpu": "",
+    "device_id": "",
+    "device_type": "",
+    "ide_version": "",
+    "ide_version_code": "",
+    "ide_version_type": "",
+    "machine_id": "",
+    "os_version": ""
+  },
+  "failover": {
+    "enabled": true,
+    "primary": "workbuddy",
+    "fallback": "trae",
+    "retry_codes": [
+      14018,
+      429
+    ],
+    "trae_priority": "fallback"
+  },
+  "trae_accounts": {
+    "trae_499027": {
+      "credits": {
+        "total": 2009.96,
+        "general": 2009.96,
+        "work": 0.0,
+        "total_limit": 5300.0
+      },
+      "credits_at": 1790915280.6213698
+    },
+    "": {
+      "credits": {
+        "total": 4500.0,
+        "general": 4500.0,
+        "work": 0.0,
+        "total_limit": 4500.0
+      },
+      "credits_at": 1790914927.670135
+    },
+    "trae_506823": {
+      "credits": {
+        "total": 4500.0,
+        "general": 4500.0,
+        "work": 0.0,
+        "total_limit": 4500.0
+      },
+      "credits_at": 1790915280.6213698
+    }
+  }
+}

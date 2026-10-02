@@ -8,7 +8,7 @@ rem  connect. It asks for elevation itself.
 rem ===========================================================
 
 set "PORT=%~1"
-if "%PORT%"=="" set "PORT=8788"
+if "%PORT%"=="" set "PORT=28087"
 
 echo Requesting administrator rights to add a firewall rule
 echo for TCP port %PORT% ...

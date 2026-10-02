@@ -7,7 +7,7 @@ login is needed. Exposes:
     POST /v1/chat/completions     (stream=true and stream=false)
     GET  /health
 Only the Python standard library is required.
-    python3 wb_proxy.py                    # bind 127.0.0.1:8788
+    python3 wb_proxy.py                    # bind 127.0.0.1:28087
     python3 wb_proxy.py --port 9000
     python3 wb_proxy.py --api-key sk-local # require a bearer token
 Launchers: start-wb-proxy.bat / start-wb-proxy-lan.bat on Windows,
@@ -40,7 +40,88 @@ import wb_catalog
 import wb_settings
 import wb_webtools
 import wb_identity
+import dispatch  # Multi-upstream dispatcher
+import trae_route
+
+# Failover state
+_FAILOVER_ENABLED = False
+_TRAE_TOKEN = os.environ.get("TRAE_IDE_TOKEN", "")
+
+def _restore_trae_token_from_vault():
+    """启动时从 vault 恢复 Trae 凭证（OAuth 登录态持久化；环境变量不跨重启）。"""
+    global _TRAE_TOKEN
+    try:
+        import trae_vault
+        secrets = trae_vault.load_trae_secrets()
+        for uid, data in secrets.items():
+            token = data.get("token", "")
+            if token:
+                _TRAE_TOKEN = token
+                os.environ["TRAE_IDE_TOKEN"] = token
+                return token
+    except Exception:
+        return None
+    return None
+
+_TRAE_VAULT_TOKEN = _restore_trae_token_from_vault()
+
+def enable_trae_failover(token: str = None):
+    """Enable Trae failover when WorkBuddy is exhausted."""
+    global _FAILOVER_ENABLED, _TRAE_TOKEN
+    if token:
+        _TRAE_TOKEN = token
+    _FAILOVER_ENABLED = bool(_TRAE_TOKEN)
+
+def _trae_priority() -> str:
+    """读 config.failover.trae_priority：'fallback'（默认，WB 先 Trae 兜底）| 'trae_first'（Trae 优先扣分）。"""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json"), encoding="utf-8") as f:
+            return (json.load(f).get("failover") or {}).get("trae_priority", "fallback")
+    except Exception:
+        return "fallback"
+
+def _trae_first_enabled() -> bool:
+    return _FAILOVER_ENABLED and bool(_TRAE_TOKEN) and _trae_priority() == "trae_first"
+
+def try_trae_failover(model: str, payload: dict) -> tuple:
+    """Attempt request via Trae when WorkBuddy fails.
+    
+    Returns: (status_code, response_body, usage)
+    """
+    if not _FAILOVER_ENABLED or not _TRAE_TOKEN:
+        return 503, '{"error": {"message": "Trae failover not configured"}}', None
+    
+    try:
+        # Build Trae request
+        body = trae_route.build_trae_request_body(payload, model)
+        headers = trae_route.trae_headers(_TRAE_TOKEN)
+        
+        url = f"{trae_route.TRAE_BASE_URL}/api/ide/v1/chat"
+        req = urllib.request.Request(url, data=json.dumps(body).encode(),
+                                     headers=headers, method="POST")
+
+        # trae 域名区域封锁：显式直连（绕过系统代理），走本机中国出口
+        direct_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with direct_opener.open(req, timeout=120) as resp:
+            data = json.loads(resp.read().decode())
+            return 200, json.dumps(data), None
+            
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode() if e.fp else str(e)
+        return e.code, detail, None
+    except Exception as e:
+        return 500, str(e), None
 IS_WINDOWS = os.name == "nt"
+
+# Load multi-upstream config
+CONFIG_PATH = os.environ.get("WB_PROXY_CONFIG", os.path.join(os.path.dirname(__file__), "config.json"))
+PROXY_CONFIG = {}
+if os.path.exists(CONFIG_PATH):
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            PROXY_CONFIG = json.load(f)
+    except Exception:
+        PROXY_CONFIG = {}
 def launcher_hint(port):
     """Platform-appropriate launcher command for starting on another port."""
     if IS_WINDOWS:
@@ -163,7 +244,7 @@ CORS_PATH_PREFIXES = ("/v1", "/chat", "/completions", "/models", "/responses")
 # Management paths that happen to live under /v1 must not be treated as API:
 # /v1/usage reports account-level spend and is gated by the panel session.
 MANAGEMENT_PATH_PREFIXES = ("/v1/usage", "/usage", "/accounts", "/settings",
-                            "/tasks", "/scheduler", "/panel", "/logs")
+                            "/tasks", "/scheduler", "/panel", "/logs", "/trae")
 def cors_origin_allowed(path):
     """True when the OpenAI-style API path should advertise CORS."""
     path = (path or "").split("?")[0]
@@ -5510,6 +5591,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_logs_export()
         if path == "/settings/reveal":
             return self._get_settings_reveal(query)
+        if path.startswith("/trae/") and self._authorized():
+            return self._handle_trae(path, {})
         return self._error(404, "not found", "invalid_request_error")
     def _get_dashboard(self):
         return self._dashboard()
@@ -6146,6 +6229,315 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/accounts/import":
             return self._route_accounts_import(payload)
         return self._error(404, "unknown account endpoint", "invalid_request_error")
+
+    def _handle_trae(self, path, payload):
+        print("[DEBUG] _handle_trae called, path=" + path)
+        """Trae token management endpoints."""
+        if path == "/trae/token":
+            if self.command == "GET":
+                return self._route_trae_token_get()
+            if self.command == "POST":
+                return self._route_trae_token_set(payload)
+        if path == "/trae/credits":
+            if self.command == "GET":
+                return self._route_trae_credits()
+        if path == "/trae/accounts":
+            if self.command == "GET":
+                return self._route_trae_accounts_list()
+            if self.command == "POST":
+                return self._route_trae_accounts_import(payload)
+        if path == "/trae/accounts/export":
+            if self.command == "GET":
+                return self._route_trae_accounts_export()
+        if path == "/trae/enabled":
+            return self._route_trae_set_enabled(payload)
+        if path == "/trae/enabled/all":
+            return self._route_trae_set_enabled_all(payload)
+        if path == "/trae/priority":
+            if self.command == "GET":
+                return self._json(200, {"ok": True, "priority": _trae_priority(),
+                                        "failover_enabled": _FAILOVER_ENABLED})
+            if self.command == "POST":
+                new_p = str((payload or {}).get("priority", "fallback"))
+                if new_p not in ("fallback", "trae_first"):
+                    return self._error(400, "priority must be 'fallback' or 'trae_first'", "invalid_request_error")
+                try:
+                    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+                    with open(cfg_path, encoding="utf-8") as f:
+                        cfg = json.load(f)
+                except Exception:
+                    cfg = {}
+                cfg.setdefault("failover", {})["enabled"] = True
+                cfg["failover"]["trae_priority"] = new_p
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, indent=2, ensure_ascii=False)
+                return self._json(200, {"ok": True, "priority": new_p})
+        if path == "/trae/checkin":
+            return self._route_trae_checkin()
+        if path == "/trae/account/delete":
+            return self._route_trae_account_delete(payload)
+        if path == "/trae/oauth/start":
+            return self._route_trae_oauth_start()
+        if path == "/trae/oauth/callback":
+            return self._route_trae_oauth_callback(payload)
+        return self._error(404, "unknown trae endpoint", "invalid_request_error")
+
+    def _route_trae_accounts_list(self):
+        """Trae 多账号列表（vault + 状态 + 积分）。"""
+        try:
+            import trae_accounts
+            return self._json(200, {"ok": True, "accounts": trae_accounts.list_accounts()})
+        except Exception as e:
+            return self._error(500, f"trae accounts list failed: {e}")
+
+    def _route_trae_accounts_export(self):
+        try:
+            import trae_accounts
+            return self._json(200, {"ok": True, "accounts": trae_accounts.export_accounts()})
+        except Exception as e:
+            return self._error(500, f"trae export failed: {e}")
+
+    def _route_trae_accounts_import(self, payload):
+        try:
+            import trae_accounts
+            accounts = payload.get("accounts") or []
+            if not isinstance(accounts, list) or not accounts:
+                return self._error(400, "accounts 数组为空", "invalid_request_error")
+            n = trae_accounts.import_accounts_batch(accounts)
+            return self._json(200, {"ok": True, "imported": n})
+        except Exception as e:
+            return self._error(500, f"trae import failed: {e}")
+
+    def _route_trae_set_enabled(self, payload):
+        try:
+            import trae_accounts
+            uid = str(payload.get("user_id", ""))
+            if not uid:
+                return self._error(400, "user_id required", "invalid_request_error")
+            trae_accounts.set_enabled(uid, bool(payload.get("enabled", True)))
+            return self._json(200, {"ok": True})
+        except Exception as e:
+            return self._error(500, f"set enabled failed: {e}")
+
+    def _route_trae_set_enabled_all(self, payload):
+        try:
+            import trae_accounts
+            n = trae_accounts.set_all_enabled(bool(payload.get("enabled", True)))
+            return self._json(200, {"ok": True, "changed": n})
+        except Exception as e:
+            return self._error(500, f"set all enabled failed: {e}")
+
+    def _route_trae_checkin(self):
+        try:
+            import trae_accounts
+            uid = str((self._read_payload() or {}).get("user_id", "") or "")
+            if uid:
+                return self._json(200, {"ok": True, "results": trae_accounts.checkin_one(uid)})
+            return self._json(200, {"ok": True, "results": trae_accounts.checkin_all()})
+        except Exception as e:
+            return self._error(500, f"trae checkin failed: {e}")
+
+    def _route_trae_account_delete(self, payload):
+        try:
+            import trae_accounts
+            uid = str(payload.get("user_id", ""))
+            if not uid or not trae_accounts.delete_account(uid):
+                return self._error(404, "account not found", "invalid_request_error")
+            return self._json(200, {"ok": True})
+        except Exception as e:
+            return self._error(500, f"trae account delete failed: {e}")
+
+    def _route_trae_token_get(self):
+        """Return current Trae token status + account info from vault."""
+        token = os.environ.get("TRAE_IDE_TOKEN", "") or _TRAE_TOKEN
+        device = {}
+        for k in ["TRAE_APP_ID", "TRAE_DEVICE_BRAND", "TRAE_DEVICE_CPU", "TRAE_DEVICE_ID",
+                  "TRAE_DEVICE_TYPE", "TRAE_IDE_VERSION", "TRAE_IDE_VERSION_CODE",
+                  "TRAE_IDE_VERSION_TYPE", "TRAE_MACHINE_ID", "TRAE_OS_VERSION"]:
+            if os.environ.get(k):
+                device[k.lower().replace("trae_", "x-")] = os.environ.get(k)
+        if token:
+            accounts = []
+            try:
+                import trae_vault
+                for uid, data in trae_vault.load_trae_secrets().items():
+                    exp = data.get("expires_at", 0)
+                    accounts.append({
+                        "user_id": uid,
+                        "user_name": data.get("user_name", "") or ("用户%s" % uid[-10:] if uid else "Trae 账号"),
+                        "avatar": data.get("avatar", ""),
+                        "expires_at": exp,
+                        "expired": bool(exp and exp < time.time()),
+                    })
+            except Exception as exc:
+                log("trae vault read failed: %s" % exc)
+            top_exp = accounts[0].get("expires_at", 0) if accounts else 0
+            return self._json(200, {"token": "***", "device": device, "status": "ok",
+                                    "user_name": accounts[0]["user_name"] if accounts else "",
+                                    "expires_at": top_exp,
+                                    "accounts": accounts})
+        else:
+            return self._json(200, {"token": "", "device": device, "status": "not_configured"})
+
+    def _route_trae_credits(self):
+        """Trae 账号剩余积分（对齐 TraeWorkAssistant ide_user_ent_usage 口径）。"""
+        try:
+            import trae_credits, trae_icube, trae_vault
+            secrets = trae_vault.load_trae_secrets()
+            if not secrets:
+                return self._error(400, "Trae 未登录（vault 为空）", "invalid_request_error")
+            creds = trae_icube.get_device_credentials()
+            cred = creds[0] if creds else None
+            accounts = []
+            for uid, data in secrets.items():
+                jwt = data.get("token", "")
+                entry = {
+                    "user_id": uid,
+                    "user_name": data.get("user_name", "") or ("用户%s" % uid[-10:] if uid else "Trae 账号"),
+                    "expires_at": data.get("expires_at", 0),
+                }
+                if jwt and cred:
+                    try:
+                        stats = trae_credits.query_credits(jwt, cred.device_id, cred.machine_id)
+                        entry["credits"] = {k: stats[k] for k in ("total", "general", "work", "total_limit")}
+                        entry["membership_expire"] = stats.get("membership_expire")
+                    except Exception as exc:
+                        entry["credits_error"] = str(exc)[:150]
+                accounts.append(entry)
+            return self._json(200, {"ok": True, "accounts": accounts})
+        except Exception as e:
+            return self._error(500, f"credits query failed: {e}")
+
+    def _route_trae_token_set(self, payload):
+        """Set Trae token (stored in config.json)."""
+        token = payload.get("token", "")
+        config_path = os.path.join(os.path.dirname(__file__), "config.json")
+        config = {}
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+            except:
+                pass
+        config.setdefault("trae_device", {})
+        config["upstreams"].setdefault("trae", {})
+        config["upstreams"]["trae"]["enabled"] = bool(token)
+        config["trae_device"]["x-ide-token"] = token
+        # Also update device fields if provided
+        for k, v in payload.items():
+            if k.startswith("x-"):
+                config["trae_device"][k] = v
+        try:
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+            # Update environment variable for current process
+            if token:
+                os.environ["TRAE_IDE_TOKEN"] = token
+            return self._json(200, {"ok": True})
+        except Exception as e:
+            return self._error(500, f"failed to save config: {e}")
+
+    def _route_trae_oauth_start(self):
+        """Start Trae OAuth login flow."""
+        try:
+            import trae_oauth
+            import trae_vault
+            
+            # 生成设备信息
+            device_info = {
+                "device_id": os.environ.get("TRAE_DEVICE_ID", ""),
+                "machine_id": os.environ.get("TRAE_MACHINE_ID", ""),
+                "hostname": os.environ.get("COMPUTERNAME", "Windows-PC"),
+                "os_version": "Windows 11",
+            }
+            
+            # 生成登录 URL
+            login_url, state = trae_oauth.generate_oauth_login_url(device_info)
+            
+            # 启动回调服务器（后台线程）
+            import threading
+            def start_server():
+                trae_oauth.start_callback_server()
+            
+            thread = threading.Thread(target=start_server, daemon=True)
+            thread.start()
+            
+            return self._json(200, {
+                "url": login_url,
+                "state": state,
+                "callback_port": trae_oauth.OAUTH_LOOPBACK_PORT,
+            })
+        except Exception as e:
+            return self._error(500, f"OAuth start failed: {e}")
+
+    def _route_trae_oauth_callback(self, payload):
+        """Handle OAuth callback and exchange token."""
+        try:
+            import trae_oauth
+            import trae_vault
+            
+            # 等待回调
+            callback = trae_oauth.wait_for_callback(timeout=180)
+            if not callback:
+                return self._error(400, "OAuth callback timeout")
+            
+            # 新协议：authCode → exchange_auth_code（DeviceInfo 变体链）
+            # 旧形态兜底：refresh_token → exchange_token
+            if callback.get("auth_code"):
+                result = trae_oauth.exchange_auth_code(
+                    callback["auth_code"],
+                    callback.get("pkce_verifier", ""),
+                    os.environ.get("TRAE_DEVICE_ID", ""),
+                    callback.get("host") or trae_oauth.OAUTH_DEFAULT_HOST,
+                )
+                result.setdefault("user_id", callback.get("user_id", ""))
+            elif callback.get("refresh_token"):
+                device_info = {
+                    "device_id": os.environ.get("TRAE_DEVICE_ID", ""),
+                    "machine_id": os.environ.get("TRAE_MACHINE_ID", ""),
+                    "hostname": os.environ.get("COMPUTERNAME", "Windows-PC"),
+                    "os_version": "Windows 11",
+                }
+                result = trae_oauth.exchange_token(callback["refresh_token"], device_info)
+                if not result:
+                    return self._error(500, "Token exchange failed")
+            else:
+                return self._error(400, "OAuth callback had neither authCode nor refreshToken")
+            
+            # 保存到 vault
+            vault_data = trae_vault.load_trae_secrets()
+            vault_data[result["user_id"]] = {
+                "token": result["token"],
+                "refresh_token": result.get("refresh_token", ""),
+                "user_name": callback.get("user_name", ""),
+                "avatar": callback.get("avatar", ""),
+                "expires_at": result.get("expires_at", 0),
+            }
+            trae_vault.save_trae_secrets(vault_data)
+            
+            # 更新环境变量
+            os.environ["TRAE_IDE_TOKEN"] = result["token"]
+            
+            # 更新 config.json
+            config_path = os.path.join(os.path.dirname(__file__), "config.json")
+            config = {}
+            if os.path.exists(config_path):
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+            config.setdefault("trae_device", {})
+            config["upstreams"].setdefault("trae", {})
+            config["upstreams"]["trae"]["enabled"] = True
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+            
+            return self._json(200, {
+                "ok": True,
+                "user_id": result["user_id"],
+                "user_name": callback.get("user_name", ""),
+            })
+        except Exception as e:
+            return self._error(500, f"OAuth callback failed: {e}")
+
     def _route_accounts_product(self, payload):
         """切換出站身分（cli <-> workbuddy），並即時回傳結果。
 
@@ -6637,6 +7029,20 @@ class Handler(BaseHTTPRequestHandler):
             record_error(model, exc.code, detail,
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None))
+            # Trae failover on 14018 (credit exhausted)
+            if _FAILOVER_ENABLED and exc.code == 400 and "14018" in detail:
+                log("WorkBuddy exhausted (14018), failing over to Trae...")
+                status, body, usage = try_trae_failover(model, payload)
+                if status == 200:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(body.encode("utf-8"))
+                    return
+                else:
+                    log("Trae failover failed: HTTP %s" % status)
+                    # Add Chinese hint
+                    detail = "【额度已用完】上游 CodeBuddy 账号的 credit 已耗尽（错误码 14018）。"
             return self._error(exc.code, upstream_error_message(exc.code, detail))
         except Exception as exc:
             message = str(exc)
@@ -6801,6 +7207,7 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/panel/login", "/panel/logout", "/panel/password"):
             return self._handle_panel(path)
         if self._is_panel_route(path) and not self._panel_ok():
+
             return self._error(401, "panel password required", "invalid_request_error")
         is_account_route = (
             path.startswith("/accounts/")
@@ -6808,10 +7215,12 @@ class Handler(BaseHTTPRequestHandler):
             or path.startswith("/tasks")
             or path.startswith("/scheduler")
             or path.startswith("/logs")
+            or path.startswith("/trae/")
         )
         if not is_account_route and path not in ("/v1/chat/completions", "/chat/completions",
                                                 "/v1/completions", "/completions",
                                                 "/v1/responses", "/responses"):
+            print(f"[DEBUG] 404: path={path}, is_account_route={is_account_route}")
             return self._error(404, "not found", "invalid_request_error")
         if not self._authorized():
             return
@@ -6819,6 +7228,8 @@ class Handler(BaseHTTPRequestHandler):
         if payload is None:
             return
         if is_account_route:
+            if path.startswith("/trae/"):
+                return self._handle_trae(path, payload)
             return self._handle_accounts(path, payload)
         # Both OpenAI-shaped routes below can hold a thread for up to 600s.
         # Take a slot for the duration; release it in finally so every early
@@ -6877,6 +7288,18 @@ class Handler(BaseHTTPRequestHandler):
             key_blocked = self._key_model_error(payload.get("model"))
             if key_blocked:
                 return self._error(400, key_blocked, "invalid_request_error")
+            # Trae 优先模式（trae_first）：先打 Trae 扣 Trae 积分，非流式请求成功即返回；
+            # 失败或流式请求落回 WorkBuddy 正常链路
+            if _trae_first_enabled() and not want_stream:
+                log("trae_priority=trae_first, routing to Trae first: %s" % model)
+                status, body, usage = try_trae_failover(model, payload)
+                if status == 200:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(body.encode("utf-8"))
+                    return
+                log("Trae-first attempt failed (HTTP %s), falling back to WorkBuddy" % status)
             upstream, account = open_upstream(payload, session_key=session_key, target_realm=req_realm)
         except ContentRejected as exc:
             record_error(model, 403, exc.detail[:200],
@@ -6888,12 +7311,39 @@ class Handler(BaseHTTPRequestHandler):
             record_error(model, 429, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None))
+            # Trae failover on 14018 (credit exhausted)
+            if _FAILOVER_ENABLED and ("14018" in str(exc) or "credit" in str(exc).lower()):
+                log("WorkBuddy exhausted (14018), failing over to Trae...")
+                status, body, usage = try_trae_failover(model, payload)
+                if status == 200:
+                    # Success via Trae
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(body.encode("utf-8"))
+                    return
+                else:
+                    log("Trae failover failed: HTTP %s" % status)
             return self._rate_limited(exc)
         except urllib.error.HTTPError as exc:
             detail = exc.read(600).decode("utf-8", "replace")
             record_error(model, exc.code, detail,
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None))
+            # Trae failover on 14018 (credit exhausted)
+            if _FAILOVER_ENABLED and exc.code == 400 and "14018" in detail:
+                log("WorkBuddy exhausted (14018), failing over to Trae...")
+                status, body, usage = try_trae_failover(model, payload)
+                if status == 200:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(body.encode("utf-8"))
+                    return
+                else:
+                    log("Trae failover failed: HTTP %s" % status)
+                    # Add Chinese hint
+                    detail = "【额度已用完】上游 CodeBuddy 账号的 credit 已耗尽（错误码 14018）。"
             return self._error(exc.code, upstream_error_message(exc.code, detail))
         except Exception as exc:
             message = str(exc)
@@ -7022,6 +7472,8 @@ def main():
     if _probe_running_instance(args):
         return
     api_key_generated = _bootstrap_runtime(args)
+    if _TRAE_TOKEN:
+        enable_trae_failover()
     if _report_first_run(args):
         return
     _log_startup_summary(args, api_key_generated)
@@ -7031,7 +7483,7 @@ def _parse_cli_args():
     ap = argparse.ArgumentParser(description="WorkBuddy (workbuddy.ai) -> OpenAI-compatible proxy")
     ap.add_argument("--info", help="path to the WorkBuddy *.info credential file")
     ap.add_argument("--host", default=os.environ.get("HOST") or "127.0.0.1")
-    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT") or "8788"))
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT") or "28087"))
     ap.add_argument("--lan", action="store_true",
                     help="listen on every interface so other devices on the LAN can "
                          "reach it (implies --host 0.0.0.0 and forces an api key)")
