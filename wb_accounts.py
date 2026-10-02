@@ -1364,6 +1364,19 @@ def desktop_credential_candidates():
             path = os.path.join(base, name)
             if os.path.isfile(path) and (path, realm) not in out:
                 out.append((path, realm))
+        # 客户端重新登录时会把国际版凭据写成带时间戳的变体名
+        # workbuddy-desktop-ai.<时间戳>.<pid>.<uuid>.info，精确名匹配不到，
+        # 导致 intl 账号扫描永远为空。这里兜底认领这类文件；时间戳是
+        # ISO 格式，字典序即时间序，存在多份时取最新的一份。
+        # .logged-out 结尾的是退出登录残留，天然被 .info 后缀过滤掉。
+        stamped = sorted(
+            name for name in os.listdir(base)
+            if name.startswith("workbuddy-desktop-ai.") and name.endswith(".info")
+        )
+        if stamped and "workbuddy-desktop-ai.info" not in stamped:
+            path = os.path.join(base, stamped[-1])
+            if (path, "intl") not in out:
+                out.append((path, "intl"))
     return out
 
 
