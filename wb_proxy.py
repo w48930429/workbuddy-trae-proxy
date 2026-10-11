@@ -72,13 +72,22 @@ def _restore_trae_token_from_vault():
 
 _TRAE_VAULT_TOKEN = _restore_trae_token_from_vault()
 
+def _failover_enabled_config() -> bool:
+    """读取 config.json 中的 failover.enabled 全局开关。"""
+    try:
+        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        with open(cfg_path, encoding="utf-8") as f:
+            return bool((json.load(f).get("failover") or {}).get("enabled", False))
+    except Exception:
+        return False
+
 def enable_trae_failover(token: str = None):
     """Enable Trae failover when WorkBuddy is exhausted."""
     global _FAILOVER_ENABLED, _TRAE_TOKEN
     if token:
         _TRAE_TOKEN = token
-    _FAILOVER_ENABLED = bool(_TRAE_TOKEN)
-
+    # 严格读取 config.json 的 failover.enabled 开关，关闭时不自动降级切换
+    _FAILOVER_ENABLED = bool(_TRAE_TOKEN) and _failover_enabled_config()
 def _trae_priority() -> str:
     """读 config.failover.trae_priority：'fallback'（默认，WB 先 Trae 兜底）| 'trae_first'（Trae 优先扣分）。"""
     try:
@@ -7842,19 +7851,24 @@ class Handler(BaseHTTPRequestHandler):
             # WorkBuddy，而流式正是 CLI 的默认形态——面板写着「Trae 优先」，实际
             # 扣的始终是 WorkBuddy 积分。
             if _trae_first_enabled():
-                # Trae 侧若刚被限流则直接跳过：trae_first 语义是"每跳先打 Trae"，
-                # 不跳过就会每个请求都先吃一次限流墙的往返（约 1s）再回落 WorkBuddy。
+                # Trae 优先模式（trae_first）：打 Trae 扣 Trae 积分。
+                # 【策略变更】已关闭 WorkBuddy 与 Trae 额度不足/限流时的自动互相转换。
+                # Trae 若不可用、限流或失败，直接向客户端返回 Trae 自身报错，不再自动回落到 WorkBuddy 消耗 WorkBuddy 额度。
                 _tw = _trae_model_cooldown_wait(model)
                 if _tw > 0:
-                    log("trae_first 跳过：Trae 侧 '%s' 仍在限流冷却（剩 %ds），直接走 WorkBuddy"
+                    log("Trae 侧 '%s' 限流冷却中（剩 %ds），已关闭自动回落 WorkBuddy"
                         % (model, int(_tw)))
+                    return self._error(429, "【Trae 限流冷却中】Trae 侧 '%s' 仍在限流冷却（剩 %ds），已关闭自动切换到 WorkBuddy。" % (model, int(_tw)))
                 else:
-                    log("trae_priority=trae_first, routing to Trae first: %s (stream=%s)"
+                    log("trae_priority=trae_first, routing to Trae: %s (stream=%s)"
                         % (model, want_stream))
                     if want_stream:
                         if self._try_trae_failover_stream(model, payload):
                             return
-                        log("Trae stream unavailable, falling back to WorkBuddy")
+                        # --- 原回落 WorkBuddy 逻辑注释开始 ---
+                        # log("Trae stream unavailable, falling back to WorkBuddy")
+                        # --- 原回落 WorkBuddy 逻辑注释结束 ---
+                        return self._error(502, "【Trae 流式请求不可用或额度不足】已关闭自动切换至 WorkBuddy 消耗额度。")
                     else:
                         status, body, usage = try_trae_failover(model, payload)
                         if status == 200:
@@ -7864,11 +7878,17 @@ class Handler(BaseHTTPRequestHandler):
                             self.wfile.write(body.encode("utf-8"))
                             return
                         if status == 429:
-                            # Trae 侧限流：分类修复后这里能收到真正的 429
-                            # （此前被错映射成 502，无法记账），记冷却避免每跳白撞。
                             _note_trae_model_cooldown(model, 60.0)
                             log("Trae 侧 '%s' 限流（HTTP 429），记 60s 冷却" % model)
-                        log("Trae-first attempt failed (HTTP %s), falling back to WorkBuddy" % status)
+                        # --- 原回落 WorkBuddy 逻辑注释开始 ---
+                        # log("Trae-first attempt failed (HTTP %s), falling back to WorkBuddy" % status)
+                        # --- 原回落 WorkBuddy 逻辑注释结束 ---
+                        self.send_response(status if status else 502)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        err_text = body if body else json.dumps({"error": {"message": "【Trae 请求失败或额度不足】已关闭自动切换至 WorkBuddy。"}})
+                        self.wfile.write(err_text.encode("utf-8"))
+                        return
             upstream, account = open_upstream(payload, session_key=session_key, target_realm=req_realm)
         except ContentRejected as exc:
             record_error(model, 403, exc.detail[:200],

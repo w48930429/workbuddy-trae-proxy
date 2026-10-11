@@ -31,15 +31,12 @@
     "os_version": ""
   },
   "failover": {
-    "enabled": true,
+    "enabled": false,
     "primary": "workbuddy",
-    "fallback": "trae",
-    "retry_codes": [
-      14018,
-      429
-    ],
-    "trae_priority": "trae_first",
-    "qoder_fallback": true
+    "fallback": "none",
+    "retry_codes": [],
+    "trae_priority": "fallback",
+    "qoder_fallback": false
   },
   "trae_accounts": {
     "trae_499027": {
