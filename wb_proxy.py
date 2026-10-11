@@ -7472,30 +7472,35 @@ class Handler(BaseHTTPRequestHandler):
             record_error(model, exc.code, detail,
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None))
-            # Trae failover on 14018 (credit exhausted)
-            if _FAILOVER_ENABLED and exc.code == 400 and "14018" in detail:
-                log("WorkBuddy exhausted (14018), failing over to Trae...")
-                status, body, usage = try_trae_failover(model, payload)
-                if status == 200:
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.end_headers()
-                    self.wfile.write(body.encode("utf-8"))
-                    return
-                else:
-                    log("Trae failover failed: HTTP %s" % status)
-                    if _qoder_fallback_enabled() and _qoder_enabled():
-                        log("Trying Qoder as final fallback...")
-                        q_status, q_body, _ = try_qoder_failover(payload)
-                        if q_status == 200:
-                            self.send_response(200)
-                            self.send_header("Content-Type", "application/json")
-                            self.end_headers()
-                            self.wfile.write(q_body.encode("utf-8"))
-                            return
-                        log("Qoder fallback also failed: HTTP %s" % q_status)
-                    # Add Chinese hint
-                    detail = "【额度已用完】上游 CodeBuddy 账号的 credit 已耗尽（错误码 14018）。"
+            # 【策略变更】WorkBuddy 额度耗尽（错误码 14018）后，不再自动降级切换到 Trae/Qoder 消耗额度；
+            # 保持各渠道额度消耗独立可控，直接向客户端返回可读的中文额度耗尽报错。
+            # --- 原 Trae/Qoder 自动降级逻辑注释开始 ---
+            # if _FAILOVER_ENABLED and exc.code == 400 and "14018" in detail:
+            #     log("WorkBuddy exhausted (14018), failing over to Trae...")
+            #     status, body, usage = try_trae_failover(model, payload)
+            #     if status == 200:
+            #         self.send_response(200)
+            #         self.send_header("Content-Type", "application/json")
+            #         self.end_headers()
+            #         self.wfile.write(body.encode("utf-8"))
+            #         return
+            #     else:
+            #         log("Trae failover failed: HTTP %s" % status)
+            #         if _qoder_fallback_enabled() and _qoder_enabled():
+            #             log("Trying Qoder as final fallback...")
+            #             q_status, q_body, _ = try_qoder_failover(payload)
+            #             if q_status == 200:
+            #                 self.send_response(200)
+            #                 self.send_header("Content-Type", "application/json")
+            #                 self.end_headers()
+            #                 self.wfile.write(q_body.encode("utf-8"))
+            #                 return
+            #             log("Qoder fallback also failed: HTTP %s" % q_status)
+            #         # Add Chinese hint
+            #         detail = "【额度已用完】上游 CodeBuddy 账号的 credit 已耗尽（错误码 14018）。"
+            # --- 原 Trae/Qoder 自动降级逻辑注释结束 ---
+            if exc.code == 400 and "14018" in detail:
+                detail = "【额度已用完】上游 CodeBuddy/WorkBuddy 账号的 credit 已耗尽（错误码 14018）。"
             return self._error(exc.code, upstream_error_message(exc.code, detail))
         except Exception as exc:
             message = str(exc)
@@ -7875,70 +7880,78 @@ class Handler(BaseHTTPRequestHandler):
             record_error(model, 429, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None))
-            # Trae failover on 14018 (credit exhausted)
-            if _FAILOVER_ENABLED and ("14018" in str(exc) or "credit" in str(exc).lower()):
-                log("WorkBuddy exhausted (14018), failing over to Trae...")
-                # 流式客户端必须拿到 SSE 帧；聚合 JSON 会让它一直等流结束。
-                if want_stream:
-                    if self._try_trae_failover_stream(model, payload):
-                        return
-                    log("Trae stream unavailable, reporting 429")
-                    return self._rate_limited(exc)
-                status, body, usage = try_trae_failover(model, payload)
-                if status == 200:
-                    # Success via Trae
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.end_headers()
-                    self.wfile.write(body.encode("utf-8"))
-                    return
-                else:
-                    log("Trae failover failed: HTTP %s" % status)
-                    if _qoder_fallback_enabled() and _qoder_enabled():
-                        log("Trying Qoder as final fallback...")
-                        q_status, q_body, _ = try_qoder_failover(payload)
-                        if q_status == 200:
-                            self.send_response(200)
-                            self.send_header("Content-Type", "application/json")
-                            self.end_headers()
-                            self.wfile.write(q_body.encode("utf-8"))
-                            return
-                        log("Qoder fallback also failed: HTTP %s" % q_status)
+            # 【策略变更】WorkBuddy 额度耗尽（错误码 14018 或 credit 耗尽）后，不再自动降级切换到 Trae/Qoder 消耗额度；
+            # 保持各渠道额度消耗独立可控，直接向客户端返回限流/额度耗尽提示。
+            # --- 原 Trae/Qoder 自动降级逻辑注释开始 ---
+            # if _FAILOVER_ENABLED and ("14018" in str(exc) or "credit" in str(exc).lower()):
+            #     log("WorkBuddy exhausted (14018), failing over to Trae...")
+            #     # 流式客户端必须拿到 SSE 帧；聚合 JSON 会让它一直等流结束。
+            #     if want_stream:
+            #         if self._try_trae_failover_stream(model, payload):
+            #             return
+            #         log("Trae stream unavailable, reporting 429")
+            #         return self._rate_limited(exc)
+            #     status, body, usage = try_trae_failover(model, payload)
+            #     if status == 200:
+            #         # Success via Trae
+            #         self.send_response(200)
+            #         self.send_header("Content-Type", "application/json")
+            #         self.end_headers()
+            #         self.wfile.write(body.encode("utf-8"))
+            #         return
+            #     else:
+            #         log("Trae failover failed: HTTP %s" % status)
+            #         if _qoder_fallback_enabled() and _qoder_enabled():
+            #             log("Trying Qoder as final fallback...")
+            #             q_status, q_body, _ = try_qoder_failover(payload)
+            #             if q_status == 200:
+            #                 self.send_response(200)
+            #                 self.send_header("Content-Type", "application/json")
+            #                 self.end_headers()
+            #                 self.wfile.write(q_body.encode("utf-8"))
+            #                 return
+            #             log("Qoder fallback also failed: HTTP %s" % q_status)
+            # --- 原 Trae/Qoder 自动降级逻辑注释结束 ---
             return self._rate_limited(exc)
         except urllib.error.HTTPError as exc:
             detail = exc.read(600).decode("utf-8", "replace")
             record_error(model, exc.code, detail,
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None))
-            # Trae failover on 14018 (credit exhausted)
-            if _FAILOVER_ENABLED and exc.code == 400 and "14018" in detail:
-                log("WorkBuddy exhausted (14018), failing over to Trae...")
-                if want_stream:
-                    if self._try_trae_failover_stream(model, payload):
-                        return
-                    log("Trae stream unavailable, reporting upstream error")
-                    return self._error(exc.code, upstream_error_message(exc.code, detail))
-                status, body, usage = try_trae_failover(model, payload)
-                if status == 200:
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.end_headers()
-                    self.wfile.write(body.encode("utf-8"))
-                    return
-                else:
-                    log("Trae failover failed: HTTP %s" % status)
-                    if _qoder_fallback_enabled() and _qoder_enabled():
-                        log("Trying Qoder as final fallback...")
-                        q_status, q_body, _ = try_qoder_failover(payload)
-                        if q_status == 200:
-                            self.send_response(200)
-                            self.send_header("Content-Type", "application/json")
-                            self.end_headers()
-                            self.wfile.write(q_body.encode("utf-8"))
-                            return
-                        log("Qoder fallback also failed: HTTP %s" % q_status)
-                    # Add Chinese hint
-                    detail = "【额度已用完】上游 CodeBuddy 账号的 credit 已耗尽（错误码 14018）。"
+            # 【策略变更】WorkBuddy 额度耗尽（错误码 14018）后，不再自动降级切换到 Trae/Qoder 消耗额度；
+            # 保持各渠道额度消耗独立可控，直接向客户端返回明确的额度耗尽提示。
+            # --- 原 Trae/Qoder 自动降级逻辑注释开始 ---
+            # if _FAILOVER_ENABLED and exc.code == 400 and "14018" in detail:
+            #     log("WorkBuddy exhausted (14018), failing over to Trae...")
+            #     if want_stream:
+            #         if self._try_trae_failover_stream(model, payload):
+            #             return
+            #         log("Trae stream unavailable, reporting upstream error")
+            #         return self._error(exc.code, upstream_error_message(exc.code, detail))
+            #     status, body, usage = try_trae_failover(model, payload)
+            #     if status == 200:
+            #         self.send_response(200)
+            #         self.send_header("Content-Type", "application/json")
+            #         self.end_headers()
+            #         self.wfile.write(body.encode("utf-8"))
+            #         return
+            #     else:
+            #         log("Trae failover failed: HTTP %s" % status)
+            #         if _qoder_fallback_enabled() and _qoder_enabled():
+            #             log("Trying Qoder as final fallback...")
+            #             q_status, q_body, _ = try_qoder_failover(payload)
+            #             if q_status == 200:
+            #                 self.send_response(200)
+            #                 self.send_header("Content-Type", "application/json")
+            #                 self.end_headers()
+            #                 self.wfile.write(q_body.encode("utf-8"))
+            #                 return
+            #             log("Qoder fallback also failed: HTTP %s" % q_status)
+            #         # Add Chinese hint
+            #         detail = "【额度已用完】上游 CodeBuddy 账号的 credit 已耗尽（错误码 14018）。"
+            # --- 原 Trae/Qoder 自动降级逻辑注释结束 ---
+            if exc.code == 400 and "14018" in detail:
+                detail = "【额度已用完】上游 CodeBuddy/WorkBuddy 账号的 credit 已耗尽（错误码 14018）。"
             return self._error(exc.code, upstream_error_message(exc.code, detail))
         except Exception as exc:
             message = str(exc)
