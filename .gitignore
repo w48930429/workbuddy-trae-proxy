@@ -36,6 +36,7 @@ trae_secrets.json
 _ctx*.txt
 _trae-api/
 qoder_data/
+qoder/qoder_data/
 
 # ── Antigravity 扩展：依赖与敏感配置（绝不入库）──
 antigravity-proxy/node_modules/

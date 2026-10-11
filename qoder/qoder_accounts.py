@@ -18,7 +18,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -73,6 +73,7 @@ class Account:
     created_at: str = ""
     last_used: Optional[str] = None
     active: bool = False
+    enabled: bool = True
     sort_order: int = 0
 
 
@@ -140,7 +141,10 @@ def list_accounts() -> list:
             continue
         try:
             with open(os.path.join(d, name), "r", encoding="utf-8") as f:
-                out.append(Account(**json.load(f)))
+                raw_data = json.load(f)
+                valid_fields = {f.name for f in fields(Account)}
+                filtered = {k: v for k, v in raw_data.items() if k in valid_fields}
+                out.append(Account(**filtered))
         except (OSError, ValueError, TypeError):
             continue
     out.sort(key=lambda a: a.sort_order)
@@ -194,6 +198,14 @@ def get_account(account_id: str) -> Optional[Account]:
         if a.id == account_id:
             return a
     return None
+
+def set_enabled(account_id: str, enabled: bool) -> bool:
+    acct = get_account(account_id)
+    if not acct:
+        return False
+    acct.enabled = bool(enabled)
+    save_account(acct)
+    return True
 
 
 def set_active(account_id: str) -> None:

@@ -3851,8 +3851,15 @@ function renderQoderAccounts(usage){
     return;
   }
   let html = '<div class="table-wrap"><table class="data-cards"><thead><tr>'
-    + '<th>账号</th><th>区域</th><th>Plan</th><th>用户额度</th><th>附加额度</th>'
-    + '<th>请求</th><th>总 Token</th>'
+    + '<th style="text-align:left">账号</th>'
+    + '<th style="text-align:center;width:80px">状态</th>'
+    + '<th style="text-align:center;width:76px">区域</th>'
+    + '<th style="text-align:center">Plan</th>'
+    + '<th style="text-align:center">用户额度</th>'
+    + '<th style="text-align:center">附加额度</th>'
+    + '<th style="text-align:right">请求</th>'
+    + '<th style="text-align:right">总 Token</th>'
+    + '<th style="text-align:center;width:160px">操作</th>'
     + '</tr></thead><tbody>';
   qoderAccountsCache.forEach(a => {
     const q = qoderQuotaCache[a.id];
@@ -3861,14 +3868,28 @@ function renderQoderAccounts(usage){
     const userTot = q ? fmt(q.user_total) : '—';
     const addonRem = q ? fmt(q.addon_remaining) : '—';
     const addonTot = q ? fmt(q.addon_total) : '—';
+    const isEnabled = (a.enabled !== false);
+    const stateBadge = isEnabled
+      ? '<span class="badge ok">可用</span>'
+      : '<span class="badge off">已停用</span>';
+    const idAttr = esc(String(a.id || '').replace(/[^\w.@-]/g, ''));
+    const nameAttr = esc(a.name || a.email || a.id);
     html += '<tr>'
       + '<td style="text-align:left"><b>' + esc(a.name || a.email || a.id) + '</b><div style="font-size:11px;color:var(--dim)">' + esc(a.id.substring(0,12)) + '</div></td>'
-      + '<td><span class="badge ' + (a.region === 'cn' ? 's' : '') + '">' + esc(a.region) + '</span></td>'
-      + '<td>' + esc(a.plan || '—') + '</td>'
-      + '<td><b style="color:var(--accent2)">' + userRem + '</b> / ' + userTot + '</td>'
-      + '<td><b style="color:var(--accent)">' + addonRem + '</b> / ' + addonTot + '</td>'
-      + '<td>' + fmt(u.requests) + '</td>'
-      + '<td>' + fmt(u.total_tokens) + '</td>'
+      + '<td style="text-align:center" data-label="状态">' + stateBadge + '</td>'
+      + '<td style="text-align:center" data-label="区域"><span class="badge ' + (a.region === 'cn' ? 's' : '') + '">' + esc(a.region) + '</span></td>'
+      + '<td style="text-align:center" data-label="Plan">' + esc(a.plan || '—') + '</td>'
+      + '<td style="text-align:center" data-label="用户额度"><b style="color:var(--accent2)">' + userRem + '</b> / ' + userTot + '</td>'
+      + '<td style="text-align:center" data-label="附加额度"><b style="color:var(--accent)">' + addonRem + '</b> / ' + addonTot + '</td>'
+      + '<td style="text-align:right" data-label="请求">' + fmt(u.requests) + '</td>'
+      + '<td style="text-align:right" data-label="总 Token">' + fmt(u.total_tokens) + '</td>'
+      + '<td class="acct-actions" style="text-align:center;white-space:nowrap;vertical-align:middle" data-label="操作">'
+      +   '<div class="acct-actions-row">'
+      +     '<button class="sec mini" onclick="qoderToggleAccount(\'' + idAttr + '\',' + (!isEnabled) + ', this)">' + (isEnabled ? '停用' : '启用') + '</button>'
+      +     '<button class="sec mini" onclick="qoderCheckinOne(\'' + idAttr + '\', this)">签到</button>'
+      +     '<button class="danger mini" onclick="qoderDeleteAccount(\'' + idAttr + '\',\'' + nameAttr + '\', this)">删除</button>'
+      +   '</div>'
+      + '</td>'
       + '</tr>';
   });
   html += '</tbody></table></div>';
@@ -4106,6 +4127,53 @@ async function qoderCheckinAll(btn){
     await loadQoderData(true);
   }catch(e){ toast('签到失败: ' + e.message, 'error'); }
   finally{ if(btn){ btn.disabled = false; btn.textContent = old; } }
+}
+
+async function qoderToggleAccount(id, enable, btn){
+  if(btn) btn.disabled = true;
+  try{
+    await postJSON('/qoder/account/set', { id: id, enabled: enable });
+    toast(enable ? 'Qoder 账号已启用' : 'Qoder 账号已停用', 'ok');
+    await loadQoderData(true);
+  }catch(e){
+    toast('操作失败: ' + (e && e.message ? e.message : e), 'bad');
+  }finally{
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function qoderDeleteAccount(id, name, btn){
+  if(!confirm('确定删除 Qoder 账号 [' + name + '] 吗？此操作不可撤销。')) return;
+  if(btn) btn.disabled = true;
+  try{
+    await postJSON('/qoder/account/delete', { id: id });
+    toast('已成功删除 Qoder 账号 [' + name + ']', 'ok');
+    await loadQoderData(true);
+  }catch(e){
+    toast('删除失败: ' + (e && e.message ? e.message : e), 'bad');
+  }finally{
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function qoderCheckinOne(id, btn){
+  if(btn){ btn.disabled = true; btn.textContent = '...'; }
+  try{
+    const r = await postJSON('/qoder/checkin', { account_id: id });
+    const results = r.results || [];
+    if(results.length && results[0].status === 'claimed'){
+      toast('签到成功 (+' + (results[0].reward_credits || results[0].amount || 0) + ' 积分)', 'ok');
+    } else if(results.length && results[0].status === 'already_claimed'){
+      toast('今日已签到 (连续 ' + (results[0].streak_days || 0) + ' 天)', 'info');
+    } else {
+      toast('签到: ' + (results[0]?.message || results[0]?.status || '完成'), 'ok');
+    }
+    await loadQoderData(true);
+  }catch(e){
+    toast('签到失败: ' + (e && e.message ? e.message : e), 'bad');
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = '签到'; }
+  }
 }
 
 // Qoder OAuth 设备码登录：后端 /qoder/oauth/start 拿授权链接，

@@ -54,6 +54,8 @@ body{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif
 .btn.primary:hover{background:var(--accent-h);border-color:var(--accent-h)}
 .btn:disabled{opacity:.4;cursor:not-allowed}
 .btn.sm{padding:6px 12px;font-size:12px;border-radius:8px}
+.btn.danger{border-color:var(--bad);color:var(--bad)}
+.btn.danger:hover{background:var(--bad-soft)}
 
 /* Login panel */
 .login-panel{display:none;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:20px;margin-bottom:20px;box-shadow:var(--shadow)}
@@ -594,6 +596,10 @@ function loadAccounts() {
       if (a.region) badges += '<span class="badge region">' + a.region + '</span>';
       if (a.active) badges += '<span class="badge active">默认</span>';
       if (a.auth_mode) badges += '<span class="badge auth">' + a.auth_mode + '</span>';
+      var isEnabled = (a.enabled !== false);
+      if (!isEnabled) badges += '<span class="badge" style="background:var(--bad-soft);color:var(--bad)">已停用</span>';
+      else badges += '<span class="badge" style="background:var(--ok-soft);color:var(--ok)">已启用</span>';
+      var toggleText = isEnabled ? '停用' : '启用';
       card.innerHTML =
         '<div class="account-info">' +
           '<div class="account-avatar">' + initials + '</div>' +
@@ -603,8 +609,10 @@ function loadAccounts() {
           '</div>' +
         '</div>' +
         '<div class="account-actions">' +
+          '<button class="btn sm" data-toggle="' + a.id + '" data-enabled="' + (!isEnabled) + '">' + toggleText + '</button>' +
           '<button class="btn sm" data-checkin="' + a.id + '">签到</button>' +
           '<button class="btn sm" data-quota="' + a.id + '">额度</button>' +
+          '<button class="btn sm danger" data-delete="' + a.id + '" data-name="' + (a.name || a.email || a.id) + '">删除</button>' +
         '</div>';
       list.appendChild(card);
     });
@@ -684,6 +692,33 @@ function quota(id) {
   }).catch(function() { toast('额度查询失败', 'error'); });
 }
 
+function toggleAccount(id, enable) {
+  api('/qoder/account/set', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: id, enabled: enable })
+  }).then(function() {
+    toast(enable ? '已启用账号' : '已停用账号', 'success');
+    loadAccounts();
+  }).catch(function(err) {
+    toast('操作失败: ' + (err.message || err), 'error');
+  });
+}
+
+function deleteAccount(id, name) {
+  if (!confirm('确定删除账号 ' + name + ' 吗？此操作不可撤销。')) return;
+  api('/qoder/account/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: id })
+  }).then(function() {
+    toast('已删除账号 ' + name, 'success');
+    loadAccounts();
+  }).catch(function(err) {
+    toast('删除失败: ' + (err.message || err), 'error');
+  });
+}
+
 /* Event bindings */
 document.getElementById('btnLogin').addEventListener('click', startLogin);
 document.getElementById('btnRefresh').addEventListener('click', loadAccounts);
@@ -697,6 +732,8 @@ document.getElementById('accountsList').addEventListener('click', function(e) {
   if (!btn) return;
   if (btn.dataset.checkin) checkinOne(btn.dataset.checkin);
   if (btn.dataset.quota) quota(btn.dataset.quota);
+  if (btn.dataset.toggle) toggleAccount(btn.dataset.toggle, btn.dataset.enabled === 'true');
+  if (btn.dataset.delete) deleteAccount(btn.dataset.delete, btn.dataset.name || '');
 });
 
 /* Initial load */

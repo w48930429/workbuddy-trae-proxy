@@ -44,7 +44,9 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _TRAE_DIR = os.path.join(_HERE, "trae")
 if _TRAE_DIR not in sys.path:
     sys.path.insert(0, _TRAE_DIR)
-import dispatch  # Multi-upstream dispatcher
+_QODER_DIR = os.path.join(_HERE, "qoder")
+if _QODER_DIR not in sys.path:
+    sys.path.insert(0, _QODER_DIR)
 import trae_route
 import qoder_route
 
@@ -5632,7 +5634,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return None
     def _authorized(self):
-        if self._key_ok():
+        if self._panel_ok() or self._key_ok():
             return True
         # Say how a key must be presented, so a key that merely looks identical
         # (masked copy, trailing whitespace) is diagnosable straight from the
@@ -5671,7 +5673,7 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if path.startswith("/settings"):
             return True
-        if path.startswith("/logs"):
+        if path.startswith("/logs") or path.startswith("/trae") or path.startswith("/qoder"):
             return True
         return False
     def do_OPTIONS(self):
@@ -5741,7 +5743,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/qoder/oauth/poll":
             login_id = query.get("login_id", [""])[0]
             return self._route_qoder_oauth_poll(login_id)
-        if path.startswith("/qoder/") and self._authorized():
+        if path.startswith("/qoder/") and (self._authorized() or self._panel_ok()):
             return self._handle_qoder(path, query)
         return self._error(404, "not found", "invalid_request_error")
     def _get_dashboard(self):
@@ -6460,8 +6462,9 @@ class Handler(BaseHTTPRequestHandler):
         return self._error(404, "unknown trae endpoint", "invalid_request_error")
 
     def _serve_qoder_dashboard(self):
-        html_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                 "qoder_dashboard.html")
+        html_path = os.path.join(_QODER_DIR, "qoder_dashboard.html")
+        if not os.path.exists(html_path):
+            html_path = os.path.join(_HERE, "qoder_dashboard.html")
         try:
             with open(html_path, "rb") as fh:
                 body = fh.read()
@@ -6503,6 +6506,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/qoder/checkin":
             if self.command == "POST":
                 return self._route_qoder_checkin(query_or_payload)
+        if path in ("/qoder/account/set", "/qoder/accounts/set", "/qoder/enabled"):
+            if self.command == "POST":
+                return self._route_qoder_account_set(query_or_payload)
+        if path in ("/qoder/account/delete", "/qoder/accounts/delete"):
+            if self.command == "POST":
+                return self._route_qoder_account_delete(query_or_payload)
         if path == "/qoder/enabled":
             if self.command == "GET":
                 return self._json(200, {"ok": True, "enabled": _qoder_enabled()})
@@ -6534,6 +6543,35 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True, "accounts": accts})
         except Exception as e:
             return self._error(500, "qoder accounts list failed: %s" % e)
+
+    def _route_qoder_account_set(self, payload):
+        try:
+            import qoder_accounts
+            import qoder_route
+            uid = str((payload or {}).get("id") or (payload or {}).get("account_id") or (payload or {}).get("uid") or "")
+            if not uid:
+                return self._error(400, "account id required", "invalid_request_error")
+            enabled = bool((payload or {}).get("enabled", True))
+            ok = qoder_accounts.set_enabled(uid, enabled)
+            if not ok:
+                return self._error(404, "account not found", "invalid_request_error")
+            qoder_route.reload_pool()
+            return self._json(200, {"ok": True, "id": uid, "enabled": enabled})
+        except Exception as e:
+            return self._error(500, f"qoder account set failed: {e}")
+
+    def _route_qoder_account_delete(self, payload):
+        try:
+            import qoder_accounts
+            import qoder_route
+            uid = str((payload or {}).get("id") or (payload or {}).get("account_id") or (payload or {}).get("uid") or "")
+            if not uid:
+                return self._error(400, "account id required", "invalid_request_error")
+            qoder_accounts.delete_account(uid)
+            qoder_route.reload_pool()
+            return self._json(200, {"ok": True, "id": uid})
+        except Exception as e:
+            return self._error(500, f"qoder account delete failed: {e}")
 
     def _route_qoder_models(self):
         try:
@@ -6573,7 +6611,7 @@ class Handler(BaseHTTPRequestHandler):
             from dataclasses import asdict
             aid = None
             if isinstance(payload, dict):
-                aid = payload.get("account_id")
+                aid = payload.get("account_id") or payload.get("id") or payload.get("uid")
             if aid:
                 # qoder_checkin exposes checkin_one/checkin_all; there is no
                 # do_checkin. Serialise the whole result so the dashboard can

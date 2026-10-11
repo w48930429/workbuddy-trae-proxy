@@ -44,6 +44,26 @@ function isContextOverflow(statusCode: number, body: string): boolean {
   );
 }
 
+/**
+ * 跨家族静默改道开关（当前关闭）。
+ *
+ * 开启时的行为：目标模型家族（gemini / claude）全部账号不可用（额度耗尽、冷却中、
+ * 无候选）而另一个家族尚有额度时，本执行器会把请求体里的模型**改写成另一家族的固定
+ * 模型**（gemini → claude-sonnet-4-6，claude → gemini-3.8-flash-high），用另一家族的
+ * 账号代答，响应照常返回且**仍回显客户端请求的模型名**，客户端无从察觉。
+ *
+ * 关闭原因（2026-10-11 实证）：
+ *   1. 会静默吞掉另一家族的额度 —— 请求 gemini 实际扣的是 Claude 额度；
+ *   2. 两个家族的分词、单次输入上限、工具调用与推理字段都不同，输出特性会悄悄改变；
+ *   3. 排查被带偏 —— 实测 663,163 tokens 的 gemini 请求返回 200（由 claude 答出），
+ *      而同一时刻日志记录的却是"该请求在 gemini 上上下文超限"，只看响应无法分辨。
+ *
+ * 关闭后的行为：目标家族无可用账号时，按真实原因报错 ——
+ *   上下文超限 → 400（提示客户端压缩上下文）；额度耗尽 → 503（附最近回满倒计时）。
+ * 需要恢复该行为时把此常量改为 true 即可（分支代码原样保留）。
+ */
+const CROSS_FAMILY_FALLBACK_ENABLED = false;
+
 export class RequestExecutor {
   constructor(
     private pool: AccountPool,
@@ -157,6 +177,13 @@ export class RequestExecutor {
     sessionKey?: string
   ): Promise<UpstreamExecutionResult> {
     const triedAccountIds = new Set<string>();
+    // 记录本轮出现过的"上下文超限"错误。全池候选都因上下文超限而失败时，必须把
+    // 这个真实原因回报给客户端（400 + 让客户端压缩上下文），而不是伪装成"额度耗尽"
+    // 的 503 —— 那正是"面板显示还有额度、请求却 503"这种自相矛盾现象的来源。
+    let lastOverflowError: ContextOverflowError | null = null;
+    // 上游 503（MODEL_CAPACITY_EXHAUSTED）的真实报文：三个账号都被挡下时如实回报，
+    // 而不是给出笼统的 "Failed to fulfill request after 3 attempts..."。
+    let lastCapacityError: UpstreamRequestError | null = null;
     const model = (payload.model || '').toLowerCase();
     const family: 'claude' | 'gemini' = (model.includes('claude') || model.includes('opus') || model.includes('sonnet') || model.includes('gpt') || model.includes('oss'))
       ? 'claude'
@@ -168,10 +195,11 @@ export class RequestExecutor {
       if (!account) {
         // 跨家族自动切换：请求的模型家族已全灭，但另一个家族还有额度时，
         // 自动把请求改道到另一个家族的模型，而不是直接报错。
+        // 详见 CROSS_FAMILY_FALLBACK_ENABLED 处注释：当前已关闭该行为。
         const altFamily: 'claude' | 'gemini' = family === 'gemini' ? 'claude' : 'gemini';
         const altHealthy = !this.pool.isFamilyExhausted(altFamily);
         const hasAltModel = altFamily === 'claude' ? true : true; // 两个家族都有可用底座
-        if (altHealthy && hasAltModel) {
+        if (CROSS_FAMILY_FALLBACK_ENABLED && altHealthy && hasAltModel) {
           const fallbackModel = altFamily === 'claude' ? 'claude-sonnet-4-6' : 'gemini-3.8-flash-high';
           console.warn(`[Executor] All ${family} quotas exhausted, auto-switching to ${altFamily} model: ${fallbackModel}`);
           payload.model = fallbackModel;
@@ -208,11 +236,21 @@ export class RequestExecutor {
                 return { statusCode: res.statusCode, headers: res.headers, bodyStream: res.body, accountUsed: altAccount };
               }
               const errBody = await res.body.text();
+              console.warn(`[Executor] 跨家族兜底 ${altFamily} 请求失败 HTTP ${res.statusCode}: ${errBody.slice(0, 180)}`);
+              if (isContextOverflow(res.statusCode, errBody)) {
+                lastOverflowError = new ContextOverflowError(res.statusCode, errBody);
+              }
               this.pool.releaseAccount(altAccount.id, { code: res.statusCode, message: errBody }, altFamily);
             } catch (err: any) {
               this.pool.releaseAccount(altAccount.id, { code: 500, message: `Cross-family fallback network error: ${err.message}` }, altFamily);
             }
           }
+        }
+        // 真实原因是上下文超限（全部候选账号 + 跨家族兜底都是"prompt 太长"）时，
+        // 回报 400 让客户端压缩上下文，绝不能伪装成"额度耗尽"的 503。
+        if (lastOverflowError) {
+          console.warn('[Executor] 全部候选账号均因上下文超限失败，回报 400 让客户端压缩上下文。');
+          throw lastOverflowError;
         }
         if (family === 'claude') {
           let nearestDiff = Infinity;
@@ -330,6 +368,12 @@ export class RequestExecutor {
         if (res.statusCode === 503) {
           const errBody = await res.body.text();
           console.warn(`[Executor] Google Upstream 503:`, errBody);
+          // 503 是上游"本次真的没容量"，不是账号问题。换号可能有效（不同账号走不同后端），
+          // 但若三个账号都被 503 挡下，必须把这个真实原因回报客户端 —— 否则只剩一句
+          // "Failed to fulfill request after 3 attempts with rotating accounts"，
+          // 让人误以为本地调度坏了（2026-10-11 实测：claude-opus-4-6-thinking 上游返回
+          // MODEL_CAPACITY_EXHAUSTED / "No capacity available for model ..."）。
+          lastCapacityError = new UpstreamRequestError(res.statusCode, errBody);
           if (errBody.includes('MODEL_CAPACITY_EXHAUSTED') && payload.model?.includes('gpt-oss')) {
             console.warn(`[Executor] GPT-OSS capacity exhausted, automatically falling back to gemini-3.8-flash-high...`);
             payload.model = 'gemini-3.8-flash-high';
@@ -346,12 +390,13 @@ export class RequestExecutor {
         const errBody = await res.body.text();
         this.pool.releaseAccount(account.id);
         if (isContextOverflow(res.statusCode, errBody)) {
+          lastOverflowError = new ContextOverflowError(res.statusCode, errBody);
           if (attempt < maxRetries) {
             console.warn(`[Executor] 账号 ${account.email} 返回上下文超限（${payload.model}），尝试换下一个账号（不同账号/tier 输入上限不同）...`);
             continue;
           }
           // 已无未试过的候选账号：跨家族按需降档也没意义（两个家族输入上限同量级），报给客户端让其压缩
-          throw new ContextOverflowError(res.statusCode, errBody);
+          throw lastOverflowError;
         }
         throw new UpstreamRequestError(res.statusCode, errBody);
 
@@ -369,6 +414,10 @@ export class RequestExecutor {
       }
     }
 
+    // 三个账号都试过仍失败：若原因是"上下文超限"或"上游没容量"，把上游原话回报给客户端，
+    // 不要用笼统的 rotating-accounts 文案掩盖（那会让人以为本地调度坏了）。
+    if (lastOverflowError) throw lastOverflowError;
+    if (lastCapacityError) throw lastCapacityError;
     throw new Error(`Failed to fulfill request after ${maxRetries} attempts with rotating accounts.`);
   }
 }

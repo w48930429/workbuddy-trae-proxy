@@ -28,6 +28,58 @@
 
 ---
 
+## 系统架构与多项目融合来源 (Architecture & Upstream Sources)
+
+本项目深度融合社区中四个优秀的开源逆向与代理项目，构建为具备多协议兼容、多账号故障转移（Failover）与熔断轮转的统一 AI 聚合网关中枢：
+
+### 1. 核心架构拓扑
+
+```mermaid
+graph TD
+    Client["开发者客户端<br>(Claude Code / Codex / Chatbox / OMP)"]
+    
+    subgraph "统一网关与守护体系"
+        Guardian["守护脚本 (wt-proxy-start.bat / start-guardian.bat)"]
+        
+        subgraph "主网关服务 (Port 28087, Python)"
+            WbProxy["主路由调度器 (wb_proxy.py)<br>Web 监控大屏 / 多 API Key / 熔断器"]
+            WB_Core["WorkBuddy 模块<br>(国际/国内双区 + 自动签到旅行)"]
+            Trae_Core["Trae 模块 (trae/)<br>(SOLO 网关协议 + 多号轮询 + 额度看板)"]
+            Qoder_Core["Qoder 模块 (qoder/)<br>(Cosy 签名脱敏 + 多号池 + 备用降级)"]
+        end
+        
+        subgraph "反重力代理服务 (Port 43810, Node.js/Fastify)"
+            AG_Proxy["Antigravity Proxy (antigravity-proxy/)<br>(Cloud Code OAuth + Breaker 熔断 + Schema 清洗)"]
+        end
+    end
+
+    subgraph "上游云端服务"
+        Up_WB["腾讯 WorkBuddy / CodeBuddy"]
+        Up_Trae["字节 Trae 官方端点"]
+        Up_Google["Google Cloud Code (Gemini / Claude)"]
+        Up_Qoder["通义灵码 / Qoder 官方端点"]
+    end
+
+    Client -->|OpenAI / Anthropic / Responses API| WbProxy
+    Client -->|Gemini / Claude 专线| AG_Proxy
+    WbProxy -.->|故障降级 / 备用调用| AG_Proxy
+
+    WbProxy --> WB_Core --> Up_WB
+    WbProxy --> Trae_Core --> Up_Trae
+    WbProxy --> Qoder_Core --> Up_Qoder
+    AG_Proxy --> Up_Google
+```
+
+### 2. 四大融合开源项目来源
+
+| 序号 | 融合模块 | 原始 GitHub 仓库 | 原始技术栈 | 本项目集成与增强定位 |
+| :---: | :--- | :--- | :--- | :--- |
+| **1** | **WorkBuddy 网关底座** | [**ardeyouxipianyi/workbuddy2api-hub**](https://github.com/ardeyouxipianyi/workbuddy2api-hub) | Python | **系统主底座**：提供主代理 `wb_proxy.py`、Web 看板、腾讯 WorkBuddy / CodeBuddy 国际与国内双区域路由、多 API Key 分流限流与自动签到调度。 |
+| **2** | **Trae 多账号与协议代理** | [**smart-open/TraeWorkAssistant**](https://github.com/smart-open/TraeWorkAssistant)<br>*(同步派生: [w48930429/workbuddy-trae-proxy](https://github.com/w48930429/workbuddy-trae-proxy))* | Rust / Tauri | **Trae 子系统**：位于 `trae/` 目录，移植 Trae SOLO 网关协议转换、OAuth 免密刷新、多账号指纹伪装、积分监控看板与自动 Failover 切换。 |
+| **3** | **Antigravity 反重力代理** | [**nnnextyear/antigravity-proxy**](https://github.com/nnnextyear/antigravity-proxy) | TypeScript<br>(Node.js Fastify) | **Google Cloud Code 代理**：位于 `antigravity-proxy/`，常驻 `43810` 端口。提供 Gemini/Claude 多账号池、OAuth 自动保活、Breaker 状态机熔断、Thought Signature 恢复及 Google Proto Schema 兼容清洗。 |
+| **4** | **Qoder 协议转换与账号池** | [**Zhengyuuuui/qoder2api**](https://github.com/Zhengyuuuui/qoder2api) | Go | **纯 Python 移植**：位于 `qoder/` 目录，将原 Go 语言的 Cosy 指纹脱敏、多账号池治理、每日签到与 Client 桥接完整移植为纯 Python 模块，作为备用降级上游。 |
+---
+
 ## 一、快速启动
 
 ### 1. 本机单机使用
@@ -441,7 +493,20 @@ PR 贡献者（v1.4.5 之前的改动未进上方更新记录，这里一并列�
 
 ---
 
-## 八、免责声明 (Disclaimer)
+## 八、常见错误速查 (Troubleshooting)
+
+遇到报错先查 **[`docs/ERRORS.md`](docs/ERRORS.md)** —— 那里按「症状 → 真实原因 → 容易误判成什么 → 怎么验证 → 改到哪」逐条收录了已经定过性的坑，避免把 A 误判成 B。高频几条：
+
+| 症状 | 真实原因 |
+| --- | --- |
+| 反重力 503 说「Gemini 5 小时额度耗尽」，面板却显示有余量 | 请求上下文超限，不是额度问题（应返回 400 让客户端压缩上下文） |
+| Trae 报 `4023 model is unknown` | 走错端点 / 模型名无 `__dev` 后缀（详见文档第 3 条） |
+| 看板 Trae「本次消耗」是五位数 | 早期计费公式漏除以 1000（历史数据已修正） |
+| 28087 会自己退出 / 关掉窗口就掉线 | 控制台关闭事件触发的主动退出；用 `wt-proxy-start.bat start`（带守护）拉起，停止请用 `wt-proxy-stop.bat` |
+
+---
+
+## 九、免责声明 (Disclaimer)
 
 1. 本项目为非官方自托管网关，仅供技术研究、逆向协议学习与个人合法授权账号在私有环境测试使用。
 2. 本项目不提供任何账号及额度。请严格遵守官方服务条款，禁止用于任何商业转售、恶意并发或违规滥用。

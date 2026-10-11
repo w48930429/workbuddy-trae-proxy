@@ -5,22 +5,10 @@ import {
   OpenAIChatCompletionChunk
 } from '../types.js';
 import { resolveDynamicUpstreamModel, ThinkingEffort } from './models.js';
+// 工具参数 schema 清洗：与 anthropic 入口共用同一实现（anyOf/oneOf/allOf 在 CloudCode 侧非法）
+import { sanitizeGoogleSchema } from './schema.js';
 // 缓存 Gemini 思考签名：共享实现见 gateway/thought-signature.ts
 import { rememberThoughtSignature, resolveThoughtSignatureForReplay } from './thought-signature.js';
-
-// CloudCode accepts a restricted protobuf-style schema. Keep the useful
-// structural fields and drop JSON-Schema keywords that routinely cause 400s.
-function sanitizeGoogleSchema(value: any): any {
-  if (Array.isArray(value)) return value.map(sanitizeGoogleSchema);
-  if (!value || typeof value !== 'object') return value;
-  const result: any = {};
-  for (const [key, child] of Object.entries(value)) {
-    if (['$schema', '$id', '$defs', 'definitions', 'propertyNames', 'additionalProperties', 'unevaluatedProperties', 'exclusiveMinimum', 'exclusiveMaximum', 'minLength', 'maxLength', 'pattern', 'minItems', 'maxItems', 'uniqueItems'].includes(key)) continue;
-    result[key] = sanitizeGoogleSchema(child);
-  }
-  if (result.type === 'object' && !result.properties) result.properties = {};
-  return result;
-}
 
 /**
  * 将 OpenAI 格式的 chat completions 请求转换为 Google CloudCode / Gemini 内部 payload

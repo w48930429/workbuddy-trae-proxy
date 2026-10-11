@@ -5,6 +5,7 @@ import { AppConfig, GoogleCloudCodePayload, GoogleContent } from '../types.js';
 import { AccountPool } from '../pool/account-pool.js';
 import { ContextOverflowError, RequestExecutor, UpstreamRequestError } from '../pool/breaker.js';
 import { resolveDynamicUpstreamModel, ThinkingEffort } from './models.js';
+import { sanitizeGoogleSchema } from './schema.js';
 
 interface AnthropicMessageParam {
   role: 'user' | 'assistant';
@@ -190,110 +191,10 @@ function convertAnthropicMessages(
 }
 
 /**
- * 递归清洗 JSON Schema，剔除 Google CloudCode / Gemini 严格 Proto 不支持的字段
- * （如 $schema, propertyNames, exclusiveMinimum, anyOf/oneOf/allOf, patternProperties 等），
- * 转换为 Google Protobuf Schema 严格兼容的 OpenAPI 3.0 子集。
+ * JSON Schema 清洗见 `gateway/schema.ts`（与 /v1/chat/completions 入口共用同一实现）。
+ * 早期实现两份，anthropic 侧处理 anyOf、chat 侧不处理，导致同一种工具声明在两条入口上
+ * 一条可用、一条 400 —— 不要再各自实现一份。
  */
-function sanitizeGoogleSchema(schema: any): any {
-  if (!schema || typeof schema !== 'object') return schema;
-  if (Array.isArray(schema)) return schema.map(sanitizeGoogleSchema);
-
-  let s = { ...schema };
-
-  // 1. 处理 anyOf / oneOf
-  if (Array.isArray(s.anyOf) || Array.isArray(s.oneOf)) {
-    const branches = s.anyOf || s.oneOf;
-    const hasNull = branches.some((b: any) => b && (b.type === 'null' || b.type === 'NULL'));
-    if (hasNull) s.nullable = true;
-    const nonNullBranch = branches.find((b: any) => b && b.type !== 'null' && b.type !== 'NULL') || branches[0] || {};
-    delete s.anyOf;
-    delete s.oneOf;
-    s = { ...s, ...nonNullBranch };
-  }
-
-  // 2. 处理 allOf
-  if (Array.isArray(s.allOf)) {
-    const allOfBranches = s.allOf;
-    delete s.allOf;
-    for (const branch of allOfBranches) {
-      if (branch && typeof branch === 'object') {
-        s = { ...s, ...branch };
-      }
-    }
-  }
-
-  // 3. 处理 type 数组 (如 ['string', 'null'])
-  if (Array.isArray(s.type)) {
-    if (s.type.includes('null')) s.nullable = true;
-    s.type = s.type.find((t: string) => t !== 'null') || 'string';
-  }
-
-  // 4. 处理 exclusiveMinimum / exclusiveMaximum (草案 7 数字转为 minimum / maximum)
-  if (typeof s.exclusiveMinimum === 'number') {
-    s.minimum = s.exclusiveMinimum;
-  }
-  if (typeof s.exclusiveMaximum === 'number') {
-    s.maximum = s.exclusiveMaximum;
-  }
-
-  // 5. 处理 const (转为 enum)
-  if (s.const !== undefined) {
-    s.enum = [s.const];
-  }
-
-  // 6. 补全缺失的 type
-  if (!s.type) {
-    if (s.properties) s.type = 'object';
-    else if (s.items) s.type = 'array';
-    else s.type = 'object';
-  }
-
-  // 7. Google Schema Proto 允许字段白名单
-  const allowedKeys = new Set([
-    'type',
-    'format',
-    'description',
-    'nullable',
-    'enum',
-    'properties',
-    'required',
-    'items',
-    'title',
-    'maxItems',
-    'minItems',
-    'maxLength',
-    'minLength',
-    'pattern',
-    'maximum',
-    'minimum',
-    'default'
-  ]);
-
-  const result: any = {};
-  for (const [key, val] of Object.entries(s)) {
-    if (!allowedKeys.has(key)) continue;
-
-    if (key === 'properties' && val && typeof val === 'object') {
-      const cleanProps: any = {};
-      for (const [pKey, pVal] of Object.entries(val)) {
-        cleanProps[pKey] = sanitizeGoogleSchema(pVal);
-      }
-      result.properties = cleanProps;
-    } else if (key === 'items' && val && typeof val === 'object') {
-      result.items = sanitizeGoogleSchema(val);
-    } else if (key === 'required' && Array.isArray(val)) {
-      result.required = val.filter((r) => typeof r === 'string');
-    } else {
-      result[key] = val;
-    }
-  }
-
-  if (result.type === 'object' && !result.properties) {
-    result.properties = {};
-  }
-
-  return result;
-}
 
 export function registerAnthropicRoutes(
   app: FastifyInstance,

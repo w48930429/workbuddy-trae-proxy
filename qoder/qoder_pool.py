@@ -223,6 +223,7 @@ class Slot:
     region: str
     sess: cosy.SessionContext = None
     bearer: client.BearerClient = None
+    enabled: bool = True
     _cooldown_until: float = 0.0
     _last_err: str = ""
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -232,6 +233,8 @@ class Slot:
     _refresh_tried: bool = False
 
     def available(self, now: float = 0) -> bool:
+        if not self.enabled:
+            return False
         now = now or time.time()
         with self._lock:
             return now >= self._cooldown_until
@@ -286,6 +289,7 @@ class Slot:
             "id": self.id,
             "name": self.name,
             "region": self.region,
+            "enabled": self.enabled,
             "cooling_remaining_ms": self.cooling_remaining_ms,
             "last_error": self.last_error,
         }
@@ -303,6 +307,7 @@ def build_slot_from_secret(acct: accounts.Account, proxy: str = "") -> Slot:
         region=acct.region,
         sess=bs.session,
         bearer=bearer,
+        enabled=getattr(acct, "enabled", True),
         _credential=current,
     )
 
@@ -468,6 +473,8 @@ def build_pool_from_accounts(proxy: str = "",
     acct_list = accounts.list_accounts()
     slots = []
     for acct in acct_list:
+        if not getattr(acct, "enabled", True):
+            continue
         try:
             slot = build_slot_from_secret(acct, proxy)
             slots.append(slot)
