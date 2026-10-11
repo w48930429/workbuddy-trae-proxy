@@ -1,4 +1,4 @@
-"""Multi-upstream dispatcher for WorkBuddy + Trae.
+"""Multi-upstream dispatcher for WorkBuddy + Trae + Qoder.
 
 Handles:
 - Upstream selection based on model prefix or config
@@ -11,6 +11,11 @@ import os
 import time
 from enum import Enum
 from typing import Optional, Callable, Any
+import sys
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_TRAE_DIR = os.path.join(_HERE, "trae")
+if _TRAE_DIR not in sys.path:
+    sys.path.insert(0, _TRAE_DIR)
 
 # Trae adapter
 from trae_route import (
@@ -28,13 +33,13 @@ from trae_route import (
 class Upstream(Enum):
     WORKBUDDY = "workbuddy"
     TRAE = "trae"
+    QODER = "qoder"
 
 
 # Model prefix to upstream mapping
 MODEL_PREFIX_MAP = {
-    # Trae-specific models (if any)
     "trae-": Upstream.TRAE,
-    # WorkBuddy models are default
+    "qoder-": Upstream.QODER,
 }
 
 # Failover trigger error codes
@@ -146,6 +151,8 @@ def _call_upstream(
     """Call specific upstream."""
     if upstream == Upstream.TRAE:
         return _call_trae(model, request_data, stream_callback, config)
+    elif upstream == Upstream.QODER:
+        return _call_qoder(model, request_data, stream_callback, config)
     else:
         return _call_workbuddy(model, request_data, stream_callback, config, account_provider)
 
@@ -200,6 +207,21 @@ def _call_workbuddy(
     return 0, "", None  # Signal to use wb_proxy.py
 
 
+def _call_qoder(
+    model: str,
+    request_data: dict,
+    stream_callback: Callable[[str], Any],
+    config: dict,
+) -> tuple[int, str, Optional[dict]]:
+    """Call Qoder upstream via qoder_route."""
+    try:
+        import qoder_route
+        status, body = qoder_route.call_qoder(request_data, on_delta=None)
+        return status, body, None
+    except Exception as e:
+        return 500, json.dumps({"error": {"message": str(e)}}), None
+
+
 def _add_hint_to_response(body: str, hint: str) -> str:
     """Add Chinese hint to error response."""
     try:
@@ -228,5 +250,16 @@ def list_models(config: dict) -> list:
         if status == 200:
             for m in trae_models_list:
                 models.append({"id": m, "upstream": "trae"})
+    
+    # Qoder models
+    if upstreams.get("qoder", {}).get("enabled", False):
+        try:
+            import qoder_route
+            qoder_models_list = qoder_route.qoder_models()
+            for m in qoder_models_list:
+                models.append({"id": m["id"], "upstream": "qoder",
+                               "qoder_key": m.get("qoder_key", "")})
+        except Exception:
+            pass
     
     return models

@@ -15,7 +15,8 @@ except ImportError:
     HAS_DAPI = False
 
 # Vault 存储路径
-VAULT_DIR = os.path.join(os.path.dirname(__file__), "vault")
+_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+VAULT_DIR = os.path.join(_ROOT_DIR, "vault")
 VAULT_FILE = os.path.join(VAULT_DIR, "trae_secrets.json")
 
 

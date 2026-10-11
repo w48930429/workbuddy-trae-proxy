@@ -40,8 +40,13 @@ import wb_catalog
 import wb_settings
 import wb_webtools
 import wb_identity
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_TRAE_DIR = os.path.join(_HERE, "trae")
+if _TRAE_DIR not in sys.path:
+    sys.path.insert(0, _TRAE_DIR)
 import dispatch  # Multi-upstream dispatcher
 import trae_route
+import qoder_route
 
 # Failover state
 _FAILOVER_ENABLED = False
@@ -83,19 +88,77 @@ def _trae_priority() -> str:
 def _trae_first_enabled() -> bool:
     return _FAILOVER_ENABLED and bool(_TRAE_TOKEN) and _trae_priority() == "trae_first"
 
+# Trae 侧限流记账委托给 trae_proxy.MODEL_COOLDOWNS（账号 × 模型）。
+# Trae 的限流按凭证判定，所以冷却必须挂在具体账号上：账号 A 被限流时，
+# pick_account 自动换到 B/C；早期按模型全局记账，等于一个账号被限流就静默
+# 停掉整个 Trae 池，其余完好账号白白闲置、看板也看不出是哪个账号出的问题。
+
+
+def _note_trae_model_cooldown(model: str, wait: float) -> None:
+    """Deprecated no-op shim。
+
+    真正的记账发生在 trae_proxy 内、拿到确切 uid 的那一刻
+    （note_account_cooldown）。此处只有模型名、无法定位账号，写入只会重新
+    引入"一个账号拖垮整池"的老问题，因此不再写任何状态。
+    """
+    return None
+
+
+def _trae_model_cooldown_wait(model: str) -> float:
+    """Seconds until every usable Trae account is free for `model` (0 = try).
+
+    只有池中所有可用账号都对该模型冷却时才判为冷却中——单个账号被限流不应
+    阻止 Trae 继续服务。
+    """
+    try:
+        import trae_proxy
+        return trae_proxy.model_cooldown_wait_all_accounts(model)
+    except Exception:
+        return 0.0
+
+
+def _trae_cooldown_snapshot() -> dict:
+    """{uid: [{model, expiresAt}]} — Trae 账号级模型限流。
+
+    与 trae_proxy 的账号选择逻辑同源，保证看板显示的和实际跳过的状态一致。
+    """
+    try:
+        import trae_proxy
+        return trae_proxy.account_cooldown_snapshot()
+    except Exception:
+        return {}
+
+def _trae_stream_fallback_log(model: str, reason: str) -> None:
+    log("Trae stream unavailable for '%s': %s" % (model, reason))
+
+
 def try_trae_failover(model: str, payload: dict) -> tuple:
     """Attempt request via Trae when WorkBuddy fails.
-    
-    Returns: (status_code, response_body, usage)
+
+    Two Trae adapters exist and they are NOT interchangeable:
+      - trae_proxy: the SOLO gateway (llm_utils_chat). Covers the real catalog
+        (glm-5.3, kimi-k3, deepseek-v4.1-flash, doubao-*, qwen*, ...), does its
+        own account/vault/credit handling, and returns an OpenAI-shaped body.
+      - trae_route: the IDE Raw Chat endpoint. Only knows the 5 models that
+        endpoint lists and answers "model is unknown" (HTTP 400) for everything
+        else, so it can never serve a WorkBuddy model name.
+    Prefer trae_proxy; only fall back to the legacy raw-chat path when the model
+    is outside trae_proxy's catalog. Returns (status_code, response_body, usage).
     """
-    if not _FAILOVER_ENABLED or not _TRAE_TOKEN:
+    import trae_proxy
+    if not _FAILOVER_ENABLED:
         return 503, '{"error": {"message": "Trae failover not configured"}}', None
-    
+
+    if trae_proxy.map_model(model):
+        return trae_proxy.try_trae(model, payload)
+
+    # Model outside the SOLO catalog: the raw-chat adapter only accepts its own
+    # 5 legacy names, so route by the id itself and let the upstream decide.
+    if not _TRAE_TOKEN:
+        return 503, '{"error": {"message": "Trae token not configured"}}', None
     try:
-        # Build Trae request
         body = trae_route.build_trae_request_body(payload, model)
         headers = trae_route.trae_headers(_TRAE_TOKEN)
-        
         url = f"{trae_route.TRAE_BASE_URL}/api/ide/v1/chat"
         req = urllib.request.Request(url, data=json.dumps(body).encode(),
                                      headers=headers, method="POST")
@@ -105,12 +168,48 @@ def try_trae_failover(model: str, payload: dict) -> tuple:
         with direct_opener.open(req, timeout=120) as resp:
             data = json.loads(resp.read().decode())
             return 200, json.dumps(data), None
-            
+
     except urllib.error.HTTPError as e:
         detail = e.read().decode() if e.fp else str(e)
         return e.code, detail, None
     except Exception as e:
         return 500, str(e), None
+
+def _qoder_enabled() -> bool:
+    """Check if Qoder upstream is enabled in config."""
+    try:
+        return bool((PROXY_CONFIG.get("upstreams") or {}).get("qoder", {}).get("enabled"))
+    except Exception:
+        return False
+
+def _qoder_fallback_enabled() -> bool:
+    """Check if Qoder is configured as a final failover."""
+    try:
+        return bool((PROXY_CONFIG.get("failover") or {}).get("qoder_fallback"))
+    except Exception:
+        return False
+
+def _is_qoder_model(model: str) -> bool:
+    """Check if a model should be routed to Qoder."""
+    if not model:
+        return False
+    prefix = (PROXY_CONFIG.get("upstreams") or {}).get("qoder", {}).get("model_prefix", "qoder-")
+    return model.startswith(prefix)
+
+def try_qoder_failover(payload: dict, want_stream: bool = False) -> tuple:
+    """Attempt request via Qoder when WorkBuddy+Trae both fail.
+
+    Returns: (status_code, response_body, usage)
+    """
+    if not _qoder_enabled():
+        return 503, '{"error": {"message": "Qoder upstream not configured"}}', None
+    try:
+        status, body = qoder_route.call_qoder(payload, on_delta=None)
+        return status, body, None
+    except Exception as e:
+        return 500, json.dumps({"error": {"message": str(e)}}), None
+
+
 IS_WINDOWS = os.name == "nt"
 
 # Load multi-upstream config
@@ -244,7 +343,8 @@ CORS_PATH_PREFIXES = ("/v1", "/chat", "/completions", "/models", "/responses")
 # Management paths that happen to live under /v1 must not be treated as API:
 # /v1/usage reports account-level spend and is gated by the panel session.
 MANAGEMENT_PATH_PREFIXES = ("/v1/usage", "/usage", "/accounts", "/settings",
-                            "/tasks", "/scheduler", "/panel", "/logs", "/trae")
+                            "/tasks", "/scheduler", "/panel", "/logs", "/trae",
+                            "/qoder")
 def cors_origin_allowed(path):
     """True when the OpenAI-style API path should advertise CORS."""
     path = (path or "").split("?")[0]
@@ -3405,13 +3505,23 @@ def is_transient(exc):
 def parse_rate_limit_reset(detail):
     """Pull the reset time out of an upstream 429 body, if it names one.
 
-    Upstream answers code 6004 with "... your usage will reset at
-    2026-09-19 18:29:03 UTC+8 ...". Returns an epoch or None. Kept tolerant on
-    purpose: an unparseable body must not break the request path.
+    Two shapes are in the wild and both are real traffic:
+      - code 6004 English: "... your usage will reset at 2026-09-19 18:29:03 UTC+8 ..."
+      - code 6004 Chinese: "您的使用量已超出频率限制，将在 2026-09-19 18:29:03 UTC+8 重置 ..."
+    Only the English form used to be recognised, so a Chinese body silently
+    degraded to the 60s fallback: the client was told to retry in a minute while
+    the real wait was hours, and it hammered the upstream in a loop.
+
+    Returns an epoch or None. Kept tolerant on purpose: an unparseable body
+    must not break the request path.
     """
     if not detail:
         return None
     m = re.search(r"reset at\s+(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})", detail)
+    if not m:
+        # 报文形态为「将在 <时间戳> UTC+8 重置」，时区夹在时间戳与「重置」之间，
+        # 所以这里只锚定到时间戳本身，不要求「重置」紧邻。
+        m = re.search(r"将在\s*(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})", detail)
     if not m:
         return None
     stamp = m.group(1).replace("T", " ")
@@ -5089,6 +5199,19 @@ def stream_responses_events(upstream, model, holder):
 
 # ---------------------------------------------------------------------------
 # HTTP layer
+
+def humanize_wait(seconds):
+    """Cooldown length in the units a person reads at a glance."""
+    s = max(0, int(seconds or 0))
+    if s < 90:
+        return "%d 秒" % s
+    if s < 5400:
+        return "%d 分钟" % max(1, round(s / 60.0))
+    if s < 172800:
+        return "%.1f 小时" % (s / 3600.0)
+    return "%.1f 天" % (s / 86400.0)
+
+
 # ---------------------------------------------------------------------------
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -5334,8 +5457,25 @@ class Handler(BaseHTTPRequestHandler):
         # daily token guard) carries its own text; everything else keeps the
         # upstream wording.
         custom = getattr(exc, "message", "")
+
+        # Name the wall-clock moment the model comes back, not just a count of
+        # seconds. A bare "retry in 60s" against a real multi-hour quota reset
+        # is what turned a throttled model into an apparent hang: the client
+        # believed the wait was imminent and retried in a loop. When the
+        # upstream body carries a reset timestamp, surface it verbatim and
+        # also say how long that is in human units.
+        reset_at = parse_rate_limit_reset(getattr(exc, "detail", "") or "")
+        when = ""
+        if reset_at and reset_at > time.time():
+            wait = max(wait, int(reset_at - time.time()))
+            when = ("; 该模型将于 %s 恢复（约 %s 后）"
+                    % (time.strftime("%Y-%m-%d %H:%M", time.localtime(reset_at)),
+                       humanize_wait(wait)))
+        elif wait >= 60:
+            when = "（约 %s 后）" % humanize_wait(wait)
+
         text = custom or (
-            "upstream rate limit reached for this model; retry in %ds" % wait)
+            "upstream rate limit reached for this model; retry in %ds%s" % (wait, when))
         # The upstream detail only decorates the upstream wording; a local
         # message would only repeat itself.
         detail = ""
@@ -5351,6 +5491,9 @@ class Handler(BaseHTTPRequestHandler):
                 "type": "rate_limit_error",
                 "code": 429,
                 "retry_after": wait,
+                # Absolute reset time as epoch seconds, for clients that would
+                # rather schedule than count down.
+                "reset_at": int(reset_at) if reset_at else None,
             }
         }, ensure_ascii=False).encode("utf-8")
         self.send_response(429)
@@ -5591,8 +5734,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_logs_export()
         if path == "/settings/reveal":
             return self._get_settings_reveal(query)
-        if path.startswith("/trae/") and self._authorized():
+        if path.startswith("/trae/") and (self._authorized() or self._panel_ok()):
             return self._handle_trae(path, {})
+        if path == "/qoder/dashboard":
+            return self._serve_qoder_dashboard()
+        if path == "/qoder/oauth/poll":
+            login_id = query.get("login_id", [""])[0]
+            return self._route_qoder_oauth_poll(login_id)
+        if path.startswith("/qoder/") and self._authorized():
+            return self._handle_qoder(path, query)
         return self._error(404, "not found", "invalid_request_error")
     def _get_dashboard(self):
         return self._dashboard()
@@ -5647,6 +5797,27 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             return self._error(502, str(exc))
         data = [model_entry(mid, meta) for mid, meta in entries]
+        # Append Qoder models if enabled
+        if _qoder_enabled():
+            try:
+                import qoder_claude
+                qmodels = qoder_claude.claude_models()
+                for m in qmodels:
+                    data.append({
+                        "id": m["id"],
+                        "object": "model",
+                        "created": m.get("created", 1687864820),
+                        "owned_by": "qoder",
+                        "qoder_key": m.get("qoder_key", ""),
+                        "context_window": m.get("context_window", 180000),
+                        "max_output_tokens": m.get("max_output_tokens", 16384),
+                        "is_reasoning": m.get("is_reasoning", False),
+                        # per-1K-token consumption multiplier; the dashboard
+                        # reads it for the 消费倍率 column.
+                        "price_factor": m.get("price_factor", 0),
+                    })
+            except Exception as exc:
+                log("qoder models fetch failed: %s" % exc)
         return self._json(200, {"object": "list", "data": data, "realm": req_realm or CURRENT_REALM})
 
     def _get_v1_usage(self, query):
@@ -6241,6 +6412,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/trae/credits":
             if self.command == "GET":
                 return self._route_trae_credits()
+        if path == "/trae/models":
+            if self.command == "GET":
+                return self._route_trae_models()
+        if path == "/trae/cool-downs":
+            if self.command == "GET":
+                return self._json(200, {"ok": True, "cooldowns": _trae_cooldown_snapshot()})
         if path == "/trae/accounts":
             if self.command == "GET":
                 return self._route_trae_accounts_list()
@@ -6281,6 +6458,234 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/trae/oauth/callback":
             return self._route_trae_oauth_callback(payload)
         return self._error(404, "unknown trae endpoint", "invalid_request_error")
+
+    def _serve_qoder_dashboard(self):
+        html_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "qoder_dashboard.html")
+        try:
+            with open(html_path, "rb") as fh:
+                body = fh.read()
+        except Exception as exc:
+            return self._error(500, "dashboard.html unavailable: %s" % exc)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_qoder(self, path, query_or_payload):
+        """Qoder management endpoints."""
+        if path == "/qoder/accounts":
+            if self.command == "GET":
+                return self._route_qoder_accounts_list()
+        if path == "/qoder/models":
+            if self.command == "GET":
+                return self._route_qoder_models()
+        if path == "/qoder/quota":
+            if self.command == "GET":
+                return self._route_qoder_quota()
+        if path == "/qoder/quota/single":
+            if self.command == "GET":
+                account_id = ""
+                if isinstance(query_or_payload, dict):
+                    account_id = query_or_payload.get("account_id", [""])[0] if isinstance(query_or_payload.get("account_id"), list) else query_or_payload.get("account_id", "")
+                return self._route_qoder_quota_single(account_id)
+        if path == "/qoder/oauth/start":
+            if self.command == "POST":
+                return self._route_qoder_oauth_start(query_or_payload)
+        if path == "/qoder/oauth/poll":
+            if self.command == "GET":
+                login_id = ""
+                if isinstance(query_or_payload, dict):
+                    login_id = query_or_payload.get("login_id", [""])[0] if isinstance(query_or_payload.get("login_id"), list) else query_or_payload.get("login_id", "")
+                return self._route_qoder_oauth_poll(login_id)
+        if path == "/qoder/checkin":
+            if self.command == "POST":
+                return self._route_qoder_checkin(query_or_payload)
+        if path == "/qoder/enabled":
+            if self.command == "GET":
+                return self._json(200, {"ok": True, "enabled": _qoder_enabled()})
+        if path == "/qoder/pool":
+            if self.command == "GET":
+                return self._route_qoder_pool()
+        if path == "/qoder/usage":
+            if self.command == "GET":
+                return self._route_qoder_usage()
+        if path == "/qoder/usage/recent":
+            if self.command == "GET":
+                limit = 20
+                page = 1
+                if isinstance(query_or_payload, dict):
+                    l = query_or_payload.get("limit", ["20"])[0] if isinstance(query_or_payload.get("limit"), list) else query_or_payload.get("limit", 20)
+                    p = query_or_payload.get("page", ["1"])[0] if isinstance(query_or_payload.get("page"), list) else query_or_payload.get("page", 1)
+                    try: limit = int(l)
+                    except: pass
+                    try: page = int(p)
+                    except: pass
+                return self._route_qoder_usage_recent(limit, page)
+        return self._error(404, "unknown qoder endpoint", "invalid_request_error")
+
+    def _route_qoder_accounts_list(self):
+        try:
+            import qoder_accounts
+            from dataclasses import asdict
+            accts = [asdict(a) for a in qoder_accounts.list_accounts()]
+            return self._json(200, {"ok": True, "accounts": accts})
+        except Exception as e:
+            return self._error(500, "qoder accounts list failed: %s" % e)
+
+    def _route_qoder_models(self):
+        try:
+            models = qoder_route.qoder_models()
+            return self._json(200, {"ok": True, "models": models})
+        except Exception as e:
+            return self._error(500, "qoder models failed: %s" % e)
+
+    def _route_qoder_quota(self):
+        try:
+            import qoder_accounts
+            results = []
+            for acct in qoder_accounts.list_accounts():
+                uid = acct.id
+                if not uid:
+                    continue
+                sec = qoder_accounts.get_secret(uid) or ""
+                if not sec:
+                    continue
+                quota = qoder_accounts.fetch_quota(sec, acct.region or "cn")
+                if quota:
+                    results.append({"id": uid, "quota": {
+                        "plan": quota.plan,
+                        "is_quota_exceeded": quota.is_quota_exceeded,
+                        "user_remaining": quota.user_quota.remaining if quota.user_quota else 0,
+                        "user_total": quota.user_quota.total if quota.user_quota else 0,
+                        "addon_remaining": quota.addon_quota.remaining if quota.addon_quota else 0,
+                        "addon_total": quota.addon_quota.total if quota.addon_quota else 0,
+                    }})
+            return self._json(200, {"ok": True, "quotas": results})
+        except Exception as e:
+            return self._error(500, "qoder quota failed: %s" % e)
+
+    def _route_qoder_checkin(self, payload):
+        try:
+            import qoder_checkin
+            from dataclasses import asdict
+            aid = None
+            if isinstance(payload, dict):
+                aid = payload.get("account_id")
+            if aid:
+                # qoder_checkin exposes checkin_one/checkin_all; there is no
+                # do_checkin. Serialise the whole result so the dashboard can
+                # show the credited amount and streak, not just status text.
+                results = [asdict(qoder_checkin.checkin_one(str(aid)))]
+            else:
+                results = [asdict(r) for r in qoder_checkin.checkin_all()]
+            return self._json(200, {"ok": True, "results": results})
+        except Exception as e:
+            return self._error(500, "qoder checkin failed: %s" % e)
+
+    def _route_qoder_pool(self):
+        try:
+            p = qoder_route.get_pool()
+            slots = []
+            for s in p.snapshot():
+                slots.append({
+                    "id": s.id,
+                    "region": s.region,
+                    "available": s.available(),
+                    "cooling_remaining_ms": s.cooling_remaining_ms if hasattr(s, 'cooling_remaining_ms') else 0,
+                    "last_error": s.last_error if hasattr(s, 'last_error') else "",
+                })
+            return self._json(200, {"ok": True, "slots": slots})
+        except Exception as e:
+            return self._error(500, "qoder pool failed: %s" % e)
+
+    def _route_qoder_usage(self):
+        try:
+            snap = qoder_route.qoder_usage_snapshot()
+            accounts_map = {}
+            try:
+                import qoder_accounts
+                for a in qoder_accounts.list_accounts():
+                    accounts_map[a.id] = {"name": a.name, "region": a.region, "plan": a.plan}
+            except Exception:
+                pass
+            snap["accounts_map"] = accounts_map
+            return self._json(200, snap)
+        except Exception as e:
+            return self._error(500, "qoder usage failed: %s" % e)
+
+    def _route_qoder_usage_recent(self, limit, page):
+        try:
+            data = qoder_route.recent_qoder_usage(limit, page)
+            accounts_map = {}
+            try:
+                import qoder_accounts
+                for a in qoder_accounts.list_accounts():
+                    accounts_map[a.id] = {"name": a.name, "region": a.region}
+            except Exception:
+                pass
+            data["accounts_map"] = accounts_map
+            return self._json(200, data)
+        except Exception as e:
+            return self._error(500, "qoder usage recent failed: %s" % e)
+
+    def _route_qoder_oauth_start(self, payload):
+        try:
+            import qoder_accounts
+            region = "global"
+            if isinstance(payload, dict):
+                region = payload.get("region", "global")
+            sess = qoder_accounts.start_login(region)
+            return self._json(200, {"login_id": sess.login_id,
+                                    "login_url": sess.login_url})
+        except Exception as e:
+            return self._error(500, "qoder oauth start failed: %s" % e)
+
+    def _route_qoder_oauth_poll(self, login_id):
+        try:
+            import qoder_accounts
+            from dataclasses import asdict
+            status, acct = qoder_accounts.poll_login(login_id, "")
+            return self._json(200, {"status": status,
+                                    "account": asdict(acct) if acct else None})
+        except Exception as e:
+            return self._error(500, "qoder oauth poll failed: %s" % e)
+
+    def _route_qoder_quota_single(self, account_id):
+        try:
+            import qoder_accounts
+            import qoder_checkin
+            acct = qoder_accounts.get_account(account_id)
+            if acct is None:
+                return self._error(404, "account not found")
+            secret = qoder_accounts.get_secret(acct.id) or ""
+            dt = qoder_checkin._device_token_of(secret)
+            qi = qoder_accounts.fetch_quota(dt, acct.region, "")
+            remaining = 0.0
+            if qi.addon_quota and qi.addon_quota.remaining > 0:
+                remaining = qi.addon_quota.remaining
+            elif qi.user_quota:
+                remaining = qi.user_quota.remaining
+            data = {
+                "plan": qi.plan,
+                "is_quota_exceeded": qi.is_quota_exceeded,
+                "expires_at": qi.expires_at,
+                "user_quota": qi.user_quota.__dict__ if qi.user_quota else None,
+                "addon_quota": qi.addon_quota.__dict__ if qi.addon_quota else None,
+                "remaining": remaining,
+            }
+            return self._json(200, data)
+        except Exception as e:
+            return self._error(500, "qoder quota single failed: %s" % e)
+    def _route_trae_models(self):
+        """Trae 支持的模型清单与积分倍率。"""
+        try:
+            import trae_proxy
+            return self._json(200, {"ok": True, "models": trae_proxy.trae_catalog_models()})
+        except Exception as e:
+            return self._error(500, f"trae models failed: {e}")
 
     def _route_trae_accounts_list(self):
         """Trae 多账号列表（vault + 状态 + 积分）。"""
@@ -7041,6 +7446,16 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 else:
                     log("Trae failover failed: HTTP %s" % status)
+                    if _qoder_fallback_enabled() and _qoder_enabled():
+                        log("Trying Qoder as final fallback...")
+                        q_status, q_body, _ = try_qoder_failover(payload)
+                        if q_status == 200:
+                            self.send_response(200)
+                            self.send_header("Content-Type", "application/json")
+                            self.end_headers()
+                            self.wfile.write(q_body.encode("utf-8"))
+                            return
+                        log("Qoder fallback also failed: HTTP %s" % q_status)
                     # Add Chinese hint
                     detail = "【额度已用完】上游 CodeBuddy 账号的 credit 已耗尽（错误码 14018）。"
             return self._error(exc.code, upstream_error_message(exc.code, detail))
@@ -7062,6 +7477,76 @@ class Handler(BaseHTTPRequestHandler):
                 upstream, model, custom_names, request_meta, fp, account, t_start, ns_map,
                 base_body=chat_req, session_key=session_key, realm=req_realm)
 
+
+    def _try_trae_failover_stream(self, model, payload):
+        """Serve a streaming request from Trae, emitting real SSE frames.
+
+        The non-streaming failover returns one aggregated chat.completion and
+        cannot be reused here: a streaming client waits for `data:` lines and
+        hangs forever if it gets a plain JSON body back (observed as a silent
+        two-minute stall). trae_proxy.trae_stream() yields incremental chunks,
+        which is what the client actually asked for.
+
+        Returns True when the response was served. False means nothing was
+        written yet and the caller may still fall back to another upstream.
+        """
+        try:
+            import trae_proxy
+            gen = trae_proxy.trae_stream(model, payload)
+            # Pull the first chunk before sending any header: trae_stream is
+            # lazy and raises TraeStreamError for an unusable model/account,
+            # and that has to stay recoverable as a normal failover.
+            try:
+                first = next(gen)
+            except StopIteration:
+                return False
+            except trae_proxy.TraeStreamError as exc:
+                log("Trae stream unavailable: %s" % exc)
+                # 上游明确说了 rate limit 就算冷却记账：trae_first 下每次都白撞
+                # 这堵墙只会拖慢每一个请求，记账后可在一段时间内直接跳过。
+                if "rate limit" in str(exc).lower() or "超出频率" in str(exc):
+                    _note_trae_model_cooldown(model, 60.0)
+                    log("Trae 侧 '%s' 限流，本次记 60s 冷却以免每跳都白撞" % model)
+                return False
+            except Exception as exc:
+                log("Trae stream setup failed: %s" % exc)
+                if "rate limit" in str(exc).lower() or "超出频率" in str(exc):
+                    _note_trae_model_cooldown(model, 60.0)
+                    log("Trae 侧 '%s' 限流，本次记 60s 冷却以免每跳都白撞" % model)
+                return False
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            if cors_origin_allowed(self.path):
+                self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+
+            def emit(obj):
+                self.wfile.write(("data: " + json.dumps(obj, ensure_ascii=False) + "\n\n").encode("utf-8"))
+                self.wfile.flush()
+
+            emit(first)
+            for chunk in gen:
+                # The generator's last yield is a usage dict, not a chunk.
+                if isinstance(chunk, dict) and chunk.get("object") == "chat.completion.chunk":
+                    emit(chunk)
+                if isinstance(chunk, dict) and ("prompt_tokens" in chunk or "total_tokens" in chunk) \
+                        and chunk.get("object") != "chat.completion.chunk":
+                    emit({"id": "trae-usage", "object": "chat.completion.chunk",
+                          "created": int(time.time()), "model": model,
+                          "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
+                          "usage": chunk})
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+            return True
+        except (BrokenPipeError, ConnectionResetError):
+            return True
+        except Exception as exc:
+            log("Trae stream aborted: %s" % exc)
+            return True
     def _responses_stream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -7206,6 +7691,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_proxy_slots(path, payload)
         if path in ("/panel/login", "/panel/logout", "/panel/password"):
             return self._handle_panel(path)
+        if path == "/qoder/oauth/start":
+            payload = self._payload_or_error()
+            if payload is None:
+                return
+            return self._route_qoder_oauth_start(payload)
         if self._is_panel_route(path) and not self._panel_ok():
 
             return self._error(401, "panel password required", "invalid_request_error")
@@ -7216,10 +7706,12 @@ class Handler(BaseHTTPRequestHandler):
             or path.startswith("/scheduler")
             or path.startswith("/logs")
             or path.startswith("/trae/")
+            or path.startswith("/qoder/")
         )
         if not is_account_route and path not in ("/v1/chat/completions", "/chat/completions",
                                                 "/v1/completions", "/completions",
-                                                "/v1/responses", "/responses"):
+                                                "/v1/responses", "/responses",
+                                                "/v1/messages", "/messages"):
             print(f"[DEBUG] 404: path={path}, is_account_route={is_account_route}")
             return self._error(404, "not found", "invalid_request_error")
         if not self._authorized():
@@ -7230,6 +7722,8 @@ class Handler(BaseHTTPRequestHandler):
         if is_account_route:
             if path.startswith("/trae/"):
                 return self._handle_trae(path, payload)
+            if path.startswith("/qoder/"):
+                return self._handle_qoder(path, payload)
             return self._handle_accounts(path, payload)
         # Both OpenAI-shaped routes below can hold a thread for up to 600s.
         # Take a slot for the duration; release it in finally so every early
@@ -7255,8 +7749,20 @@ class Handler(BaseHTTPRequestHandler):
                     pass
                 return self._error(400, background_request_message(reason),
                                    "invalid_request_error")
+        # Qoder Claude Messages API (/v1/messages)
+        if path in ("/v1/messages", "/messages") and _qoder_enabled():
+            return self._route_to_qoder_claude(payload)
+        # Qoder Codex Responses API (/v1/responses with qoder model)
+        if path in ("/v1/responses", "/responses") and _qoder_enabled():
+            model_name = payload.get("model") or ""
+            if _is_qoder_model(model_name):
+                return self._route_to_qoder_codex(payload)
         if path in ("/v1/responses", "/responses"):
             return self._handle_responses(payload)
+        # Qoder 路由：qoder- 前缀的模型直接走 Qoder 上游
+        model_name = payload.get("model") or ""
+        if _qoder_enabled() and _is_qoder_model(model_name):
+            return self._route_to_qoder(payload)
         # Diagnostics: what the client actually asked for, and what we forward.
         # Only the knobs that change behaviour are logged - never message text.
         forwarded = build_upstream_body(payload)
@@ -7288,18 +7794,38 @@ class Handler(BaseHTTPRequestHandler):
             key_blocked = self._key_model_error(payload.get("model"))
             if key_blocked:
                 return self._error(400, key_blocked, "invalid_request_error")
-            # Trae 优先模式（trae_first）：先打 Trae 扣 Trae 积分，非流式请求成功即返回；
-            # 失败或流式请求落回 WorkBuddy 正常链路
-            if _trae_first_enabled() and not want_stream:
-                log("trae_priority=trae_first, routing to Trae first: %s" % model)
-                status, body, usage = try_trae_failover(model, payload)
-                if status == 200:
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.end_headers()
-                    self.wfile.write(body.encode("utf-8"))
-                    return
-                log("Trae-first attempt failed (HTTP %s), falling back to WorkBuddy" % status)
+            # Trae 优先模式（trae_first）：先打 Trae 扣 Trae 积分。
+            # 流式与非流式都走这里。之前的 `and not want_stream` 让流式永远落回
+            # WorkBuddy，而流式正是 CLI 的默认形态——面板写着「Trae 优先」，实际
+            # 扣的始终是 WorkBuddy 积分。
+            if _trae_first_enabled():
+                # Trae 侧若刚被限流则直接跳过：trae_first 语义是"每跳先打 Trae"，
+                # 不跳过就会每个请求都先吃一次限流墙的往返（约 1s）再回落 WorkBuddy。
+                _tw = _trae_model_cooldown_wait(model)
+                if _tw > 0:
+                    log("trae_first 跳过：Trae 侧 '%s' 仍在限流冷却（剩 %ds），直接走 WorkBuddy"
+                        % (model, int(_tw)))
+                else:
+                    log("trae_priority=trae_first, routing to Trae first: %s (stream=%s)"
+                        % (model, want_stream))
+                    if want_stream:
+                        if self._try_trae_failover_stream(model, payload):
+                            return
+                        log("Trae stream unavailable, falling back to WorkBuddy")
+                    else:
+                        status, body, usage = try_trae_failover(model, payload)
+                        if status == 200:
+                            self.send_response(200)
+                            self.send_header("Content-Type", "application/json")
+                            self.end_headers()
+                            self.wfile.write(body.encode("utf-8"))
+                            return
+                        if status == 429:
+                            # Trae 侧限流：分类修复后这里能收到真正的 429
+                            # （此前被错映射成 502，无法记账），记冷却避免每跳白撞。
+                            _note_trae_model_cooldown(model, 60.0)
+                            log("Trae 侧 '%s' 限流（HTTP 429），记 60s 冷却" % model)
+                        log("Trae-first attempt failed (HTTP %s), falling back to WorkBuddy" % status)
             upstream, account = open_upstream(payload, session_key=session_key, target_realm=req_realm)
         except ContentRejected as exc:
             record_error(model, 403, exc.detail[:200],
@@ -7314,6 +7840,12 @@ class Handler(BaseHTTPRequestHandler):
             # Trae failover on 14018 (credit exhausted)
             if _FAILOVER_ENABLED and ("14018" in str(exc) or "credit" in str(exc).lower()):
                 log("WorkBuddy exhausted (14018), failing over to Trae...")
+                # 流式客户端必须拿到 SSE 帧；聚合 JSON 会让它一直等流结束。
+                if want_stream:
+                    if self._try_trae_failover_stream(model, payload):
+                        return
+                    log("Trae stream unavailable, reporting 429")
+                    return self._rate_limited(exc)
                 status, body, usage = try_trae_failover(model, payload)
                 if status == 200:
                     # Success via Trae
@@ -7324,6 +7856,16 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 else:
                     log("Trae failover failed: HTTP %s" % status)
+                    if _qoder_fallback_enabled() and _qoder_enabled():
+                        log("Trying Qoder as final fallback...")
+                        q_status, q_body, _ = try_qoder_failover(payload)
+                        if q_status == 200:
+                            self.send_response(200)
+                            self.send_header("Content-Type", "application/json")
+                            self.end_headers()
+                            self.wfile.write(q_body.encode("utf-8"))
+                            return
+                        log("Qoder fallback also failed: HTTP %s" % q_status)
             return self._rate_limited(exc)
         except urllib.error.HTTPError as exc:
             detail = exc.read(600).decode("utf-8", "replace")
@@ -7333,6 +7875,11 @@ class Handler(BaseHTTPRequestHandler):
             # Trae failover on 14018 (credit exhausted)
             if _FAILOVER_ENABLED and exc.code == 400 and "14018" in detail:
                 log("WorkBuddy exhausted (14018), failing over to Trae...")
+                if want_stream:
+                    if self._try_trae_failover_stream(model, payload):
+                        return
+                    log("Trae stream unavailable, reporting upstream error")
+                    return self._error(exc.code, upstream_error_message(exc.code, detail))
                 status, body, usage = try_trae_failover(model, payload)
                 if status == 200:
                     self.send_response(200)
@@ -7342,6 +7889,16 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 else:
                     log("Trae failover failed: HTTP %s" % status)
+                    if _qoder_fallback_enabled() and _qoder_enabled():
+                        log("Trying Qoder as final fallback...")
+                        q_status, q_body, _ = try_qoder_failover(payload)
+                        if q_status == 200:
+                            self.send_response(200)
+                            self.send_header("Content-Type", "application/json")
+                            self.end_headers()
+                            self.wfile.write(q_body.encode("utf-8"))
+                            return
+                        log("Qoder fallback also failed: HTTP %s" % q_status)
                     # Add Chinese hint
                     detail = "【额度已用完】上游 CodeBuddy 账号的 credit 已耗尽（错误码 14018）。"
             return self._error(exc.code, upstream_error_message(exc.code, detail))
@@ -7361,6 +7918,176 @@ class Handler(BaseHTTPRequestHandler):
                     upstream, model, fp, account, t_start)
             return self._chat_nonstream_response(
                 upstream, model, fp, account, t_start)
+
+    def _route_to_qoder_claude(self, payload):
+        """Route Claude /v1/messages request to Qoder upstream."""
+        import qoder_claude
+        want_stream = bool(payload.get("stream"))
+        model = payload.get("model") or "auto"
+        t_start = time.time()
+        log("qoder-claude: model=%s stream=%s" % (model, want_stream))
+
+        if want_stream:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            if cors_origin_allowed(self.path):
+                self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+
+            def on_event(event_type, data):
+                line = "event: %s\ndata: %s\n\n" % (event_type, json.dumps(data))
+                self.wfile.write(line.encode("utf-8"))
+                self.wfile.flush()
+
+            try:
+                status, body = qoder_claude.call_qoder_claude(payload, on_event=on_event)
+                if status != 200:
+                    log("qoder-claude: stream error status=%s" % status)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                log("qoder-claude: client disconnected during stream")
+                return
+            except Exception as exc:
+                log("qoder-claude: stream error: %s" % exc)
+                try:
+                    err_line = "event: error\ndata: %s\n\n" % json.dumps(
+                        {"type": "error", "error": {"type": "api_error", "message": str(exc)}})
+                    self.wfile.write(err_line.encode("utf-8"))
+                    self.wfile.flush()
+                except Exception:
+                    pass
+                return
+            return
+
+        try:
+            status, body = qoder_claude.call_qoder_claude(payload, on_event=None)
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            if cors_origin_allowed(self.path):
+                self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body.encode("utf-8"))
+        except Exception as exc:
+            log("qoder-claude: non-stream error: %s" % exc)
+            return self._error(502, "qoder upstream error: %s" % exc)
+
+    def _route_to_qoder_codex(self, payload):
+        """Route Codex /v1/responses request to Qoder upstream."""
+        import qoder_codex
+        want_stream = bool(payload.get("stream"))
+        model = payload.get("model") or "auto"
+        t_start = time.time()
+        log("qoder-codex: model=%s stream=%s" % (model, want_stream))
+
+        if want_stream:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            if cors_origin_allowed(self.path):
+                self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+
+            def on_event(event_type, data):
+                line = "event: %s\ndata: %s\n\n" % (event_type, json.dumps(data))
+                self.wfile.write(line.encode("utf-8"))
+                self.wfile.flush()
+
+            try:
+                status, body = qoder_codex.call_qoder_codex(payload, on_event=on_event)
+                if status != 200:
+                    log("qoder-codex: stream error status=%s" % status)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                log("qoder-codex: client disconnected during stream")
+                return
+            except Exception as exc:
+                log("qoder-codex: stream error: %s" % exc)
+                try:
+                    err_line = "event: error\ndata: %s\n\n" % json.dumps(
+                        {"type": "error", "message": str(exc)})
+                    self.wfile.write(err_line.encode("utf-8"))
+                    self.wfile.flush()
+                except Exception:
+                    pass
+                return
+            return
+
+        try:
+            status, body = qoder_codex.call_qoder_codex(payload, on_event=None)
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            if cors_origin_allowed(self.path):
+                self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body.encode("utf-8"))
+        except Exception as exc:
+            log("qoder-codex: non-stream error: %s" % exc)
+            return self._error(502, "qoder upstream error: %s" % exc)
+
+    def _route_to_qoder(self, payload):
+        """Route request to Qoder upstream (streaming + non-streaming)."""
+        want_stream = bool(payload.get("stream"))
+        model = payload.get("model") or "qoder-sonnet"
+        t_start = time.time()
+        log("qoder: routing model=%s stream=%s" % (model, want_stream))
+
+        if want_stream:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            if cors_origin_allowed(self.path):
+                self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+
+            chunks_written = []
+            def on_delta(chunk):
+                line = "data: " + json.dumps(chunk) + "\n\n"
+                self.wfile.write(line.encode("utf-8"))
+                self.wfile.flush()
+                chunks_written.append(chunk)
+
+            try:
+                status, body = qoder_route.call_qoder(payload, on_delta=on_delta)
+                if status != 200:
+                    err_chunk = {
+                        "id": "chatcmpl-err",
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": model,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+                    }
+                    self.wfile.write(("data: " + json.dumps(err_chunk) + "\n\n").encode("utf-8"))
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                log("qoder: client disconnected during stream")
+                return
+            except Exception as exc:
+                log("qoder: stream error: %s" % exc)
+                try:
+                    self.wfile.write(b"data: [DONE]\n\n")
+                    self.wfile.flush()
+                except Exception:
+                    pass
+                return
+            wall = int((time.time() - t_start) * 1000)
+            log("qoder: stream done, %d chunks, %dms" % (len(chunks_written), wall))
+            return
+
+        # Non-streaming
+        try:
+            status, body = qoder_route.call_qoder(payload, on_delta=None)
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            if cors_origin_allowed(self.path):
+                self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body.encode("utf-8"))
+        except Exception as exc:
+            log("qoder: non-stream error: %s" % exc)
+            return self._error(502, "qoder upstream error: %s" % exc)
 
     def _chat_stream_response(self, upstream, model, fp, account, t_start):
             self.send_response(200)

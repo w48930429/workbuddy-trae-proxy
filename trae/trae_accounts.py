@@ -20,7 +20,8 @@ _ENT_USAGE_URL = "https://api.trae.cn/trae/api/v2/pay/ide_user_ent_usage"
 
 _DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_CONFIG_PATH = os.path.join(_ROOT_DIR, "config.json")
 
 
 def _load_state() -> dict:

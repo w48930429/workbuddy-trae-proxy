@@ -89,6 +89,25 @@ tbody tr:hover{background:rgba(241,245,249,.6)}
 .cool-list{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
 .cool-pill{display:inline-block;padding:1px 7px;border-radius:999px;font-size:10px;font-weight:600;
   color:#b45309;background:rgba(245,158,11,.14);border:1px solid rgba(245,158,11,.35);white-space:nowrap}
+.thr-list{display:flex;flex-direction:column;gap:8px}
+.thr-row{display:grid;grid-template-columns:minmax(120px,200px) auto 1fr;align-items:center;gap:12px;
+  background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 14px}
+.thr-row.warn{border-color:rgba(217,119,6,.35);background:rgba(217,119,6,.06)}
+.thr-row.bad{border-color:rgba(220,38,38,.32);background:rgba(220,38,38,.06)}
+.thr-name{font-weight:700;font-size:13px;color:var(--fg);font-family:ui-monospace,monospace}
+.thr-left{font-size:12px;font-weight:600;color:#b45309;white-space:nowrap;font-variant-numeric:tabular-nums}
+.thr-row.bad .thr-left{color:#b91c1c}
+.thr-meta{font-size:11px;color:var(--dim);text-align:left}
+.cool-pill.soon{color:#15803d;background:rgba(34,197,94,.14);border-color:rgba(34,197,94,.35)}
+.cool-pill.far{color:#b91c1c;background:rgba(239,68,68,.13);border-color:rgba(239,68,68,.35)}
+.thr-items{display:flex;flex-wrap:wrap;gap:6px;margin-top:5px}
+.thr-item{display:inline-flex;align-items:baseline;gap:6px;padding:1px 8px;border-radius:999px;
+  font-size:10px;font-weight:600;white-space:nowrap;
+  color:#b45309;background:rgba(245,158,11,.14);border:1px solid rgba(245,158,11,.35)}
+.thr-item b{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-weight:700}
+.thr-item-t{opacity:.9}
+.thr-item.soon{color:#15803d;background:rgba(34,197,94,.14);border-color:rgba(34,197,94,.35)}
+.thr-item.far{color:#b91c1c;background:rgba(239,68,68,.13);border-color:rgba(239,68,68,.35)}
 .empty{color:var(--dim);text-align:center;padding:28px 0;font-size:13px}
 .legend{display:flex;gap:16px;color:var(--dim);font-size:11px;margin-top:12px;flex-wrap:wrap}
 .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:middle}
@@ -364,6 +383,9 @@ a:hover{text-decoration:underline}
       <button class="main-nav-btn active" id="btnNavGateway" onclick="switchMainTab('gateway')">
         网关与运维
       </button>
+      <button class="main-nav-btn" id="btnNavTrae" onclick="switchMainTab('trae')">
+        Trae
+      </button>
       <button class="main-nav-btn" id="btnNavAnalytics" onclick="switchMainTab('analytics')">
         数据指标看板
       </button>
@@ -372,6 +394,12 @@ a:hover{text-decoration:underline}
       </button>
       <button class="main-nav-btn" id="btnNavSettings" onclick="switchMainTab('settings')">
         设置
+      </button>
+      <button class="main-nav-btn" id="btnNavQoder" onclick="switchMainTab('qoder')">
+        Qoder 看板
+      </button>
+      <button class="main-nav-btn" id="btnNavAntigravity" onclick="switchMainTab('antigravity')">
+        反重力看板
       </button>
     </nav>
 <a class="gh-link" href="https://github.com/ardeyouxipianyi/workbuddy2api-hub" target="_blank" rel="noopener noreferrer"
@@ -476,6 +504,16 @@ a:hover{text-decoration:underline}
 
   <div class="cards" id="cards"></div>
 
+  <!-- 模型级限流聚合（429 / code 6004）：账号行里也有药丸，但这里按模型去重，
+       让"现在到底哪些模型不可用、还要等多久"一眼可见，不必逐行数账号。 -->
+  <section id="modelThrottleSection" style="display:none;margin-bottom:20px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+      <h2 style="margin:0">模型限流 <em id="throttleModelCount"></em></h2>
+      <span style="font-size:12px;color:var(--dim)">上游 code 6004 只限制单个模型，不影响同账号其它模型</span>
+    </div>
+    <div id="modelThrottleList"></div>
+  </section>
+
   <section>
     <h2>账号<em id="acctCount"></em></h2>
     <div class="toolbar">
@@ -497,30 +535,7 @@ a:hover{text-decoration:underline}
   </div>
     <div id="accounts"></div>
   </section>
-  <!-- Trae 账号区域 -->
-  <section>
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
-      <h2>Trae 账号<em id="traeAcctCount"></em></h2>
-      <div class="toolbar">
-        <button class="sec" onclick="startTraeOAuth()">+ 添加账号 (OAuth)</button>
-        <button class="sec" onclick="traeCheckinAll(this)">每日签到</button>
-        <button class="sec" onclick="traeExport(this)">导出账号</button>
-        <button class="sec" onclick="document.getElementById('traeImportFile').click()">导入账号</button>
-        <input type="file" id="traeImportFile" accept=".json" style="display:none" onchange="traeImportFilePicked(this)">
-        <button class="sec" onclick="traeRefreshCredits(this)">刷新积分</button>
-        <button class="sec" onclick="traeSetAll(false, this)">全部停用</button>
-        <button class="sec" onclick="traeSetAll(true, this)">全部启用</button>
-        <button class="sec" id="traePriorityBtn" onclick="traeTogglePriority(this)">扣分顺序: WB 优先</button>
-        <button class="sec" onclick="openTraeGuide()">获取 Token 说明</button>
-      </div>
-    </div>
-    <div id="trae-accounts" style="min-height:60px">
-      <div class="hint" style="color:var(--dim);text-align:center;padding:20px">
-        点击「+ 添加账号 (OAuth)」登录，或「导入账号」批量导入；登录后自动参与 failover 调度
-      </div>
-    </div>
-    <div id="traeCards" style="display:none;margin-top:14px"></div>
-  </section>
+  <!-- /WorkBuddy 账号区域 (Trae 账号已独立移至 Trae 看板 Tab) -->
 
   <!-- 融合后的：模型性能与用量矩阵 -->
   
@@ -612,8 +627,134 @@ a:hover{text-decoration:underline}
     <div id="taskLogBox" style="display:none;margin-top:14px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:12px 14px;font-size:12px;font-family:ui-monospace,monospace;line-height:1.6;max-height:220px;overflow-y:auto"></div>
   </section>
 
-  
   </div><!-- /pageGateway -->
+
+  <!-- ==================== Trae 专属看板页面 ==================== -->
+  <div id="pageTrae" class="main-page">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:12px">
+      <div>
+        <h2 style="margin:0;font-size:16px;color:var(--fg)">Trae 多账号与容灾管理</h2>
+        <div style="font-size:12px;color:var(--dim);margin-top:4px">Trae 账号池 · OAuth 授权 · 自动签到 · 额度监控 · 优先级调度</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span class="badge ok" id="traeStatusBadge">Trae 模块就绪</span>
+        <button class="sec mini" onclick="traeRefreshCredits(this)">刷新全量积分</button>
+      </div>
+    </div>
+
+    <!-- Trae 汇总数据卡片 -->
+    <div class="cards" id="traeCards" style="display:none;margin-bottom:20px"></div>
+
+    <!-- Trae 侧模型限流。与 WorkBuddy 的限流区块同构，但数据来自
+         /trae/cool-downs：Trae 被限流时请求会静默回落 WorkBuddy，
+         没有这块就看不出为什么 Trae 不再扣积分。 -->
+    <section id="traeThrottleSection" style="display:none;margin-bottom:20px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+        <h2 style="margin:0">Trae 模型限流 <em id="traeThrottleCount"></em></h2>
+        <span style="font-size:12px;color:var(--dim)">限流期间请求自动回落 WorkBuddy，冷却结束后恢复优先</span>
+      </div>
+      <div id="traeThrottleList" class="thr-list"></div>
+    </section>
+
+    <!-- Trae 账号区域 -->
+    <section>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+        <h2>Trae 账号列表<em id="traeAcctCount"></em></h2>
+        <div class="toolbar">
+          <button class="sec" onclick="startTraeOAuth()">+ 添加账号 (OAuth)</button>
+          <button class="sec" onclick="traeCheckinAll(this)">每日签到</button>
+          <button class="sec" onclick="traeExport(this)">导出账号</button>
+          <button class="sec" onclick="document.getElementById('traeImportFile').click()">导入账号</button>
+          <input type="file" id="traeImportFile" accept=".json" style="display:none" onchange="traeImportFilePicked(this)">
+          <button class="sec" onclick="traeRefreshCredits(this)">刷新积分</button>
+          <button class="sec" onclick="traeSetAll(false, this)">全部停用</button>
+          <button class="sec" onclick="traeSetAll(true, this)">全部启用</button>
+          <button class="sec" id="traePriorityBtn" onclick="traeTogglePriority(this)">扣分顺序: 读取中…</button>
+          <button class="sec" onclick="openTraeGuide()">获取 Token 说明</button>
+        </div>
+      </div>
+      <div id="trae-accounts" style="min-height:60px">
+        <div class="hint" style="color:var(--dim);text-align:center;padding:20px">
+          点击「+ 添加账号 (OAuth)」登录，或「导入账号」批量导入；登录后自动参与 failover 调度
+        </div>
+      </div>
+    </section>
+    <!-- Trae 版本模型库与能力清单 -->
+    <section>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+        <div>
+          <h2 style="margin:0">Trae 支持模型库与积分消耗清单 <em id="traeModelCount"></em></h2>
+          <div style="font-size:12px;color:var(--dim);margin-top:4px">展示当前 Trae 上游对话大模型、计费消耗、能力标签、上下文容量及通道分类</div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="sec mini" onclick="loadTraeModels(this)">刷新模型清单</button>
+        </div>
+      </div>
+      <div style="overflow-x:auto">
+        <table id="traeModelsTable" class="data-cards">
+          <thead>
+            <tr>
+              <th style="text-align:left;width:230px">模型 ID</th>
+              <th style="text-align:center;width:150px">消费积分 / 1K Token</th>
+              <th style="text-align:center;width:150px">模型能力</th>
+              <th style="text-align:center;width:110px">上下文窗口</th>
+              <th style="text-align:center;width:100px">最大输出</th>
+              <th style="text-align:left">通道与调度说明</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td colspan="6" class="empty">正在拉取 Trae 模型清单...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Trae 容灾模型映射与通道说明 -->
+    <section>
+      <div style="margin-bottom:12px">
+        <h2>Trae 模型通道与容灾策略 <em>自动 Failover</em></h2>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>模型标识 / 前缀</th>
+              <th>模型名称</th>
+              <th>底层上游通道</th>
+              <th>调度与扣分说明</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="mono" style="color:var(--accent);font-weight:600">trae-claude-3-7-sonnet</td>
+              <td>Claude 3.7 Sonnet (Trae)</td>
+              <td><span class="badge ok mini">SOLO Gateway</span></td>
+              <td style="color:var(--dim);text-align:left">带 <code>trae-</code> 前缀强制直通 Trae 账号池</td>
+            </tr>
+            <tr>
+              <td class="mono" style="color:var(--accent);font-weight:600">trae-gpt-4o</td>
+              <td>GPT-4o (Trae)</td>
+              <td><span class="badge ok mini">SOLO Gateway</span></td>
+              <td style="color:var(--dim);text-align:left">带 <code>trae-</code> 前缀强制直通 Trae 账号池</td>
+            </tr>
+            <tr>
+              <td class="mono" style="color:var(--accent);font-weight:600">trae-deepseek-r1</td>
+              <td>DeepSeek R1 (Trae)</td>
+              <td><span class="badge ok mini">SOLO Gateway</span></td>
+              <td style="color:var(--dim);text-align:left">带 <code>trae-</code> 前缀强制直通 Trae 账号池</td>
+            </tr>
+            <tr>
+              <td class="mono" style="color:var(--warn);font-weight:600">claude-* / gpt-*</td>
+              <td>WorkBuddy 对应模型</td>
+              <td><span class="badge mini">Failover Fallback</span></td>
+              <td style="color:var(--dim);text-align:left">WorkBuddy 额度耗尽（错误码 14018 / 429）时自动无感切入 Trae 账号池接管</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
   <div id="pageAnalytics" class="main-page">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:12px">
       <div>
@@ -956,6 +1097,111 @@ a:hover{text-decoration:underline}
     </div>
   </div>
 
+  <div id="pageQoder" class="main-page">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:12px">
+      <div>
+        <h2 style="margin:0;font-size:16px;color:var(--fg)">Qoder 看板</h2>
+        <div style="font-size:12px;color:var(--dim);margin-top:4px">账号额度 · 模型消耗 · 请求记录</div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="sec mini" onclick="loadQoderData(true)">刷新</button>
+      </div>
+    </div>
+
+    <div id="qoderCards" class="cards" style="margin-bottom:22px">
+      <div class="card"><div class="k">可用账号</div><div class="v" id="qoderKpiAccounts">—</div><div class="s">Qoder 账号池</div></div>
+      <div class="card accent2"><div class="k">总请求</div><div class="v" id="qoderKpiRequests">—</div><div class="s">累计请求数</div></div>
+      <div class="card accent"><div class="k">总 Token</div><div class="v" id="qoderKpiTokens">—</div><div class="s">输入 + 输出</div></div>
+      <div class="card"><div class="k">成功率</div><div class="v" id="qoderKpiSuccess">—</div><div class="s">completed / total</div></div>
+    </div>
+
+    <section>
+      <h2>账号列表 <em id="qoderAcctCount"></em></h2>
+      <div class="toolbar">
+        <button onclick="startQoderOAuth()">+ 添加账号 (OAuth)</button>
+        <button class="sec" onclick="qoderRefreshQuota(this)">刷新额度</button>
+        <button class="sec" onclick="qoderCheckinAll(this)">一键签到</button>
+      </div>
+      <div id="qoderAccounts"></div>
+    </section>
+
+    <section>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+        <h2 style="margin:0">最近请求 <em id="qoderRecentCount"></em></h2>
+        <div style="display:inline-flex;align-items:center;gap:8px">
+          <span style="font-size:12px;color:var(--dim)">显示条数:</span>
+          <div style="display:inline-flex;gap:3px">
+            <button class="sec mini" onclick="setQoderRecentLimit(10)">10</button>
+            <button class="sec mini" onclick="setQoderRecentLimit(20)">20</button>
+            <button class="sec mini" onclick="setQoderRecentLimit(50)">50</button>
+          </div>
+        </div>
+      </div>
+      <div id="qoderRecent" class="table-wrap"></div>
+      <div id="qoderRecentPagination" style="display:flex;align-items:center;justify-content:space-between;margin-top:14px;padding-top:12px;border-top:1px solid var(--line);font-size:12px;color:var(--dim);flex-wrap:wrap;gap:8px">
+        <div id="qoderRecentPageInfo">第 1 / 1 页 · 共 0 条记录</div>
+        <div style="display:inline-flex;gap:5px;align-items:center">
+          <button class="sec mini" id="btnQoderRecentPrev" onclick="changeQoderRecentPage(-1)">上一页</button>
+          <button class="sec mini" id="btnQoderRecentNext" onclick="changeQoderRecentPage(1)">下一页</button>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>模型消耗分布 <em id="qoderModelCount"></em></h2>
+      <div id="qoderModelConsumption"></div>
+    </section>
+
+    <!-- Qoder 版本模型库与能力清单 -->
+    <section>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+        <div>
+          <h2 style="margin:0">Qoder 支持模型库与能力清单 <em id="qoderAvailModelCount"></em></h2>
+          <div style="font-size:12px;color:var(--dim);margin-top:4px">展示当前 Qoder 上游对话大模型、消费倍率、上下文容量与推理能力</div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="sec mini" onclick="loadQoderModelsTable(this)">刷新模型清单</button>
+        </div>
+      </div>
+      <div style="overflow-x:auto">
+        <table id="qoderModelsTable" class="data-cards">
+          <thead>
+            <tr>
+              <th style="text-align:left;width:220px">模型 ID</th>
+              <th style="text-align:center;width:140px">消费倍率 / 优惠</th>
+              <th style="text-align:center;width:150px">模型能力</th>
+              <th style="text-align:center;width:110px">上下文窗口</th>
+              <th style="text-align:center;width:100px">最大输出</th>
+              <th style="text-align:left">内部路由 Key</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td colspan="6" class="empty">正在拉取 Qoder 模型清单...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <div id="pageAntigravity" class="main-page" style="margin:0;padding:0">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:12px">
+      <div style="display:flex;align-items:center;gap:10px">
+        <h2 style="margin:0;font-size:16px;color:var(--fg)">Antigravity Proxy 控制台</h2>
+        <span class="badge ok">本地端口 43810</span>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <a href="http://127.0.0.1:43810/admin/" target="_blank" rel="noopener noreferrer" style="font-size:12px;color:var(--accent);text-decoration:none;display:inline-flex;align-items:center;gap:4px">
+          在新窗口打开 ↗
+        </a>
+        <button type="button" onclick="const f=document.getElementById('iframeAntigravity');if(f)f.src=f.src;" style="padding:4px 10px;font-size:12px">
+          刷新控制台
+        </button>
+      </div>
+    </div>
+    <div style="width:100%;height:calc(100vh - 160px);min-height:720px;background:#0b0f19;border-radius:12px;overflow:hidden;border:1px solid var(--line);box-shadow:var(--shadow-md)">
+      <iframe id="iframeAntigravity" src="http://127.0.0.1:43810/admin/" style="width:100%;height:100%;border:none;display:block" title="Antigravity Console"></iframe>
+    </div>
+  </div>
   <footer>每 5 秒自动刷新 · 数据来自本机反代 <span class="mono" id="logfile"></span></footer>
 </main>
 
@@ -1285,13 +1531,23 @@ async function loadModels(){
 function renderAvailableModels(){
   const tb = document.querySelector('#modelsTable tbody');
   if(!tb) return;
+  // 过滤无效的消费倍率 / 优惠对应的模型（排除无倍率的内部模型如 Qoder 系列）
+  const validModels = (MODELS_DATA || []).filter(m => {
+    if(!m || !m.id) return false;
+    if(m.owned_by && m.owned_by !== 'workbuddy') return false;
+    const c = (m.credits || '').toString().toLowerCase().replace('x', '').trim();
+    if(c === '0.00' || c === '0' || m.id === 'hy3' || m.id === 'hy4-preview-f' || (m.id === 'deepseek-v4.1-flash' && window.VIEW_REALM === 'intl')) return true;
+    if(c && c !== '-' && c !== 'null' && c !== 'undefined') return true;
+    return false;
+  });
+
   const countEm = document.getElementById('availModelCount');
-  if(countEm) countEm.textContent = '(共 ' + MODELS_DATA.length + ' 个)';
-  if(!MODELS_DATA.length){
+  if(countEm) countEm.textContent = '(共 ' + validModels.length + ' 个)';
+  if(!validModels.length){
     tb.innerHTML = '<tr><td colspan="6" class="empty">暂无可用模型</td></tr>';
     return;
   }
-  tb.innerHTML = MODELS_DATA.map(m => {
+  tb.innerHTML = validModels.map(m => {
     // 1. 倍率与折扣
     let credBadge = '-';
     const c = (m.credits || '').toString().toLowerCase().replace('x', '');
@@ -1609,6 +1865,18 @@ async function doDailyChatWeb(btn){
 }
 
 const fmt = n => (n ?? 0).toLocaleString('en-US');
+const fmtCompact = n => {
+  const v = Number(n ?? 0);
+  if (isNaN(v) || v < 1000000) return fmt(v);
+  if (v >= 1000000000) {
+    const b = v / 1000000000;
+    const formatted = b >= 100 ? b.toFixed(1) : (b >= 10 ? b.toFixed(2) : b.toFixed(2));
+    return formatted.replace(/\.?0+$/, '') + ' B';
+  }
+  const m = v / 1000000;
+  const formatted = m >= 100 ? m.toFixed(1) : (m >= 10 ? m.toFixed(2) : m.toFixed(2));
+  return formatted.replace(/\.?0+$/, '') + ' M';
+};
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const ms = v => v == null ? '—' : (v >= 1000 ? (v/1000).toFixed(2) + ' s' : Math.round(v) + ' ms');
 const pct = v => v == null ? '—' : v.toFixed(1) + '%';
@@ -1745,14 +2013,138 @@ function fmtCoolAt(epoch){
   return d.getFullYear() + '-' + two(d.getMonth() + 1) + '-' + two(d.getDate())
     + ' ' + two(d.getHours()) + ':' + two(d.getMinutes());
 }
-function coolPills(a){
-  const list = a && Array.isArray(a.modelCooldowns) ? a.modelCooldowns : [];
-  const pills = list.map(c => {
-    const at = c && fmtCoolAt(c.expiresAt);
-    return at ? '<span class="cool-pill" title="该账号仅此模型受限；时间为本地时间">'
-      + esc(c.model) + ' · ' + at + ' 恢复</span>' : '';
+// Seconds left until a cooldown expires. Under 10 minutes counts down in
+// seconds; past that a coarse unit is more useful than a ticking number.
+function coolRemain(epoch){
+  const seconds = Math.max(0, Math.round(Number(epoch) - Date.now() / 1000));
+  if(seconds <= 0) return '';
+  if(seconds < 90) return seconds + ' 秒';
+  if(seconds < 5400) return Math.round(seconds / 60) + ' 分钟';
+  if(seconds < 172800) return (seconds / 3600).toFixed(1) + ' 小时';
+  return (seconds / 86400).toFixed(1) + ' 天';
+}
+// Urgency class: almost over is calm, a long wait is the loud one — the point
+// is "do not sit and wait", not "everything is broken".
+function coolUrgency(epoch){
+  const seconds = Number(epoch) - Date.now() / 1000;
+  if(seconds < 600) return 'soon';
+  if(seconds >= 3600) return 'far';
+  return '';
+}
+// Aggregated view: one row per model, not per account. Upstream code 6004 is
+// judged per credential, so the same model gets throttled independently on
+// several accounts within seconds — that is N capacity slots cooling, not one
+// problem duplicated. Two timestamps therefore matter and the row must not
+// conflate them: "first" is when any account can serve it again, "all" is when
+// every account is back. Reporting only the earliest as "恢复" would promise
+// full capacity while half the pool is still cooling.
+function collectModelCooldowns(){
+  const now = Date.now() / 1000;
+  const byModel = new Map();
+  for(const a of (typeof ACCOUNTS !== 'undefined' && Array.isArray(ACCOUNTS) ? ACCOUNTS : [])){
+    const list = a && Array.isArray(a.modelCooldowns) ? a.modelCooldowns : [];
+    for(const c of list){
+      if(!c || !c.model || !Number(c.expiresAt) || Number(c.expiresAt) <= now) continue;
+      const cur = byModel.get(c.model);
+      if(!cur){ byModel.set(c.model, {model:c.model, accounts:1, first:c.expiresAt, all:c.expiresAt}); }
+      else {
+        cur.accounts++;
+        if(c.expiresAt > cur.all) cur.all = c.expiresAt;
+        if(c.expiresAt < cur.first) cur.first = c.expiresAt;
+      }
+    }
+  }
+  return [...byModel.values()].sort((x,y) => x.all - y.all);
+}
+
+// Per-account model list: names in one place, each with its own cooldown, so a
+// multi-model throttle never leaves the pills ambiguous ("限流 45 秒" of what?).
+function accountThrottleList(a){
+  const now = Date.now() / 1000;
+  const list = (a && Array.isArray(a.modelCooldowns) ? a.modelCooldowns : [])
+    .filter(c => c && c.model && Number(c.expiresAt) > now)
+    .sort((x,y) => Number(x.expiresAt) - Number(y.expiresAt));
+  if(!list.length) return '';
+  const items = list.map(c => {
+    const at = fmtCoolAt(c.expiresAt);
+    const left = coolRemain(c.expiresAt);
+    if(!at || !left) return '';
+    return '<span class="thr-item ' + coolUrgency(c.expiresAt) + '" title="'
+      + esc(c.model + ' 恢复 ' + at + '（本地时间）· 上游 code 6004 仅限制此模型，同账号其它模型正常')
+      + '"><b>' + esc(c.model) + '</b><span class="thr-item-t">限流 ' + left + '</span></span>';
   }).filter(Boolean);
-  return pills.length ? '<div class="cool-list">' + pills.join('') + '</div>' : '';
+  return items.length ? '<div class="thr-items">' + items.join('') + '</div>' : '';
+}
+
+
+function renderModelThrottles(){
+  const section = document.getElementById('modelThrottleSection');
+  const listBox = document.getElementById('modelThrottleList');
+  const countEm = document.getElementById('throttleModelCount');
+  if(!section || !listBox) return;
+  const rows = collectModelCooldowns();
+  if(countEm) countEm.textContent = rows.length ? '（共 ' + rows.length + ' 个）' : '';
+  if(!rows.length){
+    section.style.display = 'none';
+    return;
+  }
+  section.style.display = '';
+  listBox.className = 'thr-list';
+  listBox.innerHTML = rows.map(r => {
+    const left = coolRemain(r.all);
+    const atAll = fmtCoolAt(r.all);
+    if(!left || !atAll) return '';
+    const cls = r.all - Date.now() / 1000 >= 3600 ? 'bad' : 'warn';
+    // Single-account rows have no partial-capacity state worth spelling out.
+    const meta = r.accounts > 1
+      ? ('首个账号 ' + fmtCoolAt(r.first) + ' 可用 · ' + r.accounts + ' 个账号受影响')
+      : (r.accounts + ' 个账号受影响');
+    return '<div class="thr-row ' + cls + '">'
+      + '<span class="thr-name">' + esc(r.model) + '</span>'
+      + '<span class="thr-left">⏱ 全部恢复剩 ' + left + '</span>'
+      + '<span class="thr-meta">全量恢复 ' + atAll + ' · ' + meta + '</span>'
+      + '</div>';
+  }).filter(Boolean).join('');
+}
+
+// KPI 卡副标题与倒计时刷新共用这一份文案，避免两处各写一遍后再次分叉
+//（上一轮就因为聚合字段从 earliest 换成 first/all，KPI 那处漏改而显示 NaN）。
+// 语义取「首个账号可用」(first)：这张卡回答的是"现在还能不能干活"，所以看
+// 最早恢复的那个；该模型仍有其它账号在冷却时，用（部分账号）标出容量不完整。
+function throttleCardSub(rows){
+  if(!rows || !rows.length) return '全部模型可用';
+  return rows.map(t => {
+    const left = coolRemain(t.first);
+    const partial = t.accounts > 1 ? '（部分账号）' : '';
+    return t.model + ' 剩 ' + (left || '?') + partial;
+  }).join(' · ');
+}
+
+// Countdown ticker. expiresAt is an absolute timestamp, so only the text is
+// recomputed — no need to re-fetch the account list. 30s keeps the display
+// honest without making the dashboard churn.
+let THROTTLE_TICK = null;
+function startThrottleTicker(){
+  if(THROTTLE_TICK) return;
+  THROTTLE_TICK = setInterval(() => {
+    if(!document.getElementById('modelThrottleSection')) return;
+    renderModelThrottles();
+    // 账号表的药丸与状态徽标同样带倒计时，到期后必须回到「可用」，
+    // 否则会一直挂着过期的「部分模型限流」。重渲染整表即可，数据是内存里的。
+    if(typeof renderAccounts === 'function' && window.ACCOUNTS) renderAccounts();
+    const rows = collectModelCooldowns();
+    const box = document.getElementById('cards');
+    const first = box && box.querySelector('.card');
+    const vEl = first && first.querySelector('.v');
+    const sEl = first && first.querySelector('.s');
+    if(!vEl || !sEl) return;
+    vEl.innerText = String(rows.length);
+    sEl.innerText = throttleCardSub(rows);
+    first.classList.toggle('warn', rows.length > 0);
+    first.classList.toggle('accent2', rows.length === 0);
+    // Trae 侧同样带倒计时，切到 Trae 页时要跟着走，否则会一直挂着过期状态。
+    if(typeof loadTraeCooldowns === 'function') loadTraeCooldowns();
+  }, 30000);
 }
 
 function accountRow(a){
@@ -1765,14 +2157,25 @@ function accountRow(a){
   const uidAttr = esc(String(a.uid || '').replace(/[^\w.@-]/g, ''));
   const nameAttr = esc(String(a.nickname || '').replace(/["'\\<>]/g, ''));
   const usage = USAGE_BY_ACCOUNT[a.uid] || {};
+  const cooldownList = (a && Array.isArray(a.modelCooldowns)) ? a.modelCooldowns.filter(c => c && c.model && Number(c.expiresAt) > Date.now()/1000) : [];
+  const worstLeft = cooldownList.length
+    ? cooldownList.map(c => Number(c.expiresAt) - Date.now()/1000).reduce((x,y) => Math.max(x,y))
+    : 0;
+  // 状态列必须体现模型级限流：上游 code 6004 只封一个模型，账号本身仍然在线，
+  // 若这里继续显示「可用」就会让人以为该账号什么都能跑，实际请求会被 429。
   const state = !a.enabled ? '<span class="badge off">已停用</span>'
               : a.reserveBlocked ? '<span class="badge warn">保留积分</span>'
               : a.dailyLimitBlocked ? '<span class="badge warn" title="今日已用 ' + fmt(a.dailyTokensToday || 0) + ' / ' + fmt(a.dailyTokenLimit || 0) + ' token，暂停接单（本地 0 点恢复）">日限额</span>'
+              : cooldownList.length ? '<span class="badge warn" title="上游仅限流这些模型，同账号其它模型仍可正常调用">部分模型限流</span>'
               : a.inCooldown ? '<span class="badge warn">冷却 ' + (a.cooldownFor||0) + 's</span>'
               : a.expiresIn === 'expired' ? '<span class="badge bad">已过期</span>'
               : '<span class="badge ok">可用</span>';
-  const pills = coolPills(a);
-  const err = a.lastError && !(pills && a.lastError === 'HTTP 429 (model throttled)')
+  // 限流模型名 + 各自冷却时间集中成一行（旧的无名药丸已被它取代）。
+  // 「HTTP 429 (model throttled)」是内部标记，它的可视化职责完全交给状态徽标 + 限流清单。
+  // 过滤只看标记本身，不看冷却是否还在：冷却到期后徽标与清单都已归零，此时再把
+  // 标记当成红字显示出来，反而会让人以为账号出了问题（冷却已过 → 模型确实可用）。
+  const THROTTLE_MARK = 'HTTP 429 (model throttled)';
+  const err = a.lastError && a.lastError !== THROTTLE_MARK
     ? '<div class="hint" style="color:var(--warn);margin:2px 0 0">' + esc(a.lastError) + '</div>' : '';
   const cred = a.credits;
   const credText = cred ? ('<b style="color:var(--accent2)">' + fmt(cred.remain) + '</b> / ' + fmt(cred.size)) : '<span style="color:var(--dim)">未查询</span>';
@@ -1782,7 +2185,7 @@ function accountRow(a){
     +   '<div style="font-weight:600;font-size:13px;color:var(--fg)">' + esc(a.nickname) + '</div>'
     + '<div class="mono" style="color:var(--dim);font-size:11px">' + esc(a.uid.slice(0,8)) + ' · ' + esc(a.source) + ' · 到期 ' + esc(a.expiresIn || '?') + '</div>'
     + (a.machineId ? ('<div class="mono" style="color:var(--dim);font-size:10px;margin-top:2px" title="由账号UID稳定派生的专属设备码，防多号关联风控">设备码: ' + esc(a.machineId.slice(0,14)) + '...</div>') : '')
-    + err + pills + '</td>'
+    + err + accountThrottleList(a) + '</td>'
     + '<td style="text-align:center" data-label="状态">' + state + '</td>'
     + '<td style="text-align:center" data-label="出口">' + slotSelectHtml(a) + '</td>'
     + '<td style="text-align:left;white-space:nowrap" data-label="积分">' + credText + '</td>'
@@ -2354,11 +2757,21 @@ async function refreshInner(){
   const succStr = perf.success_rate_pct != null ? pct(perf.success_rate_pct) : '100.0%';
   const errSub = perf.errors ? (perf.errors + ' 次异常拦截') : '服务运行平稳';
 
+  // 限流卡放在最前：它回答的是"现在还能不能干活"，比后面的统计更该先看到。
+  const throttled = collectModelCooldowns();
+  const throttleSub = throttleCardSub(throttled);
+  const throttleCard = throttled.length
+    ? card('模型限流中', String(throttled.length), throttleSub, 'warn')
+    : card('模型限流', '0', '全部模型可用', 'accent2');
+
   document.getElementById('cards').innerHTML =
+    throttleCard +
     card('可用账号池', activeAccts + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">/ ' + totalAccts + ' 正常</span>', poolSub, 'accent') +
     card('积分余额', hasCreds ? (fmt(totRemain) + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">积分</span>') : '正常可用', subCredit, 'accent2') +
     card('网关调用量', fmt(t.requests) + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">次</span>', '本出口累计消耗 ' + fmt(t.total_tokens) + ' Token · ' + Number(t.credit || 0).toFixed(2) + ' 积分', '') +
     card('请求成功率', succStr, errSub, perf.errors ? 'warn' : 'accent2');
+
+  renderModelThrottles();
 
   const total = recent.total || 0;
   RECENT_PAGE = recent.page || 1;
@@ -2486,7 +2899,7 @@ function generatePageList(current, total){
 
 // Tab ids in nav order. One list so the restore path and the nav cannot
 // drift apart.
-const MAIN_TABS = ['gateway', 'analytics', 'logs', 'settings'];
+const MAIN_TABS = ['gateway', 'analytics', 'logs', 'settings', 'qoder'];
 const MAIN_TAB_STORE = 'wb-proxy-main-tab';
 let currentMainTab = 'gateway';
 let analyticsRange = 'today';
@@ -2610,6 +3023,8 @@ async function startDashboard(){
   await loadSchedulerStatus();
   await refresh();
   updateRecentLimitButtons();
+  // 限流倒计时：纯本地重算文案，不额外打后端。
+  startThrottleTicker();
   // The head script already resolved this before first paint; re-apply it
   // here so the data loaders for the active page actually run.
   switchMainTab(MAIN_TABS.includes(window.__MAIN_TAB__) ? window.__MAIN_TAB__ : 'gateway');
@@ -3347,18 +3762,27 @@ function switchMainTab(tab){
   } catch(e){}
   try { localStorage.setItem(MAIN_TAB_STORE, tab); } catch(e){}
   const btnGateway = document.getElementById('btnNavGateway');
+  const btnTrae = document.getElementById('btnNavTrae');
   const btnAnalytics = document.getElementById('btnNavAnalytics');
   const btnLogs = document.getElementById('btnNavLogs');
   const btnSettings = document.getElementById('btnNavSettings');
+  const btnQoder = document.getElementById('btnNavQoder');
+  const btnAntigravity = document.getElementById('btnNavAntigravity');
   const pageGateway = document.getElementById('pageGateway');
+  const pageTrae = document.getElementById('pageTrae');
   const pageAnalytics = document.getElementById('pageAnalytics');
   const pageLogs = document.getElementById('pageLogs');
   const pageSettings = document.getElementById('pageSettings');
+  const pageQoder = document.getElementById('pageQoder');
+  const pageAntigravity = document.getElementById('pageAntigravity');
   const tabs = [
     ['gateway', btnGateway, pageGateway],
+    ['trae', btnTrae, pageTrae],
     ['analytics', btnAnalytics, pageAnalytics],
     ['logs', btnLogs, pageLogs],
-    ['settings', btnSettings, pageSettings]
+    ['settings', btnSettings, pageSettings],
+    ['qoder', btnQoder, pageQoder],
+    ['antigravity', btnAntigravity, pageAntigravity]
   ];
   tabs.forEach(([name, btn, page]) => {
     if(!btn || !page) return;
@@ -3366,13 +3790,370 @@ function switchMainTab(tab){
     btn.classList.toggle('active', on);
     page.classList.toggle('active', on);
   });
+  if(tab === 'trae'){ loadTraeToken(); loadTraeModels(); loadTraeCooldowns(); }
   if(tab === 'analytics'){ loadAnalytics(); loadAnalyticsMatrix(); }
   if(tab === 'settings'){ loadSettings(); loadProxySlots(); }
+  if(tab === 'qoder'){ loadQoderData(); }
   if(tab === 'logs'){
     startLogPolling();
     fetchNewLogs(true);
   } else {
     stopLogPolling();
+  }
+}
+
+/* ---- Qoder 看板模块 ---- */
+let qoderRecentLimit = 20;
+let qoderRecentPage = 1;
+let qoderAccountsCache = [];
+let qoderQuotaCache = {};
+let qoderModelsCache = [];
+
+async function loadQoderData(force){
+  try{
+    const [acct, usage, models] = await Promise.all([
+      getJSON('/qoder/accounts'),
+      getJSON('/qoder/usage'),
+      getJSON('/qoder/models').catch(() => ({models: []})),
+    ]);
+    qoderAccountsCache = acct.accounts || [];
+    qoderModelsCache = models.models || [];
+    renderQoderKpi(usage);
+    renderQoderAccounts(usage);
+    renderQoderModelConsumption(usage);
+    renderQoderModelsTable(qoderModelsCache);
+    loadQoderRecent();
+    if(qoderAccountsCache.length && qoderAccountsCache.some(a => !qoderQuotaCache[a.id])){
+      qoderRefreshQuota();
+    }
+  }catch(e){ toast('Qoder 数据加载失败: ' + e.message); }
+}
+
+function renderQoderKpi(usage){
+  const byAcct = usage.by_account || {};
+  const acctCount = qoderAccountsCache.length;
+  const requests = usage.requests || 0;
+  const totalTokens = usage.total_tokens || 0;
+  let completed = 0;
+  // Count completed from recent (approximate)
+  document.getElementById('qoderKpiAccounts').textContent = acctCount;
+  document.getElementById('qoderKpiRequests').textContent = fmt(requests);
+  document.getElementById('qoderKpiTokens').textContent = fmt(totalTokens);
+  document.getElementById('qoderKpiSuccess').textContent = requests > 0 ? '—' : '—';
+}
+
+function renderQoderAccounts(usage){
+  const box = document.getElementById('qoderAccounts');
+  const byAcct = usage.by_account || {};
+  document.getElementById('qoderAcctCount').textContent = '(' + qoderAccountsCache.length + ')';
+  if(!qoderAccountsCache.length){
+    box.innerHTML = '<div class="empty">暂无 Qoder 账号</div>';
+    return;
+  }
+  let html = '<div class="table-wrap"><table class="data-cards"><thead><tr>'
+    + '<th>账号</th><th>区域</th><th>Plan</th><th>用户额度</th><th>附加额度</th>'
+    + '<th>请求</th><th>总 Token</th>'
+    + '</tr></thead><tbody>';
+  qoderAccountsCache.forEach(a => {
+    const q = qoderQuotaCache[a.id];
+    const u = byAcct[a.id] || {requests: 0, total_tokens: 0};
+    const userRem = q ? fmt(q.user_remaining) : '—';
+    const userTot = q ? fmt(q.user_total) : '—';
+    const addonRem = q ? fmt(q.addon_remaining) : '—';
+    const addonTot = q ? fmt(q.addon_total) : '—';
+    html += '<tr>'
+      + '<td style="text-align:left"><b>' + esc(a.name || a.email || a.id) + '</b><div style="font-size:11px;color:var(--dim)">' + esc(a.id.substring(0,12)) + '</div></td>'
+      + '<td><span class="badge ' + (a.region === 'cn' ? 's' : '') + '">' + esc(a.region) + '</span></td>'
+      + '<td>' + esc(a.plan || '—') + '</td>'
+      + '<td><b style="color:var(--accent2)">' + userRem + '</b> / ' + userTot + '</td>'
+      + '<td><b style="color:var(--accent)">' + addonRem + '</b> / ' + addonTot + '</td>'
+      + '<td>' + fmt(u.requests) + '</td>'
+      + '<td>' + fmt(u.total_tokens) + '</td>'
+      + '</tr>';
+  });
+  html += '</tbody></table></div>';
+  box.innerHTML = html;
+}
+
+function renderQoderModelConsumption(usage){
+  const box = document.getElementById('qoderModelConsumption');
+  const byModel = usage.by_model || {};
+  const models = Object.keys(byModel).sort((a,b) => (byModel[b].total_tokens||0) - (byModel[a].total_tokens||0));
+  document.getElementById('qoderModelCount').textContent = '(' + models.length + ')';
+  if(!models.length){
+    box.innerHTML = '<div class="empty">暂无模型消耗数据</div>';
+    return;
+  }
+  let html = '<div class="table-wrap"><table class="data-cards"><thead><tr>'
+    + '<th>模型</th><th>请求数</th><th>总 Token</th><th>占比</th>'
+    + '</tr></thead><tbody>';
+  const grandTotal = models.reduce((s, m) => s + (byModel[m].total_tokens||0), 0);
+  models.forEach(m => {
+    const d = byModel[m];
+    const pct = grandTotal > 0 ? ((d.total_tokens||0) / grandTotal * 100).toFixed(1) : '0';
+    const barW = grandTotal > 0 ? Math.max(2, (d.total_tokens||0) / grandTotal * 100) : 0;
+    html += '<tr>'
+      + '<td style="text-align:left"><b>' + esc(m) + '</b></td>'
+      + '<td>' + fmt(d.requests||0) + '</td>'
+      + '<td><b>' + fmt(d.total_tokens||0) + '</b></td>'
+      + '<td><span class="bar-fill" style="width:' + barW + '%"></span> ' + pct + '%</td>'
+      + '</tr>';
+  });
+  html += '</tbody></table></div>';
+  box.innerHTML = html;
+}
+
+async function loadQoderRecent(){
+  try{
+    const data = await getJSON('/qoder/usage/recent?limit=' + qoderRecentLimit + '&page=' + qoderRecentPage);
+    renderQoderRecent(data);
+  }catch(e){ toast('Qoder 请求记录加载失败: ' + e.message); }
+}
+
+function renderQoderRecent(data){
+  const box = document.getElementById('qoderRecent');
+  const rows = data.rows || [];
+  const accountsMap = data.accounts_map || {};
+  document.getElementById('qoderRecentCount').textContent = '(' + (data.total||0) + ')';
+  document.getElementById('qoderRecentPageInfo').textContent =
+    '第 ' + (data.page||1) + ' / ' + (data.total_pages||1) + ' 页 · 共 ' + (data.total||0) + ' 条记录';
+  if(!rows.length){
+    box.innerHTML = '<div class="empty">还没有 Qoder 请求记录</div>';
+    return;
+  }
+  let html = '<table class="data-cards"><thead><tr>'
+    + '<th>时间</th><th>模型</th><th>账号</th><th>模式</th><th>结果</th>'
+    + '<th>耗时</th><th>输入</th><th>输出</th><th>总 Token</th>'
+    + '</tr></thead><tbody>';
+  rows.forEach(r => {
+    const acctInfo = accountsMap[r.account] || {};
+    const acctName = acctInfo.name || r.account || '—';
+    const outcomeBadge = r.outcome === 'completed'
+      ? '<span class="badge ok">成功</span>'
+      : '<span class="badge bad">失败</span>';
+    html += '<tr>'
+      + '<td>' + esc((r.iso||'').replace('T',' ').slice(5)) + '</td>'
+      + '<td>' + esc(r.model||'—') + '</td>'
+      + '<td>' + esc(acctName) + '</td>'
+      + '<td>' + (r.stream ? '流式' : '非流式') + '</td>'
+      + '<td>' + outcomeBadge + '</td>'
+      + '<td>' + (r.elapsed_ms != null ? fmt(r.elapsed_ms) + ' ms' : '—') + '</td>'
+      + '<td>' + fmt(r.prompt_tokens||0) + '</td>'
+      + '<td>' + fmt(r.completion_tokens||0) + '</td>'
+      + '<td><b>' + fmt(r.total_tokens||0) + '</b></td>'
+      + '</tr>';
+  });
+  html += '</tbody></table>';
+  box.innerHTML = html;
+}
+
+function setQoderRecentLimit(n){
+  qoderRecentLimit = n;
+  qoderRecentPage = 1;
+  loadQoderRecent();
+}
+
+function changeQoderRecentPage(delta){
+  qoderRecentPage = Math.max(1, qoderRecentPage + delta);
+  loadQoderRecent();
+}
+
+async function qoderRefreshQuota(btn){
+  if(btn) btn.disabled = true;
+  try{
+    const data = await getJSON('/qoder/quota');
+    const quotas = data.quotas || [];
+    quotas.forEach(q => { qoderQuotaCache[q.id] = q.quota; });
+    // Re-render accounts with quota data
+    const usage = await getJSON('/qoder/usage');
+    renderQoderAccounts(usage);
+    toast('额度刷新完成', 'success');
+  }catch(e){ toast('额度刷新失败: ' + e.message, 'error'); }
+  if(btn) btn.disabled = false;
+}
+
+async function loadQoderModelsTable(btn){
+  const oldText = btn ? btn.textContent : '';
+  if(btn){ btn.disabled = true; btn.textContent = '刷新中...'; }
+  try{
+    const res = await getJSON('/qoder/models');
+    qoderModelsCache = (res && res.models) || [];
+    renderQoderModelsTable(qoderModelsCache);
+    if(btn) toast('Qoder 模型清单已刷新', 'success');
+  }catch(e){
+    console.error('loadQoderModelsTable error:', e);
+    renderQoderModelsTable(getFallbackQoderModels());
+    if(btn) toast('刷新失败: ' + e.message, 'error');
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = oldText; }
+  }
+}
+
+// 接口不可用时的兜底表：数值取自 2026-10-10 实拉的上游返回，
+// 含 price_factor（每 1K Token 消耗倍率）与 max_output_tokens。
+function getFallbackQoderModels(){
+  return [
+    {id:'qoder-Auto', qoder_key:'auto', is_reasoning:true, context_window:200000, price_factor:0.5, max_output_tokens:32768},
+    {id:'qoder-Qwen3.8-Max', qoder_key:'qmodel_38max', is_reasoning:true, context_window:200000, price_factor:0.5, max_output_tokens:32768},
+    {id:'qoder-Qwen3.8-Flash', qoder_key:'qfmodel', is_reasoning:true, context_window:200000, price_factor:0.0, max_output_tokens:32768},
+    {id:'qoder-Qwen3.7-Max', qoder_key:'qmodel_latest', is_reasoning:true, context_window:200000, price_factor:0.5, max_output_tokens:32768},
+    {id:'qoder-Qwen3.7-Plus', qoder_key:'qmodel', is_reasoning:true, context_window:200000, price_factor:0.1, max_output_tokens:32768},
+    {id:'qoder-Qwen3.7-Flash', qoder_key:'q37fmodel', is_reasoning:true, context_window:200000, price_factor:0.1, max_output_tokens:32768},
+    {id:'qoder-DeepSeek-V4-Pro', qoder_key:'dmodel', is_reasoning:true, context_window:200000, price_factor:0.5, max_output_tokens:32768},
+    {id:'qoder-DeepSeek-Flash', qoder_key:'dfmodel', is_reasoning:false, context_window:200000, price_factor:0.1, max_output_tokens:16384},
+    {id:'qoder-GLM-5.3', qoder_key:'gmodel', is_reasoning:true, context_window:200000, price_factor:0.8, max_output_tokens:32768},
+    {id:'qoder-GLM-5.3-Flash', qoder_key:'gfmodel', is_reasoning:true, context_window:200000, price_factor:0.1, max_output_tokens:32768},
+    {id:'qoder-GLM-5.2', qoder_key:'gm51model', is_reasoning:true, context_window:200000, price_factor:0.6, max_output_tokens:32768},
+    {id:'qoder-Kimi-K3', qoder_key:'kmodel_latest', is_reasoning:false, context_window:200000, price_factor:1.4, max_output_tokens:16384},
+    {id:'qoder-Kimi-K2.8-Preview', qoder_key:'kmodel', is_reasoning:true, context_window:200000, price_factor:0.8, max_output_tokens:32768},
+    {id:'qoder-MiniMax-M2.7', qoder_key:'mmodel', is_reasoning:false, context_window:200000, price_factor:0.2, max_output_tokens:16384}
+  ];
+}
+
+function renderQoderModelsTable(models){
+  const tb = document.querySelector('#qoderModelsTable tbody');
+  if(!tb) return;
+  const countEm = document.getElementById('qoderAvailModelCount');
+  const list = (models && models.length) ? models : getFallbackQoderModels();
+  if(countEm) countEm.textContent = '(共 ' + list.length + ' 个)';
+  if(!list.length){
+    tb.innerHTML = '<tr><td colspan="6" class="empty">暂无可用 Qoder 模型</td></tr>';
+    return;
+  }
+
+  const fmtK = v => {
+    if(!v) return '-';
+    const k = Math.round(v / 1000);
+    return k >= 1000 ? (k / 1000) + 'M' : k + 'K';
+  };
+
+  tb.innerHTML = list.map(m => {
+    // 展示去掉 qoder- 前缀（调用时需要，列表里另有「内部路由 Key」列说明）
+    const dispName = String(m.id || '').replace(/^qoder-/, '');
+    const nameHtml = '<div style="font-weight:600;font-size:13px;color:var(--fg)">' + esc(dispName) + '</div>'
+      + '<div style="font-size:10px;color:var(--dim);margin-top:1px">调用名 ' + esc(m.id || '') + '</div>';
+
+    // 1. 能力
+    const caps = [];
+    caps.push('<span class="badge ok" style="font-size:11px">文本</span>');
+    caps.push('<span class="badge ok" style="font-size:11px">工具</span>');
+    if(m.is_reasoning || m.supports_reasoning){
+      caps.push('<span class="badge" style="background:rgba(124,58,237,.12);color:var(--think);border-color:rgba(124,58,237,.3);font-size:11px;font-weight:600">推理</span>');
+    }
+    const capHtml = caps.join(' ');
+
+    // 2. 上下文
+    const ctx = m.context_window ? ('<b>' + fmtK(m.context_window) + '</b>') : '<b>200K</b>';
+
+    // 3. 消费倍率 / 优惠：上游 price_factor 为每 1K token 的消耗倍率，
+    //    0 视为免费。字段缺失时显示 —，不用猜测值填充。
+    const pf = (m.price_factor === undefined || m.price_factor === null) ? null : Number(m.price_factor);
+    let billingHtml = '<span style="color:var(--dim)">—</span>';
+    if(pf !== null && !isNaN(pf)){
+      const raw = (pf % 1 === 0 ? pf.toFixed(0) : pf.toFixed(2).replace(/0$/, ''));
+      if(pf === 0){
+        billingHtml = '<span class="badge ok" style="background:rgba(38,187,130,.15);color:#26bb82;font-weight:600">限时免费 0.00x</span>';
+      } else {
+        billingHtml = '<span class="badge ' + (pf <= 0.5 ? 'ok' : 'warn') + '" style="font-weight:600">' + raw + 'x</span>'
+          + '<div style="font-size:10px;color:var(--dim);margin-top:2px">每 1K Token 扣减额度</div>';
+      }
+    }
+
+    // 4. 最大输出
+    const maxOut = m.max_output_tokens ? ('<b>' + fmtK(m.max_output_tokens) + '</b>') : '-';
+
+    // 5. 内部路由 Key
+    const keyHtml = '<span class="mono" style="color:var(--accent);font-weight:600;font-size:12px">' + esc(m.qoder_key || m.id) + '</span>'
+      + '<div style="font-size:10px;color:var(--dim);margin-top:2px">前缀 qoder- 强制直通</div>';
+
+
+    return '<tr>'
+      + '<td style="text-align:left" data-label="模型 ID">' + nameHtml + '</td>'
+      + '<td style="text-align:center" data-label="消费倍率">' + billingHtml + '</td>'
+      + '<td style="text-align:center" data-label="模型能力">' + capHtml + '</td>'
+      + '<td style="text-align:center" data-label="上下文窗口">' + ctx + '</td>'
+      + '<td style="text-align:center" data-label="最大输出">' + maxOut + '</td>'
+      + '<td style="text-align:left" data-label="内部路由 Key">' + keyHtml + '</td>'
+      + '</tr>';
+  }).join('');
+}
+
+async function qoderCheckinAll(btn){
+  if(btn) btn.disabled = true;
+  const old = btn ? btn.textContent : '';
+  if(btn) btn.textContent = '签到中...';
+  try{
+    const data = await postJSON('/qoder/checkin', {});
+    const results = data.results || [];
+    let claimed = 0, already = 0, noCampaign = 0, noToken = 0, failed = 0;
+    let credits = 0;
+    results.forEach(r => {
+      if(r.status === 'claimed'){ claimed++; credits += Number(r.reward_credits || 0); }
+      else if(r.status === 'already_claimed') already++;
+      else if(r.status === 'no_campaign') noCampaign++;
+      else if(r.status === 'no_token') noToken++;
+      else failed++;
+    });
+    let msg = '';
+    if(claimed) msg += claimed + ' 新签到';
+    if(already) msg += (msg ? ' · ' : '') + already + ' 今日已签';
+    if(noCampaign) msg += (msg ? ' · ' : '') + noCampaign + ' 无签到活动';
+    if(noToken) msg += (msg ? ' · ' : '') + noToken + ' 缺少凭证';
+    if(failed) msg += (msg ? ' · ' : '') + failed + ' 失败';
+    if(!results.length) msg = '没有可签到的账号';
+    const bonus = credits ? ' · +' + fmt(credits) + ' 积分' : '';
+    toast('签到: ' + msg + bonus, claimed > 0 ? 'success' : (failed ? 'error' : 'info'));
+    await loadQoderData(true);
+  }catch(e){ toast('签到失败: ' + e.message, 'error'); }
+  finally{ if(btn){ btn.disabled = false; btn.textContent = old; } }
+}
+
+// Qoder OAuth 设备码登录：后端 /qoder/oauth/start 拿授权链接，
+// /qoder/oauth/poll 轮询换取凭证。授权在浏览器新标签完成，
+// 本窗口只负责轮询并在成功后刷新账号列表。
+let QODER_OAUTH_TIMER = null;
+
+async function startQoderOAuth(){
+  if(QODER_OAUTH_TIMER){ clearInterval(QODER_OAUTH_TIMER); QODER_OAUTH_TIMER = null; }
+  let popup = null;
+  try{
+    toast('正在启动 Qoder OAuth 登录...', 'info');
+    const r = await postJSON('/qoder/oauth/start', { region: 'cn' });
+    if(!r || !r.login_id){
+      toast('启动登录失败: 未返回 login_id', 'error');
+      return;
+    }
+    const url = r.login_url || r.url;
+    if(url){
+      popup = window.open(url, 'qoder_oauth');
+      if(!popup || popup.closed){
+        toast('浏览器拦截了弹窗，请手动打开：' + url, 'warn');
+        window.open(url, '_blank');
+      } else {
+        toast('请在打开的页面中完成 Qoder 授权', 'ok');
+      }
+    }
+    const loginId = r.login_id;
+    QODER_OAUTH_TIMER = setInterval(async () => {
+      try{
+        const res = await getJSON('/qoder/oauth/poll?login_id=' + encodeURIComponent(loginId));
+        const st = (res && res.status) || '';
+        if(st === 'done' || st === 'success' || (res && res.account)){
+          clearInterval(QODER_OAUTH_TIMER);
+          QODER_OAUTH_TIMER = null;
+          try{ if(popup && !popup.closed) popup.close(); }catch(e){}
+          const who = (res.account && (res.account.name || res.account.email)) || '';
+          toast('Qoder 登录成功' + (who ? ': ' + who : ''), 'success');
+          await loadQoderData(true);
+        } else if(st === 'error' || st === 'failed' || st === 'expired' || st === 'timeout'){
+          clearInterval(QODER_OAUTH_TIMER);
+          QODER_OAUTH_TIMER = null;
+          toast(st === 'timeout' ? 'Qoder 登录超时，请重试' : 'Qoder 登录失败', 'error');
+        }
+      }catch(e){ /* 轮询期间的瞬时失败不终止登录流程 */ }
+    }, 2000);
+  }catch(e){
+    toast('Qoder 登录启动失败: ' + e.message, 'error');
   }
 }
 
@@ -4063,8 +4844,11 @@ function renderAnalytics(data){
   const elTodayDetail = document.getElementById('kpiTodayTokensDetail');
   const elTodayTitle = document.getElementById('kpiRangeTokenTitle');
   if(elTodayTitle) elTodayTitle.textContent = rangeLabel() + '消耗 Token';
-  if(elTodayTok) elTodayTok.textContent = fmt(currentSum.total_tokens || 0);
-  if(elTodayDetail) elTodayDetail.innerHTML =
+  if(elTodayTok){
+    const v = currentSum.total_tokens || 0;
+    elTodayTok.textContent = fmtCompact(v);
+    elTodayTok.title = '精确数值: ' + fmt(v) + ' Token';
+  }
     '<span style="color:var(--accent)">输入 ' + fmt(currentSum.prompt_tokens || 0) + '</span>' +
     ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--accent2)">输出 ' + fmt(currentSum.completion_tokens || 0) + '</span>' +
     ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--think)">思考 ' + fmt(currentSum.reasoning_tokens || 0) + '</span>';
@@ -4072,8 +4856,11 @@ function renderAnalytics(data){
   // KPI 2: always the all-time figure, as the stable reference next to KPI 1.
   const elTotalTok = document.getElementById('kpiTotalTokens');
   const elTotalDetail = document.getElementById('kpiTotalTokensDetail');
-  if(elTotalTok) elTotalTok.textContent = fmt(sumAll.total_tokens || 0);
-  if(elTotalDetail) elTotalDetail.innerHTML =
+  if(elTotalTok){
+    const v = sumAll.total_tokens || 0;
+    elTotalTok.textContent = fmtCompact(v);
+    elTotalTok.title = '精确数值: ' + fmt(v) + ' Token';
+  }
     '<span style="color:var(--accent)">输入 ' + fmt(sumAll.prompt_tokens || 0) + '</span>' +
     ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--accent2)">输出 ' + fmt(sumAll.completion_tokens || 0) + '</span>' +
     ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--think)">思考 ' + fmt(sumAll.reasoning_tokens || 0) + '</span>' +
@@ -4238,14 +5025,35 @@ function traeRow(a){
         ? '<span style="color:var(--warn);font-size:11px">查询失败</span>'
         : '<span style="color:var(--dim)">未查询</span>');
   const expires = a.expires_at ? new Date(a.expires_at * 1000).toLocaleDateString() : '?';
+  // 账号级限流：与 WorkBuddy 账号行同构，列出该账号自己的冷却模型与恢复时间。
+  // 冷却只作用在这一个账号上，池内其它账号照常服务。
+  // wait/strikes 来自退避状态：连续限流会 60s→120s→240s 递增，写出来才解释得清
+  // 为什么这个数字在变。
+  const myCooldowns = (TRAE_COOLDOWNS[String(a.user_id)] || []).slice()
+    .sort((x, y) => Number(x.expiresAt) - Number(y.expiresAt));
+  const thrItems = myCooldowns.map(c => {
+    const left = coolRemain(c.expiresAt);
+    const at = fmtCoolAt(c.expiresAt);
+    if(!left || !at) return '';
+    const why = c.strikes > 1 ? '（连续第 ' + c.strikes + ' 次限流，已退避）' : '';
+    return '<span class="thr-item ' + coolUrgency(c.expiresAt) + '" title="'
+      + esc(c.model + ' 限流 · 恢复 ' + at + '（本地时间）· 仅影响本账号，其它 Trae 账号正常' + why)
+      + '"><b>' + esc(c.model) + '</b><span class="thr-item-t">限流 ' + left + '</span></span>';
+  }).filter(Boolean);
+  const thrHtml = thrItems.length ? '<div class="thr-items">' + thrItems.join('') + '</div>' : '';
+  // 状态列同步反映限流，否则会继续显示"可用"而实际请求被拒。
+  const state2 = myCooldowns.length
+    ? '<span class="badge warn" title="仅这些模型在本账号上被限流；其它模型与其它账号正常">部分模型限流</span>'
+    : state;
   return '<tr>'
     + '<td style="text-align:center;white-space:nowrap" data-label="版本"><span class="realm-badge-intl">Trae</span></td>'
     + '<td style="text-align:left" data-label="账号">'
     +   '<div style="font-weight:600;font-size:13px;color:var(--fg)">' + esc(a.user_name) + '</div>'
     +   '<div class="mono" style="color:var(--dim);font-size:11px">' + esc(String(a.user_id).slice(0,14)) + ' · OAuth · 到期 ' + esc(expires) + '</div>'
     + (a.credits_error ? '<div class="hint" style="color:var(--warn);margin:2px 0 0">' + esc(a.credits_error) + '</div>' : '')
+    + thrHtml
     + '</td>'
-    + '<td style="text-align:center" data-label="状态">' + state + '</td>'
+    + '<td style="text-align:center" data-label="状态">' + state2 + '</td>'
     + '<td style="text-align:left;white-space:nowrap" data-label="积分">' + credText + '</td>'
     + '<td class="mono" style="text-align:left;font-size:11px;color:var(--dim)" data-label="Token">' + esc(String(a.token_mask || '')) + '</td>'
     + '<td class="acct-actions" style="text-align:center;white-space:nowrap;vertical-align:middle">'
@@ -4255,6 +5063,11 @@ function traeRow(a){
     + '</td>'
     + '</tr>';
 }
+
+// Trae 账号级限流：{user_id: [{model, expiresAt}]}，来自 /trae/cool-downs。
+// 挂在账号上而非模型上——Trae 的限流按凭证判定，一个账号被限流时，池内其它
+// 账号仍能服务同一个模型。
+let TRAE_COOLDOWNS = {};
 
 function renderTraeAccount(){
   const box = document.getElementById('trae-accounts');
@@ -4282,7 +5095,10 @@ function renderTraeAccount(){
     + '</tr></thead><tbody>'
     + TRAE_ACCOUNTS.map(traeRow).join('')
     + '</tbody></table></div>';
-  traeStatCards();
+  // 扣分顺序要先落地再渲染卡片：traeRenderPriority 会发请求，是 async，
+  // 直接顺序调用时 traeStatCards 读到的仍是上一轮按钮文案（曾显示「读取中…」）。
+  // 这里先 await 拿到真值，再渲染汇总卡片。
+  traeRenderPriority().then(traeStatCards);
 }
 
 async function startTraeOAuth(){
@@ -4409,8 +5225,190 @@ function traeImportFilePicked(input){
   };
   reader.readAsText(file);
 }
+let TRAE_MODELS_DATA = [];
 
-window.addEventListener('load', () => { loadTraeToken(); });
+async function loadTraeModels(btn){
+  const oldText = btn ? btn.textContent : '';
+  if(btn){ btn.disabled = true; btn.textContent = '刷新中...'; }
+  try{
+    const r = await getJSON('/trae/models');
+    TRAE_MODELS_DATA = (r && r.models) || [];
+    renderTraeModels(TRAE_MODELS_DATA);
+    if(btn) toast('Trae 模型清单已刷新', 'ok');
+  }catch(e){
+    console.error('loadTraeModels error:', e);
+    if(!TRAE_MODELS_DATA.length){
+      renderTraeModels(getFallbackTraeModels());
+    }
+    if(btn) toast('拉取失败: ' + e.message, 'bad');
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = oldText; }
+  }
+}
+
+// Trae 侧限流读取与渲染。数据结构与 WorkBuddy 的 modelCooldowns 一致
+// （[{model, expiresAt}]），所以倒计时与配色直接复用既有的 coolRemain /
+// coolUrgency，不再引入第二套格式。
+async function loadTraeCooldowns(){
+  try{
+    const r = await getJSON('/trae/cool-downs');
+    renderTraeCooldowns((r && r.cooldowns) || []);
+  }catch(e){
+    console.error('loadTraeCooldowns error:', e);
+  }
+  // 冷数据更新后重渲染账号行：状态徽标与模型清单都依赖它。
+  if(typeof renderTraeAccount === 'function' && TRAE_ACCOUNTS.length) renderTraeAccount();
+}
+
+function renderTraeCooldowns(byAccount){
+  // 入参改为 {uid: [{model, expiresAt}]}。账号行已逐账号展示，这里按模型
+  // 聚合出一个"整体视图"：同一个模型被 N 个账号限流时，那是一个可用容量
+  // 问题（N 个号各剩一半容量），不是 N 个独立故障。
+  TRAE_COOLDOWNS = byAccount || {};
+  const section = document.getElementById('traeThrottleSection');
+  const box = document.getElementById('traeThrottleList');
+  const countEm = document.getElementById('traeThrottleCount');
+  if(!section || !box) return;
+  const now = Date.now() / 1000;
+
+  const byModel = new Map();
+  for(const uid of Object.keys(TRAE_COOLDOWNS)){
+    for(const c of (TRAE_COOLDOWNS[uid] || [])){
+      if(!c || !c.model || Number(c.expiresAt) <= now) continue;
+      const cur = byModel.get(c.model);
+      if(!cur){ byModel.set(c.model, {model:c.model, accounts:1, first:c.expiresAt, all:c.expiresAt}); }
+      else {
+        cur.accounts++;
+        if(c.expiresAt > cur.all) cur.all = c.expiresAt;
+        if(c.expiresAt < cur.first) cur.first = c.expiresAt;
+      }
+    }
+  }
+  const rows = [...byModel.values()].sort((a,b) => a.all - b.all);
+  if(countEm) countEm.textContent = rows.length ? '（共 ' + rows.length + ' 个）' : '';
+  if(!rows.length){
+    section.style.display = 'none';
+    return;
+  }
+  section.style.display = '';
+  box.innerHTML = rows.map(r => {
+    const left = coolRemain(r.all);
+    const atAll = fmtCoolAt(r.all);
+    if(!left || !atAll) return '';
+    const cls = r.all - now >= 3600 ? 'bad' : 'warn';
+    const meta = r.accounts > 1
+      ? ('首个账号 ' + fmtCoolAt(r.first) + ' 可用 · ' + r.accounts + ' 个账号受影响')
+      : '1 个账号受影响';
+    return '<div class="thr-row ' + cls + '">'
+      + '<span class="thr-name">' + esc(r.model) + '</span>'
+      + '<span class="thr-left">⏱ 全部恢复剩 ' + left + '</span>'
+      + '<span class="thr-meta">全量恢复 ' + atAll + ' · ' + meta + '</span>'
+      + '</div>';
+  }).filter(Boolean).join('');
+}
+
+function getFallbackTraeModels(){
+  return [
+    {id:'deepseek-R1', name:'DeepSeek Reasoner (R1)', rate:0.08, context_length:64000, max_output_tokens:16384, supports_vision:false, supports_tool_calls:false, supports_reasoning:true, channel:'IDE Raw Chat', desc:'官方原生 DeepSeek R1 深度推理底座'},
+    {id:'deepseek-V3', name:'DeepSeek V3', rate:0.08, context_length:64000, max_output_tokens:16384, supports_vision:false, supports_tool_calls:true, supports_reasoning:false, channel:'IDE Raw Chat', desc:'官方原生 DeepSeek V3 高速旗舰'},
+    {id:'Doubao_1_5_thinking_pro', name:'Doubao 1.5 Thinking Pro', rate:0.08, context_length:64000, max_output_tokens:16384, supports_vision:false, supports_tool_calls:false, supports_reasoning:true, channel:'IDE Raw Chat', desc:'豆包 1.5 深度思考推理模型'},
+    {id:'seed_m8', name:'Doubao 1.5 Pro', rate:0.06, context_length:64000, max_output_tokens:16384, supports_vision:false, supports_tool_calls:true, supports_reasoning:false, channel:'IDE Raw Chat', desc:'豆包 1.5 Pro 通用大模型'},
+    {id:'deepseek-V3-0324', name:'DeepSeek V3 (0324)', rate:0.08, context_length:64000, max_output_tokens:16384, supports_vision:false, supports_tool_calls:true, supports_reasoning:false, channel:'IDE Raw Chat', desc:'DeepSeek V3 0324 增强版本'},
+    {id:'doubao-seed-code', name:'Doubao-Seed-Code', rate:0.06, context_length:128000, max_output_tokens:16384, supports_vision:false, supports_tool_calls:true, supports_reasoning:false, channel:'SOLO Agent', desc:'Trae Agent 专属通路'},
+    {id:'glm-5.3-flash', name:'GLM-5.3-Flash', rate:0.06, context_length:1000000, max_output_tokens:32000, supports_vision:false, supports_tool_calls:true, supports_reasoning:true, channel:'SOLO Agent', desc:'Trae Agent 专属通路'},
+    {id:'deepseek-v4.1-flash', name:'Deepseek-V4.1-Flash', rate:0.08, context_length:1000000, max_output_tokens:128000, supports_vision:true, supports_tool_calls:true, supports_reasoning:true, channel:'SOLO Agent', desc:'Trae Agent 专属通路'},
+    {id:'qwen3.8-flash', name:'Qwen3.8-Flash', rate:0.08, context_length:1000000, max_output_tokens:32000, supports_vision:false, supports_tool_calls:true, supports_reasoning:true, channel:'SOLO Agent', desc:'Trae Agent 专属通路'},
+    {id:'kimi-k2.8-preview', name:'Kimi-K2.8-Preview', rate:0.98, context_length:1000000, max_output_tokens:32000, supports_vision:false, supports_tool_calls:true, supports_reasoning:true, channel:'SOLO Agent', desc:'Trae Agent 专属通路'},
+    {id:'doubao-seed-2.1-pro', name:'Doubao-Seed-2.1-Pro', rate:0.08, context_length:128000, max_output_tokens:16384, supports_vision:false, supports_tool_calls:true, supports_reasoning:false, channel:'SOLO Work', desc:'Trae Work 模式默认通路'},
+    {id:'doubao-seed-evolving', name:'Doubao-Seed-Evolving', rate:0.08, context_length:128000, max_output_tokens:16384, supports_vision:false, supports_tool_calls:true, supports_reasoning:false, channel:'SOLO Work', desc:'Trae Work 模式默认通路'},
+    {id:'minimax-m2.7', name:'MiniMax-M2.7', rate:0.19, context_length:200000, max_output_tokens:48000, supports_vision:false, supports_tool_calls:true, supports_reasoning:true, channel:'SOLO Work', desc:'Trae Work 模式默认通路'},
+    {id:'doubao-seed-2.1-turbo', name:'Doubao-Seed-2.1-Turbo', rate:0.20, context_length:128000, max_output_tokens:16384, supports_vision:false, supports_tool_calls:true, supports_reasoning:false, channel:'SOLO Work', desc:'Trae Work 模式默认通路'},
+    {id:'qwen-3.7-plus', name:'Qwen-3.7-Plus', rate:0.25, context_length:1000000, max_output_tokens:32000, supports_vision:false, supports_tool_calls:true, supports_reasoning:true, channel:'SOLO Work', desc:'Trae Work 模式默认通路'},
+    {id:'minimax-m3', name:'MiniMax-M3', rate:0.26, context_length:512000, max_output_tokens:128000, supports_vision:false, supports_tool_calls:true, supports_reasoning:true, channel:'SOLO Work', desc:'Trae Work 模式默认通路'},
+    {id:'qwen-3.6-plus', name:'Qwen-3.6-Plus', rate:0.26, context_length:1000000, max_output_tokens:32000, supports_vision:false, supports_tool_calls:true, supports_reasoning:true, channel:'SOLO Work', desc:'Trae Work 模式默认通路'},
+    {id:'glm-5.3-flashx', name:'GLM-5.3-FlashX', rate:0.31, context_length:1000000, max_output_tokens:32000, supports_vision:true, supports_tool_calls:true, supports_reasoning:true, channel:'SOLO Work', desc:'Trae Work 模式默认通路'},
+    {id:'step-5-preview', name:'Step-5-Preview', rate:0.48, context_length:256000, max_output_tokens:32000, supports_vision:true, supports_tool_calls:true, supports_reasoning:true, channel:'SOLO Work', desc:'Trae Work 模式默认通路'},
+    {id:'glm-5.2', name:'GLM-5.2', rate:0.78, context_length:1000000, max_output_tokens:48000, supports_vision:true, supports_tool_calls:true, supports_reasoning:true, channel:'SOLO Work', desc:'Trae Work 模式默认通路'},
+    {id:'glm-5.3', name:'GLM-5.3', rate:0.78, context_length:1000000, max_output_tokens:48000, supports_vision:true, supports_tool_calls:true, supports_reasoning:true, channel:'SOLO Work', desc:'Trae Work 模式默认通路'},
+    {id:'kimi-k2.6', name:'Kimi-K2.6', rate:0.83, context_length:256000, max_output_tokens:32000, supports_vision:false, supports_tool_calls:true, supports_reasoning:true, channel:'SOLO Work', desc:'Trae Work 模式默认通路'},
+    {id:'qwen3.8-max', name:'Qwen3.8-Max', rate:1.50, context_length:1000000, max_output_tokens:32000, supports_vision:false, supports_tool_calls:true, supports_reasoning:true, channel:'SOLO Work', desc:'Trae Work 模式默认通路'},
+    {id:'kimi-k3', name:'Kimi-K3', rate:1.83, context_length:1000000, max_output_tokens:32000, supports_vision:false, supports_tool_calls:true, supports_reasoning:true, channel:'SOLO Work', desc:'Trae Work 模式默认通路'}
+  ];
+}
+
+function renderTraeModels(models){
+  const tb = document.querySelector('#traeModelsTable tbody');
+  if(!tb) return;
+  const countEm = document.getElementById('traeModelCount');
+  const list = (models && models.length) ? models : getFallbackTraeModels();
+  if(countEm) countEm.textContent = '(共 ' + list.length + ' 个)';
+  if(!list.length){
+    tb.innerHTML = '<tr><td colspan="6" class="empty">暂无可用 Trae 模型</td></tr>';
+    return;
+  }
+
+  const fmtK = v => {
+    if(!v) return '-';
+    const k = Math.round(v / 1000);
+    return k >= 1000 ? (k / 1000) + 'M' : k + 'K';
+  };
+
+  tb.innerHTML = list.map(m => {
+    // 1. 积分消耗
+    let rateBadge = '-';
+    if(m.rate != null){
+      const rNum = Number(m.rate);
+      if(rNum <= 0.08){
+        rateBadge = '<span class="badge ok" style="background:rgba(38,187,130,.15);color:#26bb82;font-weight:600">' + rNum.toFixed(2) + ' 积分 / 1K</span>';
+      } else if(rNum <= 0.5){
+        rateBadge = '<span class="badge s" style="font-weight:600">' + rNum.toFixed(2) + ' 积分 / 1K</span>';
+      } else {
+        rateBadge = '<span class="badge warn" style="font-weight:600">' + rNum.toFixed(2) + ' 积分 / 1K</span>';
+      }
+    }
+
+    // 2. 模型能力
+    const caps = [];
+    if(m.supports_vision){
+      caps.push('<span class="badge ok" style="font-size:11px">视觉</span>');
+    } else {
+      caps.push('<span class="badge" style="color:var(--dim);font-size:11px">文本</span>');
+    }
+    if(m.supports_tool_calls){
+      caps.push('<span class="badge ok" style="font-size:11px">工具</span>');
+    }
+    if(m.supports_reasoning){
+      caps.push('<span class="badge" style="background:rgba(124,58,237,.12);color:var(--think);border-color:rgba(124,58,237,.3);font-size:11px;font-weight:600">推理</span>');
+    }
+    const capHtml = caps.join(' ');
+
+    // 3. 上下文
+    const ctx = m.context_length ? ('<b>' + fmtK(m.context_length) + '</b>') : '-';
+
+    // 4. 最大输出
+    const maxOut = m.max_output_tokens ? ('<b>' + fmtK(m.max_output_tokens) + '</b>') : '-';
+
+    // 5. 通道与调度说明
+    let channelBadge = '<span class="badge-effort">' + esc(m.channel || 'SOLO Work') + '</span>';
+    if(m.desc){
+      channelBadge += ' <span style="font-size:11px;color:var(--dim);margin-left:6px">' + esc(m.desc) + '</span>';
+    }
+
+    const idHtml = '<div style="font-weight:600;font-size:13px;color:var(--fg)">' + esc(m.id) + '</div>'
+      + (m.name && m.name !== m.id ? '<div style="font-size:11px;color:var(--dim)">' + esc(m.name) + '</div>' : '');
+
+    return '<tr>'
+      + '<td style="text-align:left" class="mono" data-label="模型 ID">' + idHtml + '</td>'
+      + '<td style="text-align:center" data-label="消费积分">' + rateBadge + '</td>'
+      + '<td style="text-align:center" data-label="能力">' + capHtml + '</td>'
+      + '<td style="text-align:center" data-label="上下文">' + ctx + '</td>'
+      + '<td style="text-align:center" data-label="最大输出">' + maxOut + '</td>'
+      + '<td style="text-align:left" data-label="通道与调度">' + channelBadge + '</td>'
+      + '</tr>';
+  }).join('');
+}
+
+window.addEventListener('load', () => { loadTraeToken(); loadTraeModels(); });
 </script>
 </body>
 </html>

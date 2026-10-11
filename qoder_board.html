@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Qoder 移植看板 — workbuddy-trae-proxy</title>
+<style>
+:root{
+  --bg:#0f1117; --panel:#1a1d27; --panel2:#222530; --line:#2a2d3a;
+  --fg:#e4e6eb; --dim:#8b8fa3;
+  --accent:#6366f1; --accent-h:#818cf8; --accent-soft:rgba(99,102,241,.12);
+  --ok:#22c55e; --ok-soft:rgba(34,197,94,.12);
+  --bad:#ef4444; --bad-soft:rgba(239,68,68,.12);
+  --warn:#f59e0b; --warn-soft:rgba(245,158,11,.12);
+  --radius:12px;
+  --shadow:0 2px 8px rgba(0,0,0,.2);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;background:var(--bg);color:var(--fg);min-height:100vh;padding:24px}
+.container{max-width:1200px;margin:0 auto}
+
+/* Header */
+.header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;flex-wrap:wrap;gap:12px}
+.header-left{display:flex;align-items:center;gap:12px}
+.logo{width:40px;height:40px;border-radius:10px;background:linear-gradient(135deg,#6366f1,#8b5cf6);display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;color:#fff}
+.header h1{font-size:24px;font-weight:600}
+.header .subtitle{font-size:13px;color:var(--dim);margin-top:2px}
+.badge{display:inline-block;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:600}
+.badge-ok{background:var(--ok-soft);color:var(--ok)}
+.badge-warn{background:var(--warn-soft);color:var(--warn)}
+.badge-accent{background:var(--accent-soft);color:var(--accent-h)}
+
+/* Stats row */
+.stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:24px}
+.stat-card{background:var(--panel);border-radius:var(--radius);padding:16px;border:1px solid var(--line)}
+.stat-card .label{font-size:12px;color:var(--dim);margin-bottom:4px}
+.stat-card .value{font-size:28px;font-weight:700}
+.stat-card .sub{font-size:12px;color:var(--dim);margin-top:4px}
+
+/* Section */
+.section{margin-bottom:24px}
+.section-title{font-size:16px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.section-title .count{font-size:12px;color:var(--dim);font-weight:400}
+
+/* Module cards grid */
+.module-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+.module-card{background:var(--panel);border-radius:var(--radius);padding:16px;border:1px solid var(--line);transition:border-color .2s}
+.module-card:hover{border-color:var(--accent)}
+.module-card .name{font-size:14px;font-weight:600;margin-bottom:4px;display:flex;align-items:center;gap:8px}
+.module-card .desc{font-size:12px;color:var(--dim);margin-bottom:8px;line-height:1.4}
+.module-card .status{display:flex;gap:6px;flex-wrap:wrap}
+.tag{font-size:11px;padding:2px 6px;border-radius:4px;background:var(--panel2);color:var(--dim)}
+.tag-ok{background:var(--ok-soft);color:var(--ok)}
+.tag-bad{background:var(--bad-soft);color:var(--bad)}
+.tag-warn{background:var(--warn-soft);color:var(--warn)}
+
+/* Comparison table */
+.comparison{width:100%;border-collapse:collapse;background:var(--panel);border-radius:var(--radius);overflow:hidden;border:1px solid var(--line)}
+.comparison th,.comparison td{padding:10px 14px;text-align:left;font-size:13px;border-bottom:1px solid var(--line)}
+.comparison th{background:var(--panel2);font-weight:600;font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
+.comparison tr:last-child td{border-bottom:none}
+.status-cell{font-weight:600}
+.status-ok{color:var(--ok)}
+.status-partial{color:var(--warn)}
+.status-missing{color:var(--bad)}
+
+/* E2E test results */
+.test-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}
+.test-card{background:var(--panel);border-radius:var(--radius);padding:14px;border:1px solid var(--line);text-align:center}
+.test-card .endpoint{font-size:13px;font-weight:600;margin-bottom:6px}
+.test-card .result{font-size:20px;font-weight:700}
+.test-card .detail{font-size:11px;color:var(--dim);margin-top:4px}
+
+/* Changelog */
+.changelog{background:var(--panel);border-radius:var(--radius);padding:16px;border:1px solid var(--line);max-height:300px;overflow-y:auto}
+.changelog-item{padding:8px 0;border-bottom:1px solid var(--line);font-size:13px}
+.changelog-item:last-child{border-bottom:none}
+.changelog-item .chg{font-weight:600;color:var(--accent-h)}
+.changelog-item .desc{color:var(--dim);margin-left:8px}
+
+/* Footer */
+.footer{margin-top:24px;padding-top:16px;border-top:1px solid var(--line);font-size:12px;color:var(--dim);text-align:center}
+</style>
+</head>
+<body>
+<div class="container">
+
+<div class="header">
+  <div class="header-left">
+    <div class="logo">Q</div>
+    <div>
+      <h1>Qoder 移植看板</h1>
+      <div class="subtitle">workbuddy-trae-proxy · Go → Python 1:1 复刻</div>
+    </div>
+  </div>
+  <div style="display:flex;gap:8px">
+    <span class="badge badge-ok">✅ 全部完成</span>
+    <span class="badge badge-accent">2026-10-10</span>
+  </div>
+</div>
+
+<!-- Stats -->
+<div class="stats-row">
+  <div class="stat-card">
+    <div class="label">Python 模块</div>
+    <div class="value">10</div>
+    <div class="sub">qoder_*.py 文件</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Go 源文件对照</div>
+    <div class="value">25+</div>
+    <div class="sub">逐文件复刻</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">API 端点</div>
+    <div class="value">7/7</div>
+    <div class="sub">端到端验证通过</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Qoder 模型</div>
+    <div class="value">14</div>
+    <div class="sub">含 context_window</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">自测项</div>
+    <div class="value">50+</div>
+    <div class="sub">全部通过</div>
+  </div>
+</div>
+
+<!-- Modules -->
+<div class="section">
+  <div class="section-title">📦 模块清单 <span class="count">10 个 Python 模块</span></div>
+  <div class="module-grid">
+    <div class="module-card">
+      <div class="name">qoder_cosy.py <span class="tag tag-ok">M1</span></div>
+      <div class="desc">cosy 协议层：签名/指纹/编码/会话/ExchangeJobToken。4 个 Go 测试向量逐字节一致。</div>
+      <div class="status">
+        <span class="tag tag-ok">✅ 完整</span>
+        <span class="tag">signature.go</span>
+        <span class="tag">encoding.go</span>
+        <span class="tag">fingerprint.go</span>
+        <span class="tag">session.go</span>
+        <span class="tag">auth.go</span>
+      </div>
+    </div>
+    <div class="module-card">
+      <div class="name">qoder_client.py <span class="tag tag-ok">M2</span></div>
+      <div class="desc">BearerClient + 区域端点 + Delta 解析 + 模型映射 + 会话建立 + baseprompt 加载。</div>
+      <div class="status">
+        <span class="tag tag-ok">✅ 完整</span>
+        <span class="tag">client.go</span>
+        <span class="tag">delta.go</span>
+        <span class="tag">bridge.go</span>
+      </div>
+    </div>
+    <div class="module-card">
+      <div class="name">qoder_accounts.py <span class="tag tag-ok">M3</span></div>
+      <div class="desc">账号体系：模型/存储/密钥/设置/OAuth 设备码登录/额度查询/本机盐。</div>
+      <div class="status">
+        <span class="tag tag-ok">✅ 完整</span>
+        <span class="tag">account/model.go</span>
+        <span class="tag">account/store.go</span>
+        <span class="tag">account/secret.go</span>
+        <span class="tag">account/oauth.go</span>
+        <span class="tag">account/region.go</span>
+      </div>
+    </div>
+    <div class="module-card">
+      <div class="name">qoder_checkin.py <span class="tag tag-ok">M4</span></div>
+      <div class="desc">签到主流程 + 本地连续签到统计 + 自动调度器（后台线程）。</div>
+      <div class="status">
+        <span class="tag tag-ok">✅ 完整</span>
+        <span class="tag">checkin.go</span>
+      </div>
+    </div>
+    <div class="module-card">
+      <div class="name">qoder_login_server.py</div>
+      <div class="desc">轻量 Web 服务：账号列表/OAuth/签到/额度查询。端口 28091。</div>
+      <div class="status">
+        <span class="tag tag-ok">✅ 完整</span>
+        <span class="tag">service.go</span>
+        <span class="tag">main.go</span>
+      </div>
+    </div>
+    <div class="module-card">
+      <div class="name">qoder_pool.py <span class="tag tag-ok">M5a</span></div>
+      <div class="desc">账号池：Slot/Pool/冷却/选号/ShouldFailover/CooldownFor/状态持久化。</div>
+      <div class="status">
+        <span class="tag tag-ok">✅ 完整</span>
+        <span class="tag">pool.go</span>
+        <span class="tag">errors.go</span>
+      </div>
+    </div>
+    <div class="module-card">
+      <div class="name">qoder_route.py <span class="tag tag-ok">M5b+M7</span></div>
+      <div class="desc">Bridge API 代理：请求体构建/消息转换/Delta→OpenAI chunk/账号池选号/SSE流式/失败换号/信封重试/按模型区域路由/脱敏日志。</div>
+      <div class="status">
+        <span class="tag tag-ok">✅ 完整</span>
+        <span class="tag">bridge.go</span>
+        <span class="tag">bridge_pool.go</span>
+        <span class="tag">chat.go</span>
+        <span class="tag">messages.go</span>
+      </div>
+    </div>
+    <div class="module-card">
+      <div class="name">qoder_claude.py <span class="tag tag-ok">M7a</span></div>
+      <div class="desc">Claude Messages API handler：convert_claude_tools_to_openai/_extract_system_text/call_qoder_claude(流式+非流式)/claude_models。</div>
+      <div class="status">
+        <span class="tag tag-ok">✅ 完整</span>
+        <span class="tag">claude.go</span>
+      </div>
+    </div>
+    <div class="module-card">
+      <div class="name">qoder_codex.py <span class="tag tag-ok">M7b</span></div>
+      <div class="desc">Codex Responses API handler：codex_input_to_messages/call_qoder_codex(流式+非流式)。</div>
+      <div class="status">
+        <span class="tag tag-ok">✅ 完整</span>
+        <span class="tag">codex.go</span>
+      </div>
+    </div>
+    <div class="module-card">
+      <div class="name">qoder_logger.py <span class="tag tag-ok">M7g</span></div>
+      <div class="desc">日志系统：内存环+stdout+文件三sink，按日轮转，gzip归档，7天保留。</div>
+      <div class="status">
+        <span class="tag tag-ok">✅ 完整</span>
+        <span class="tag">logger/logger.go</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Feature comparison -->
+<div class="section">
+  <div class="section-title">📊 功能对照表 <span class="count">Go → Python</span></div>
+  <table class="comparison">
+    <thead>
+      <tr><th>功能</th><th>Go 文件</th><th>Python 文件</th><th>状态</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>cosy 签名/指纹/编码</td><td>internal/cosy/*.go</td><td>qoder_cosy.py</td><td><span class="status-cell status-ok">✅ 完整</span></td></tr>
+      <tr><td>BearerClient + SSE</td><td>client.go</td><td>qoder_client.py</td><td><span class="status-cell status-ok">✅ 完整</span></td></tr>
+      <tr><td>Delta 解析</td><td>delta.go</td><td>qoder_client.py</td><td><span class="status-cell status-ok">✅ 完整</span></td></tr>
+      <tr><td>错误四分类</td><td>errors.go</td><td>qoder_pool.py</td><td><span class="status-cell status-ok">✅ 完整</span></td></tr>
+      <tr><td>消息格式转换</td><td>messages.go</td><td>qoder_route.py</td><td><span class="status-cell status-ok">✅ 完整</span></td></tr>
+      <tr><td>账号池 Slot/Pool</td><td>pool.go</td><td>qoder_pool.py</td><td><span class="status-cell status-ok">✅ 完整</span></td></tr>
+      <tr><td>模型目录缓存</td><td>bridge_pool.go</td><td>qoder_route.py</td><td><span class="status-cell status-ok">✅ 完整</span></td></tr>
+      <tr><td>信封重试闸门</td><td>bridge.go</td><td>qoder_route.py</td><td><span class="status-cell status-ok">✅ 完整</span></td></tr>
+      <tr><td>Chat Completions</td><td>chat.go</td><td>qoder_route.py</td><td><span class="status-cell status-ok">✅ 完整</span></td></tr>
+      <tr><td>Claude Messages API</td><td>claude.go</td><td>qoder_claude.py</td><td><span class="status-cell status-ok">✅ 完整</span></td></tr>
+      <tr><td>Codex Responses API</td><td>codex.go</td><td>qoder_codex.py</td><td><span class="status-cell status-ok">✅ 完整</span></td></tr>
+      <tr><td>OAuth 设备码登录</td><td>account/oauth.go</td><td>qoder_accounts.py</td><td><span class="status-cell status-ok">✅ 完整</span></td></tr>
+      <tr><td>签到 campaigns</td><td>checkin.go</td><td>qoder_checkin.py</td><td><span class="status-cell status-ok">✅ 完整</span></td></tr>
+      <tr><td>日志系统</td><td>logger/logger.go</td><td>qoder_logger.py</td><td><span class="status-cell status-ok">✅ 完整</span></td></tr>
+      <tr><td>token 凭证轮换 (dt- ↔ drt-)</td><td>— (Go 无)</td><td>qoder_pool.py</td><td><span class="status-cell status-ok">✅ 新增</span></td></tr>
+      <tr><td>池空自动检测新账号</td><td>— (Go 无)</td><td>qoder_route.py</td><td><span class="status-cell status-ok">✅ 新增</span></td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- E2E tests -->
+<div class="section">
+  <div class="section-title">🧪 端到端验证 <span class="count">7/7 通过</span></div>
+  <div class="test-grid">
+    <div class="test-card">
+      <div class="endpoint">/v1/models</div>
+      <div class="result" style="color:var(--ok)">✅</div>
+      <div class="detail">29 总模型 · 14 Qoder 模型</div>
+    </div>
+    <div class="test-card">
+      <div class="endpoint">/v1/chat/completions</div>
+      <div class="result" style="color:var(--ok)">✅</div>
+      <div class="detail">非流式 + 流式</div>
+    </div>
+    <div class="test-card">
+      <div class="endpoint">/v1/messages (Claude)</div>
+      <div class="result" style="color:var(--ok)">✅</div>
+      <div class="detail">非流式 + 流式 SSE</div>
+    </div>
+    <div class="test-card">
+      <div class="endpoint">/v1/responses (Codex)</div>
+      <div class="result" style="color:var(--ok)">✅</div>
+      <div class="detail">非流式 + 流式 SSE</div>
+    </div>
+    <div class="test-card">
+      <div class="endpoint">/qoder/accounts</div>
+      <div class="result" style="color:var(--ok)">✅</div>
+      <div class="detail">管理端点</div>
+    </div>
+    <div class="test-card">
+      <div class="endpoint">/qoder/quota</div>
+      <div class="result" style="color:var(--ok)">✅</div>
+      <div class="detail">额度查询</div>
+    </div>
+    <div class="test-card">
+      <div class="endpoint">凭证轮换</div>
+      <div class="result" style="color:var(--ok)">✅</div>
+      <div class="detail">dt- ↔ drt- 实测通过</div>
+    </div>
+  </div>
+</div>
+
+<!-- Token rotation feature -->
+<div class="section">
+  <div class="section-title">🔐 自动换号 + 凭证轮换 <span class="count">已上线</span></div>
+  <div class="comparison">
+    <thead>
+      <tr><th>场景</th><th>自动行为</th><th>状态</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>401 token 失效</td><td>同账号 dt- ↔ drt- 凭证轮换 → 重建 session → 重试</td><td><span class="status-cell status-ok">✅</span></td></tr>
+      <tr><td>轮换失败 / 403 额度耗尽</td><td>冷却原账号 30 分钟 → 自动选下一个账号</td><td><span class="status-cell status-ok">✅</span></td></tr>
+      <tr><td>所有账号冷却 / 池空</td><td>返回 503 + 明确提示「请访问 28091 扫码登录」</td><td><span class="status-cell status-ok">✅</span></td></tr>
+      <tr><td>运行中新扫码登录</td><td>get_pool 每 10 秒检测磁盘变化 → 新账号自动入池</td><td><span class="status-cell status-ok">✅</span></td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- Changelog -->
+<div class="section">
+  <div class="section-title">📝 变更记录 <span class="count">最近 10 条</span></div>
+  <div class="changelog">
+    <div class="changelog-item"><span class="chg">FIX-06</span> <span class="desc">get_pool 周期检测磁盘账号变化，新登录账号自动入池</span></div>
+    <div class="changelog-item"><span class="chg">FIX-05</span> <span class="desc">池空返回明确「需重新登录」提示 + 登录入口</span></div>
+    <div class="changelog-item"><span class="chg">FIX-04</span> <span class="desc">轮换后持久化新 secret 到磁盘</span></div>
+    <div class="changelog-item"><span class="chg">FIX-03</span> <span class="desc">三个调用链接入 401 → 轮换重试 → 失败换号</span></div>
+    <div class="changelog-item"><span class="chg">FIX-02</span> <span class="desc">Slot 记录当前凭证 + rotate_slot_credential 函数</span></div>
+    <div class="changelog-item"><span class="chg">FIX-01</span> <span class="desc">build_session_from_secret 支持 drt- 直接凭证</span></div>
+    <div class="changelog-item"><span class="chg">CHG-10</span> <span class="desc">CleanupAllData 数据清理</span></div>
+    <div class="changelog-item"><span class="chg">CHG-09</span> <span class="desc">账号排序 Reorder 功能</span></div>
+    <div class="changelog-item"><span class="chg">CHG-08</span> <span class="desc">StartCheckinScheduler 后台调度线程</span></div>
+    <div class="changelog-item"><span class="chg">CHG-07</span> <span class="desc">BlankResponseMeta 字段结构对齐 Go 端</span></div>
+    <div class="changelog-item"><span class="chg">M7g</span> <span class="desc">qoder_logger.py 日志系统</span></div>
+    <div class="changelog-item"><span class="chg">M7a/M7b</span> <span class="desc">qoder_claude.py + qoder_codex.py</span></div>
+    <div class="changelog-item"><span class="chg">M5b+M7d/e/h</span> <span class="desc">qoder_route.py 信封重试 + 按模型路由 + 脱敏</span></div>
+    <div class="changelog-item"><span class="chg">M5a</span> <span class="desc">qoder_pool.py 账号池模块</span></div>
+    <div class="changelog-item"><span class="chg">M1-M4</span> <span class="desc">qoder_cosy.py + qoder_client.py + qoder_accounts.py + qoder_checkin.py</span></div>
+  </div>
+</div>
+
+<div class="footer">
+  Qoder 移植完成 · 2026-10-10 · workbuddy-trae-proxy
+</div>
+
+</div>
+</body>
+</html>

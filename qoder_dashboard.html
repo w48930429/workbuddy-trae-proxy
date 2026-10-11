@@ -1,0 +1,706 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Qoder 管理面板</title>
+<style>
+:root{
+  --bg:#0f1117; --panel:#1a1d27; --panel2:#222530; --line:#2a2d3a;
+  --fg:#e4e6eb; --dim:#8b8fa3;
+  --accent:#6366f1; --accent-h:#818cf8; --accent-soft:rgba(99,102,241,.12);
+  --ok:#22c55e; --ok-soft:rgba(34,197,94,.12);
+  --bad:#ef4444; --bad-soft:rgba(239,68,68,.12);
+  --warn:#f59e0b; --warn-soft:rgba(245,158,11,.12);
+  --radius:12px;
+  --shadow:0 2px 8px rgba(0,0,0,.2);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;background:var(--bg);color:var(--fg);min-height:100vh;padding:24px}
+.container{max-width:1200px;margin:0 auto}
+
+/* Header */
+.header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:12px}
+.header-left{display:flex;align-items:center;gap:12px}
+.logo{width:40px;height:40px;border-radius:10px;background:linear-gradient(135deg,#6366f1,#8b5cf6);display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;color:#fff}
+.header h1{font-size:24px;font-weight:600}
+.header .subtitle{font-size:13px;color:var(--dim);margin-top:2px}
+
+/* Tab navigation */
+.tab-nav{display:flex;gap:0;margin-bottom:20px;border-bottom:1px solid var(--line)}
+.tab-btn{padding:12px 24px;font-size:15px;font-weight:500;color:var(--dim);cursor:pointer;border:none;background:none;border-bottom:2px solid transparent;transition:all .15s}
+.tab-btn:hover{color:var(--fg)}
+.tab-btn.active{color:var(--accent-h);border-bottom-color:var(--accent)}
+.tab-page{display:none}
+.tab-page.active{display:block}
+
+/* Badge */
+.badge{display:inline-block;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:600}
+.badge-ok{background:var(--ok-soft);color:var(--ok)}
+.badge-warn{background:var(--warn-soft);color:var(--warn)}
+.badge-accent{background:var(--accent-soft);color:var(--accent-h)}
+
+/* Region selector */
+.region-row{display:flex;gap:12px;margin-bottom:16px;align-items:center}
+.region-row label{font-size:13px;color:var(--dim)}
+.region-row select{padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--fg);font-size:14px;cursor:pointer}
+.region-row select:hover{border-color:var(--accent)}
+
+/* Action buttons */
+.actions{display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap}
+.btn{padding:10px 18px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);color:var(--fg);cursor:pointer;font-size:14px;font-weight:500;transition:all .15s;display:inline-flex;align-items:center;gap:6px}
+.btn:hover{border-color:var(--accent);background:var(--panel2)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover{background:var(--accent-h);border-color:var(--accent-h)}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn.sm{padding:6px 12px;font-size:12px;border-radius:8px}
+
+/* Login panel */
+.login-panel{display:none;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:20px;margin-bottom:20px;box-shadow:var(--shadow)}
+.login-panel.show{display:block}
+.login-panel h3{font-size:15px;margin-bottom:12px;font-weight:600}
+.login-url-box{background:#0d0f14;border:1px solid var(--line);border-radius:8px;padding:14px;margin:10px 0}
+.login-url-box a{color:var(--accent-h);font-size:13px;word-break:break-all;text-decoration:none}
+.login-url-box a:hover{text-decoration:underline}
+.login-status{font-size:13px;color:var(--dim);display:flex;align-items:center;gap:8px;margin-top:8px}
+.spinner{width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite;display:inline-block}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Account cards */
+.accounts{display:grid;gap:12px}
+.account-card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px;display:flex;align-items:center;justify-content:space-between;transition:border-color .15s;box-shadow:var(--shadow)}
+.account-card:hover{border-color:#3a3d4a}
+.account-info{display:flex;align-items:center;gap:14px}
+.account-avatar{width:42px;height:42px;border-radius:11px;background:linear-gradient(135deg,#6366f1,#8b5cf6);display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:600;color:#fff;flex-shrink:0}
+.account-detail{display:flex;flex-direction:column;gap:3px}
+.account-name{font-size:15px;font-weight:500}
+.account-meta{font-size:12px;color:var(--dim);display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.badge.plan{background:#1e293b;color:#93c5fd}
+.badge.region{background:var(--ok-soft);color:#86efac}
+.badge.active{background:var(--bad-soft);color:#fca5a5}
+.badge.auth{background:var(--warn-soft);color:#fde68a}
+.account-actions{display:flex;gap:8px}
+
+/* Empty state */
+.empty-state{text-align:center;padding:48px 20px;color:var(--dim)}
+.empty-state .icon{font-size:40px;margin-bottom:10px;opacity:.4}
+
+/* Log panel */
+.log-panel{margin-top:20px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px}
+.log-panel h3{font-size:13px;color:var(--dim);margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;font-weight:500}
+.log-content{font-size:13px;white-space:pre-wrap;max-height:200px;overflow-y:auto;font-family:'Cascadia Code','Consolas',monospace;color:#a8acb8;line-height:1.6}
+
+/* Stats row */
+.stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:24px}
+.stat-card{background:var(--panel);border-radius:var(--radius);padding:16px;border:1px solid var(--line)}
+.stat-card .label{font-size:12px;color:var(--dim);margin-bottom:4px}
+.stat-card .value{font-size:28px;font-weight:700}
+.stat-card .sub{font-size:12px;color:var(--dim);margin-top:4px}
+
+/* Section */
+.section{margin-bottom:24px}
+.section-title{font-size:16px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.section-title .count{font-size:12px;color:var(--dim);font-weight:400}
+
+/* Module cards grid */
+.module-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+.module-card{background:var(--panel);border-radius:var(--radius);padding:16px;border:1px solid var(--line);transition:border-color .2s}
+.module-card:hover{border-color:var(--accent)}
+.module-card .name{font-size:14px;font-weight:600;margin-bottom:4px;display:flex;align-items:center;gap:8px}
+.module-card .desc{font-size:12px;color:var(--dim);margin-bottom:8px;line-height:1.4}
+.module-card .status{display:flex;gap:6px;flex-wrap:wrap}
+.tag{font-size:11px;padding:2px 6px;border-radius:4px;background:var(--panel2);color:var(--dim)}
+.tag-ok{background:var(--ok-soft);color:var(--ok)}
+.tag-bad{background:var(--bad-soft);color:var(--bad)}
+.tag-warn{background:var(--warn-soft);color:var(--warn)}
+
+/* Comparison table */
+.comparison{width:100%;border-collapse:collapse;background:var(--panel);border-radius:var(--radius);overflow:hidden;border:1px solid var(--line)}
+.comparison th,.comparison td{padding:10px 14px;text-align:left;font-size:13px;border-bottom:1px solid var(--line)}
+.comparison th{background:var(--panel2);font-weight:600;font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
+.comparison tr:last-child td{border-bottom:none}
+.status-cell{font-weight:600}
+.status-ok{color:var(--ok)}
+.status-partial{color:var(--warn)}
+.status-missing{color:var(--bad)}
+
+/* E2E test results */
+.test-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}
+.test-card{background:var(--panel);border-radius:var(--radius);padding:14px;border:1px solid var(--line);text-align:center}
+.test-card .endpoint{font-size:13px;font-weight:600;margin-bottom:6px}
+.test-card .result{font-size:20px;font-weight:700}
+.test-card .detail{font-size:11px;color:var(--dim);margin-top:4px}
+
+/* Changelog */
+.changelog{background:var(--panel);border-radius:var(--radius);padding:16px;border:1px solid var(--line);max-height:300px;overflow-y:auto}
+.changelog-item{padding:8px 0;border-bottom:1px solid var(--line);font-size:13px}
+.changelog-item:last-child{border-bottom:none}
+.changelog-item .chg{font-weight:600;color:var(--accent-h)}
+.changelog-item .desc{color:var(--dim);margin-left:8px}
+
+/* Footer */
+.footer{margin-top:24px;padding-top:16px;border-top:1px solid var(--line);font-size:12px;color:var(--dim);text-align:center}
+
+/* Toast */
+#toastBox{position:fixed;top:20px;right:20px;z-index:9999;display:flex;flex-direction:column;gap:10px;align-items:flex-end;pointer-events:none}
+.toast{padding:12px 20px;border-radius:var(--radius);font-size:14px;animation:slideIn .2s;max-width:400px;box-shadow:var(--shadow)}
+.toast.success{background:var(--ok-soft);border:1px solid var(--ok);color:#86efac}
+.toast.error{background:var(--bad-soft);border:1px solid var(--bad);color:#fca5a5}
+.toast.info{background:var(--accent-soft);border:1px solid var(--accent);color:#93c5fd}
+@keyframes slideIn{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
+</style>
+</head>
+<body>
+<div class="container">
+
+<!-- Header -->
+<div class="header">
+  <div class="header-left">
+    <div class="logo">Q</div>
+    <div>
+      <h1>Qoder 管理面板</h1>
+      <div class="subtitle">账号管理 · 移植看板 · workbuddy-trae-proxy</div>
+    </div>
+  </div>
+</div>
+
+<!-- Tab navigation -->
+<div class="tab-nav">
+  <button class="tab-btn active" data-tab="accounts">账号管理</button>
+  <button class="tab-btn" data-tab="board">移植看板</button>
+</div>
+
+<!-- ==================== Tab: 账号管理 ==================== -->
+<div class="tab-page active" id="tab-accounts">
+
+  <div class="region-row">
+    <label>登录区域：</label>
+    <select id="regionSelect">
+      <option value="global">国际站 (global)</option>
+      <option value="cn">国内站 (cn)</option>
+    </select>
+  </div>
+
+  <div class="actions">
+    <button class="btn primary" id="btnLogin">OAuth 登录</button>
+    <button class="btn" id="btnRefresh">刷新账号</button>
+    <button class="btn" id="btnCheckinAll">一键签到（全部）</button>
+  </div>
+
+  <div class="login-panel" id="loginPanel">
+    <h3>扫码授权登录</h3>
+    <div class="login-url-box">
+      <a id="loginUrl" href="#" target="_blank"></a>
+    </div>
+    <div class="login-status" id="loginStatus">
+      <span class="spinner"></span>
+      <span>等待授权中…请在新标签页完成登录</span>
+    </div>
+    <div style="margin-top:12px">
+      <button class="btn sm" id="btnCloseLogin">关闭</button>
+    </div>
+  </div>
+
+  <div class="accounts" id="accountsList">
+    <div class="empty-state">
+      <div class="icon">&#128274;</div>
+      <div>暂无账号，请点击 OAuth 登录</div>
+    </div>
+  </div>
+
+  <div class="log-panel" id="logPanel" style="display:none">
+    <h3>操作日志 <button class="btn sm" id="btnClearLog">清空</button></h3>
+    <div class="log-content" id="logContent"></div>
+  </div>
+
+</div><!-- /tab-accounts -->
+
+<!-- ==================== Tab: 移植看板 ==================== -->
+<div class="tab-page" id="tab-board">
+
+  <div class="header" style="margin-bottom:16px">
+    <div style="display:flex;gap:8px">
+      <span class="badge badge-ok">全部完成</span>
+      <span class="badge badge-accent">2026-10-10</span>
+    </div>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats-row">
+    <div class="stat-card">
+      <div class="label">Python 模块</div>
+      <div class="value">10</div>
+      <div class="sub">qoder_*.py 文件</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Go 源文件对照</div>
+      <div class="value">25+</div>
+      <div class="sub">逐文件复刻</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">API 端点</div>
+      <div class="value">7/7</div>
+      <div class="sub">端到端验证通过</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Qoder 模型</div>
+      <div class="value">14</div>
+      <div class="sub">含 context_window</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">自测项</div>
+      <div class="value">50+</div>
+      <div class="sub">全部通过</div>
+    </div>
+  </div>
+
+  <!-- Modules -->
+  <div class="section">
+    <div class="section-title">模块清单 <span class="count">10 个 Python 模块</span></div>
+    <div class="module-grid">
+      <div class="module-card">
+        <div class="name">qoder_cosy.py <span class="tag tag-ok">M1</span></div>
+        <div class="desc">cosy 协议层：签名/指纹/编码/会话/ExchangeJobToken。4 个 Go 测试向量逐字节一致。</div>
+        <div class="status">
+          <span class="tag tag-ok">完整</span>
+          <span class="tag">signature.go</span>
+          <span class="tag">encoding.go</span>
+          <span class="tag">fingerprint.go</span>
+          <span class="tag">session.go</span>
+          <span class="tag">auth.go</span>
+        </div>
+      </div>
+      <div class="module-card">
+        <div class="name">qoder_client.py <span class="tag tag-ok">M2</span></div>
+        <div class="desc">BearerClient + 区域端点 + Delta 解析 + 模型映射 + 会话建立 + baseprompt 加载。</div>
+        <div class="status">
+          <span class="tag tag-ok">完整</span>
+          <span class="tag">client.go</span>
+          <span class="tag">delta.go</span>
+          <span class="tag">bridge.go</span>
+        </div>
+      </div>
+      <div class="module-card">
+        <div class="name">qoder_accounts.py <span class="tag tag-ok">M3</span></div>
+        <div class="desc">账号体系：模型/存储/密钥/设置/OAuth 设备码登录/额度查询/本机盐。</div>
+        <div class="status">
+          <span class="tag tag-ok">完整</span>
+          <span class="tag">account/model.go</span>
+          <span class="tag">account/store.go</span>
+          <span class="tag">account/secret.go</span>
+          <span class="tag">account/oauth.go</span>
+          <span class="tag">account/region.go</span>
+        </div>
+      </div>
+      <div class="module-card">
+        <div class="name">qoder_checkin.py <span class="tag tag-ok">M4</span></div>
+        <div class="desc">签到主流程 + 本地连续签到统计 + 自动调度器（后台线程）。</div>
+        <div class="status">
+          <span class="tag tag-ok">完整</span>
+          <span class="tag">checkin.go</span>
+        </div>
+      </div>
+      <div class="module-card">
+        <div class="name">qoder_login_server.py</div>
+        <div class="desc">轻量 Web 服务：账号列表/OAuth/签到/额度查询。端口 28091。</div>
+        <div class="status">
+          <span class="tag tag-ok">完整</span>
+          <span class="tag">service.go</span>
+          <span class="tag">main.go</span>
+        </div>
+      </div>
+      <div class="module-card">
+        <div class="name">qoder_pool.py <span class="tag tag-ok">M5a</span></div>
+        <div class="desc">账号池：Slot/Pool/冷却/选号/ShouldFailover/CooldownFor/状态持久化。</div>
+        <div class="status">
+          <span class="tag tag-ok">完整</span>
+          <span class="tag">pool.go</span>
+          <span class="tag">errors.go</span>
+        </div>
+      </div>
+      <div class="module-card">
+        <div class="name">qoder_route.py <span class="tag tag-ok">M5b+M7</span></div>
+        <div class="desc">Bridge API 代理：请求体构建/消息转换/Delta→OpenAI chunk/账号池选号/SSE流式/失败换号/信封重试/按模型区域路由/脱敏日志。</div>
+        <div class="status">
+          <span class="tag tag-ok">完整</span>
+          <span class="tag">bridge.go</span>
+          <span class="tag">bridge_pool.go</span>
+          <span class="tag">chat.go</span>
+          <span class="tag">messages.go</span>
+        </div>
+      </div>
+      <div class="module-card">
+        <div class="name">qoder_claude.py <span class="tag tag-ok">M7a</span></div>
+        <div class="desc">Claude Messages API handler：convert_claude_tools_to_openai/_extract_system_text/call_qoder_claude(流式+非流式)/claude_models。</div>
+        <div class="status">
+          <span class="tag tag-ok">完整</span>
+          <span class="tag">claude.go</span>
+        </div>
+      </div>
+      <div class="module-card">
+        <div class="name">qoder_codex.py <span class="tag tag-ok">M7b</span></div>
+        <div class="desc">Codex Responses API handler：codex_input_to_messages/call_qoder_codex(流式+非流式)。</div>
+        <div class="status">
+          <span class="tag tag-ok">完整</span>
+          <span class="tag">codex.go</span>
+        </div>
+      </div>
+      <div class="module-card">
+        <div class="name">qoder_logger.py <span class="tag tag-ok">M7g</span></div>
+        <div class="desc">日志系统：内存环+stdout+文件三sink，按日轮转，gzip归档，7天保留。</div>
+        <div class="status">
+          <span class="tag tag-ok">完整</span>
+          <span class="tag">logger/logger.go</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Feature comparison -->
+  <div class="section">
+    <div class="section-title">功能对照表 <span class="count">Go → Python</span></div>
+    <table class="comparison">
+      <thead>
+        <tr><th>功能</th><th>Go 文件</th><th>Python 文件</th><th>状态</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>cosy 签名/指纹/编码</td><td>internal/cosy/*.go</td><td>qoder_cosy.py</td><td><span class="status-cell status-ok">完整</span></td></tr>
+        <tr><td>BearerClient + SSE</td><td>client.go</td><td>qoder_client.py</td><td><span class="status-cell status-ok">完整</span></td></tr>
+        <tr><td>Delta 解析</td><td>delta.go</td><td>qoder_client.py</td><td><span class="status-cell status-ok">完整</span></td></tr>
+        <tr><td>错误四分类</td><td>errors.go</td><td>qoder_pool.py</td><td><span class="status-cell status-ok">完整</span></td></tr>
+        <tr><td>消息格式转换</td><td>messages.go</td><td>qoder_route.py</td><td><span class="status-cell status-ok">完整</span></td></tr>
+        <tr><td>账号池 Slot/Pool</td><td>pool.go</td><td>qoder_pool.py</td><td><span class="status-cell status-ok">完整</span></td></tr>
+        <tr><td>模型目录缓存</td><td>bridge_pool.go</td><td>qoder_route.py</td><td><span class="status-cell status-ok">完整</span></td></tr>
+        <tr><td>信封重试闸门</td><td>bridge.go</td><td>qoder_route.py</td><td><span class="status-cell status-ok">完整</span></td></tr>
+        <tr><td>Chat Completions</td><td>chat.go</td><td>qoder_route.py</td><td><span class="status-cell status-ok">完整</span></td></tr>
+        <tr><td>Claude Messages API</td><td>claude.go</td><td>qoder_claude.py</td><td><span class="status-cell status-ok">完整</span></td></tr>
+        <tr><td>Codex Responses API</td><td>codex.go</td><td>qoder_codex.py</td><td><span class="status-cell status-ok">完整</span></td></tr>
+        <tr><td>OAuth 设备码登录</td><td>account/oauth.go</td><td>qoder_accounts.py</td><td><span class="status-cell status-ok">完整</span></td></tr>
+        <tr><td>签到 campaigns</td><td>checkin.go</td><td>qoder_checkin.py</td><td><span class="status-cell status-ok">完整</span></td></tr>
+        <tr><td>日志系统</td><td>logger/logger.go</td><td>qoder_logger.py</td><td><span class="status-cell status-ok">完整</span></td></tr>
+        <tr><td>token 凭证轮换 (dt- ↔ drt-)</td><td>— (Go 无)</td><td>qoder_pool.py</td><td><span class="status-cell status-ok">新增</span></td></tr>
+        <tr><td>池空自动检测新账号</td><td>— (Go 无)</td><td>qoder_route.py</td><td><span class="status-cell status-ok">新增</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- E2E tests -->
+  <div class="section">
+    <div class="section-title">端到端验证 <span class="count">7/7 通过</span></div>
+    <div class="test-grid">
+      <div class="test-card">
+        <div class="endpoint">/v1/models</div>
+        <div class="result" style="color:var(--ok)">PASS</div>
+        <div class="detail">29 总模型 · 14 Qoder 模型</div>
+      </div>
+      <div class="test-card">
+        <div class="endpoint">/v1/chat/completions</div>
+        <div class="result" style="color:var(--ok)">PASS</div>
+        <div class="detail">非流式 + 流式</div>
+      </div>
+      <div class="test-card">
+        <div class="endpoint">/v1/messages (Claude)</div>
+        <div class="result" style="color:var(--ok)">PASS</div>
+        <div class="detail">非流式 + 流式 SSE</div>
+      </div>
+      <div class="test-card">
+        <div class="endpoint">/v1/responses (Codex)</div>
+        <div class="result" style="color:var(--ok)">PASS</div>
+        <div class="detail">非流式 + 流式 SSE</div>
+      </div>
+      <div class="test-card">
+        <div class="endpoint">/qoder/accounts</div>
+        <div class="result" style="color:var(--ok)">PASS</div>
+        <div class="detail">管理端点</div>
+      </div>
+      <div class="test-card">
+        <div class="endpoint">/qoder/quota</div>
+        <div class="result" style="color:var(--ok)">PASS</div>
+        <div class="detail">额度查询</div>
+      </div>
+      <div class="test-card">
+        <div class="endpoint">凭证轮换</div>
+        <div class="result" style="color:var(--ok)">PASS</div>
+        <div class="detail">dt- ↔ drt- 实测通过</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Token rotation feature -->
+  <div class="section">
+    <div class="section-title">自动换号 + 凭证轮换 <span class="count">已上线</span></div>
+    <table class="comparison">
+      <thead>
+        <tr><th>场景</th><th>自动行为</th><th>状态</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>401 token 失效</td><td>同账号 dt- ↔ drt- 凭证轮换 → 重建 session → 重试</td><td><span class="status-cell status-ok">已上线</span></td></tr>
+        <tr><td>轮换失败 / 403 额度耗尽</td><td>冷却原账号 30 分钟 → 自动选下一个账号</td><td><span class="status-cell status-ok">已上线</span></td></tr>
+        <tr><td>所有账号冷却 / 池空</td><td>返回 503 + 明确提示「请访问 28091 扫码登录」</td><td><span class="status-cell status-ok">已上线</span></td></tr>
+        <tr><td>运行中新扫码登录</td><td>get_pool 每 10 秒检测磁盘变化 → 新账号自动入池</td><td><span class="status-cell status-ok">已上线</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Changelog -->
+  <div class="section">
+    <div class="section-title">变更记录 <span class="count">最近 10 条</span></div>
+    <div class="changelog">
+      <div class="changelog-item"><span class="chg">FIX-06</span> <span class="desc">get_pool 周期检测磁盘账号变化，新登录账号自动入池</span></div>
+      <div class="changelog-item"><span class="chg">FIX-05</span> <span class="desc">池空返回明确「需重新登录」提示 + 登录入口</span></div>
+      <div class="changelog-item"><span class="chg">FIX-04</span> <span class="desc">轮换后持久化新 secret 到磁盘</span></div>
+      <div class="changelog-item"><span class="chg">FIX-03</span> <span class="desc">三个调用链接入 401 → 轮换重试 → 失败换号</span></div>
+      <div class="changelog-item"><span class="chg">FIX-02</span> <span class="desc">Slot 记录当前凭证 + rotate_slot_credential 函数</span></div>
+      <div class="changelog-item"><span class="chg">FIX-01</span> <span class="desc">build_session_from_secret 支持 drt- 直接凭证</span></div>
+      <div class="changelog-item"><span class="chg">CHG-10</span> <span class="desc">CleanupAllData 数据清理</span></div>
+      <div class="changelog-item"><span class="chg">CHG-09</span> <span class="desc">账号排序 Reorder 功能</span></div>
+      <div class="changelog-item"><span class="chg">CHG-08</span> <span class="desc">StartCheckinScheduler 后台调度线程</span></div>
+      <div class="changelog-item"><span class="chg">CHG-07</span> <span class="desc">BlankResponseMeta 字段结构对齐 Go 端</span></div>
+      <div class="changelog-item"><span class="chg">M7g</span> <span class="desc">qoder_logger.py 日志系统</span></div>
+      <div class="changelog-item"><span class="chg">M7a/M7b</span> <span class="desc">qoder_claude.py + qoder_codex.py</span></div>
+      <div class="changelog-item"><span class="chg">M5b+M7d/e/h</span> <span class="desc">qoder_route.py 信封重试 + 按模型路由 + 脱敏</span></div>
+      <div class="changelog-item"><span class="chg">M5a</span> <span class="desc">qoder_pool.py 账号池模块</span></div>
+      <div class="changelog-item"><span class="chg">M1-M4</span> <span class="desc">qoder_cosy.py + qoder_client.py + qoder_accounts.py + qoder_checkin.py</span></div>
+    </div>
+  </div>
+
+  <div class="footer">
+    Qoder 移植完成 · 2026-10-10 · workbuddy-trae-proxy
+  </div>
+
+</div><!-- /tab-board -->
+
+</div><!-- /container -->
+
+<div id="toastBox"></div>
+
+<script>
+/* ===== Tab switching ===== */
+document.querySelectorAll('.tab-btn').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
+    document.querySelectorAll('.tab-page').forEach(function(p) { p.classList.remove('active'); });
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+  });
+});
+
+/* ===== Account management logic ===== */
+var logEntries = [];
+
+function log(msg) {
+  logEntries.push(new Date().toLocaleTimeString() + ' ' + msg);
+  var el = document.getElementById('logContent');
+  el.textContent = logEntries.join('\n');
+  el.scrollTop = el.scrollHeight;
+  document.getElementById('logPanel').style.display = 'block';
+}
+
+function clearLog() {
+  logEntries = [];
+  document.getElementById('logContent').textContent = '';
+  document.getElementById('logPanel').style.display = 'none';
+}
+
+function toast(msg, type) {
+  var box = document.getElementById('toastBox');
+  var item = document.createElement('div');
+  item.className = 'toast ' + (type || 'info');
+  item.textContent = msg;
+  box.appendChild(item);
+  setTimeout(function() { item.remove(); }, 3500);
+}
+
+function api(url, opt) {
+  return fetch(url, opt).then(function(r) { return r.json(); }).catch(function(e) {
+    log('请求失败: ' + e.message);
+    toast('请求失败: ' + e.message, 'error');
+    throw e;
+  });
+}
+
+function startLogin() {
+  var region = document.getElementById('regionSelect').value;
+  log('开始 OAuth 登录，区域: ' + region);
+  var btn = document.getElementById('btnLogin');
+  btn.disabled = true;
+  api('/qoder/oauth/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ region: region })
+  }).then(function(d) {
+    log('已生成登录链接: ' + d.login_url);
+    var panel = document.getElementById('loginPanel');
+    panel.classList.add('show');
+    var a = document.getElementById('loginUrl');
+    a.textContent = d.login_url;
+    a.href = d.login_url;
+    pollLogin(d.login_id);
+    btn.disabled = false;
+  }).catch(function() { btn.disabled = false; });
+}
+
+var pollTimer = null;
+
+function pollLogin(id) {
+  var statusEl = document.getElementById('loginStatus');
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(function() {
+    api('/qoder/oauth/poll?login_id=' + encodeURIComponent(id)).then(function(r) {
+      if (r.status === 'pending') {
+        statusEl.innerHTML = '<span class="spinner"></span><span>等待授权中…请在新标签页完成登录</span>';
+        return;
+      }
+      clearInterval(pollTimer);
+      pollTimer = null;
+      if (r.status === 'done' && r.account) {
+        statusEl.innerHTML = '<span style="color:var(--ok)">&#10003;</span><span>登录成功: ' + r.account.name + '</span>';
+        log('账号已添加: ' + r.account.name);
+        toast('登录成功: ' + r.account.name, 'success');
+        loadAccounts();
+      } else {
+        statusEl.innerHTML = '<span style="color:var(--bad)">&#10007;</span><span>登录状态: ' + r.status + '</span>';
+        log('登录未完成: ' + r.status);
+        toast('登录未完成: ' + r.status, 'error');
+      }
+    }).catch(function() {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    });
+  }, 2000);
+}
+
+function closeLoginPanel() {
+  document.getElementById('loginPanel').classList.remove('show');
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+
+function loadAccounts() {
+  api('/qoder/accounts').then(function(d) {
+    var list = document.getElementById('accountsList');
+    list.innerHTML = '';
+    if (!d.accounts || d.accounts.length === 0) {
+      list.innerHTML = '<div class="empty-state"><div class="icon">&#128274;</div><div>暂无账号，请点击 OAuth 登录</div></div>';
+      log('账号数: 0');
+      return;
+    }
+    log('账号数: ' + d.accounts.length);
+    d.accounts.forEach(function(a) {
+      var card = document.createElement('div');
+      card.className = 'account-card';
+      var initials = (a.name || a.email || '?').substring(0, 2).toUpperCase();
+      var badges = '';
+      if (a.plan) badges += '<span class="badge plan">' + a.plan + '</span>';
+      if (a.region) badges += '<span class="badge region">' + a.region + '</span>';
+      if (a.active) badges += '<span class="badge active">默认</span>';
+      if (a.auth_mode) badges += '<span class="badge auth">' + a.auth_mode + '</span>';
+      card.innerHTML =
+        '<div class="account-info">' +
+          '<div class="account-avatar">' + initials + '</div>' +
+          '<div class="account-detail">' +
+            '<div class="account-name">' + (a.name || '-') + '</div>' +
+            '<div class="account-meta">' + (a.email || '-') + ' ' + badges + '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="account-actions">' +
+          '<button class="btn sm" data-checkin="' + a.id + '">签到</button>' +
+          '<button class="btn sm" data-quota="' + a.id + '">额度</button>' +
+        '</div>';
+      list.appendChild(card);
+    });
+  });
+}
+
+function checkinAll() {
+  log('开始全部签到…');
+  api('/qoder/checkin', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}'
+  }).then(function(d) {
+    log('签到结果: ' + JSON.stringify(d));
+    if (d.results) {
+      var claimed = 0, already = 0, failed = 0;
+      d.results.forEach(function(r) {
+        if (r.status === 'claimed') claimed++;
+        else if (r.status === 'already_claimed') already++;
+        else failed++;
+      });
+      var parts = [];
+      if (claimed) parts.push(claimed + ' 新签到');
+      if (already) parts.push(already + ' 已签到');
+      if (failed) parts.push(failed + ' 失败');
+      var type = claimed > 0 ? 'success' : (failed > 0 && already === 0 ? 'error' : 'info');
+      toast('签到完成: ' + parts.join(', '), type);
+    }
+  });
+}
+
+function checkinOne(id) {
+  log('签到账号: ' + id);
+  api('/qoder/checkin', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ account_id: id })
+  }).then(function(d) {
+    log('签到结果: ' + JSON.stringify(d));
+    if (d.results && d.results[0]) {
+      var r = d.results[0];
+      var msgMap = {
+        'claimed': '签到成功',
+        'already_claimed': '今日已签到',
+        'no_campaign': '暂无签到活动',
+        'no_token': '缺少登录凭证',
+        'error': '签到失败'
+      };
+      var typeMap = {
+        'claimed': 'success',
+        'already_claimed': 'info',
+        'no_campaign': 'info',
+        'no_token': 'error',
+        'error': 'error'
+      };
+      var msg = msgMap[r.status] || r.message || '未知状态';
+      if (r.status === 'claimed' && r.amount) msg += ' (+' + r.amount + '积分)';
+      if (r.status === 'already_claimed' && r.streak_days) msg += ' (连续' + r.streak_days + '天)';
+      toast(msg, typeMap[r.status] || 'info');
+    }
+  });
+}
+
+function quota(id) {
+  log('查询额度: ' + id);
+  api('/qoder/quota/single?account_id=' + encodeURIComponent(id)).then(function(d) {
+    log('额度: ' + JSON.stringify(d, null, 2));
+    var parts = [];
+    if (d.plan) parts.push(d.plan);
+    if (d.addon_quota && d.addon_quota.total > 0) {
+      parts.push('附加额度 ' + d.addon_quota.remaining + '/' + d.addon_quota.total);
+    }
+    if (d.user_quota && d.user_quota.total > 0) {
+      parts.push('用户额度 ' + d.user_quota.remaining + '/' + d.user_quota.total);
+    }
+    toast(parts.length ? parts.join(' · ') : '额度查询完成', 'info');
+  }).catch(function() { toast('额度查询失败', 'error'); });
+}
+
+/* Event bindings */
+document.getElementById('btnLogin').addEventListener('click', startLogin);
+document.getElementById('btnRefresh').addEventListener('click', loadAccounts);
+document.getElementById('btnCheckinAll').addEventListener('click', checkinAll);
+document.getElementById('btnCloseLogin').addEventListener('click', closeLoginPanel);
+document.getElementById('btnClearLog').addEventListener('click', clearLog);
+
+/* Delegate clicks for dynamically created checkin/quota buttons */
+document.getElementById('accountsList').addEventListener('click', function(e) {
+  var btn = e.target.closest('button');
+  if (!btn) return;
+  if (btn.dataset.checkin) checkinOne(btn.dataset.checkin);
+  if (btn.dataset.quota) quota(btn.dataset.quota);
+});
+
+/* Initial load */
+loadAccounts();
+</script>
+</body>
+</html>

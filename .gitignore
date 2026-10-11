@@ -31,9 +31,18 @@ docker-compose.override.yml
 # ── Trae 扩展：运行态与凭证（绝不入库）──
 vault/
 trae_secrets.json
-wb28087.*.log
-wb28086.*.log
-ag-proxy*.log
-ag-proxy.pid
+*.log
 *.pid
-_trae-api/ (上游参考项目副本，独立仓库)
+_ctx*.txt
+_trae-api/
+qoder_data/
+
+# ── Antigravity 扩展：依赖与敏感配置（绝不入库）──
+antigravity-proxy/node_modules/
+antigravity-proxy/dist/
+antigravity-proxy/config.json
+antigravity-proxy/data/*.json
+antigravity-proxy/data/*.bak*
+!antigravity-proxy/data/accounts.example.json
+antigravity-proxy/*.log
+antigravity-proxy/*.pid
