@@ -1,0 +1,14 @@
+{
+  "port": 43811,
+  "host": "0.0.0.0",
+  "apiMasterKey": "sk-antigravity",
+  "adminPassword": "admin",
+  "upstreamUrl": "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+  "defaultMaxConcurrency": 5,
+  "cooldownSeconds": 60,
+  "tokenRefreshIntervalMs": 180000,
+  "routingStrategy": "zero-waste",
+  "oauthClientId": "",
+  "oauthClientSecret": "",
+  "defaultProxyUrl": "http://127.0.0.1:20081"
+}

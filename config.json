@@ -44,9 +44,9 @@
         "total": 0.0,
         "general": 0.0,
         "work": 0.0,
-        "total_limit": 4250.0
+        "total_limit": 4100.0
       },
-      "credits_at": 1791732250.280328,
+      "credits_at": 1791807029.1020513,
       "last_checkin": "2026-10-09 23:59:42"
     },
     "": {
@@ -56,7 +56,7 @@
         "work": 0.0,
         "total_limit": 950.0
       },
-      "credits_at": 1791732250.280328,
+      "credits_at": 1791807029.1020513,
       "last_checkin": "2026-10-09 23:59:43"
     },
     "trae_506823": {
@@ -66,7 +66,7 @@
         "work": 0.0,
         "total_limit": 5100.0
       },
-      "credits_at": 1791732250.280328,
+      "credits_at": 1791807029.1020513,
       "last_checkin": "2026-10-09 23:59:42"
     }
   }
