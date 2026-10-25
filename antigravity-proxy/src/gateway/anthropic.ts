@@ -5,6 +5,7 @@ import { AppConfig, GoogleCloudCodePayload, GoogleContent } from '../types.js';
 import { AccountPool } from '../pool/account-pool.js';
 import { ContextOverflowError, RequestExecutor, UpstreamRequestError } from '../pool/breaker.js';
 import { resolveDynamicUpstreamModel, ThinkingEffort } from './models.js';
+import { startSseHeartbeat } from './streaming.js';
 import { sanitizeGoogleSchema } from './schema.js';
 
 interface AnthropicMessageParam {
@@ -56,8 +57,8 @@ function sanitizeToolName(name: string): string {
   return (name || '').replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 128) || 'tool';
 }
 
-// 缓存 Gemini 思考签名：共享实现见 gateway/thought-signature.ts
-import { rememberThoughtSignature, resolveThoughtSignatureForReplay } from './thought-signature.js';
+// 缓存 + id 内嵌 Gemini 思考签名：共享实现见 gateway/thought-signature.ts
+import { rememberThoughtSignature, resolveThoughtSignatureForReplay, signedId, unsignedId } from './thought-signature.js';
 
 function parseGoogleStreamChunk(jsonStr: string): GoogleParsedChunk {
   try {
@@ -77,9 +78,12 @@ function parseGoogleStreamChunk(jsonStr: string): GoogleParsedChunk {
         }
         if (part.functionCall) {
           const sig = part.thoughtSignature || part.thought_signature;
-          rememberThoughtSignature(part.functionCall.id, sig);
+          const rawId = part.functionCall.id;
+          rememberThoughtSignature(rawId, sig);
           functionCalls.push({
-            id: part.functionCall.id,
+            // 签名编码进 id 返回给客户端：客户端原样回传即带回签名，
+            // 不依赖服务端缓存（重启 / 多实例 / 客户端改写 id 时仍可靠）
+            id: signedId(rawId, sig),
             name: part.functionCall.name,
             args: part.functionCall.args || {}
           });
@@ -104,12 +108,16 @@ function convertAnthropicMessages(
   const contents: GoogleContent[] = [];
   const systemFromMessages: string[] = [];
   const toolCallIdToName = new Map<string, string>();
+  // 每个函数名下尚未被回应的 call id 队列：tool_result 只给 name 不带 id 时按序配对
+  const openByName = new Map<string, string[]>();
 
-  // 1. 搜集所有 tool_use 的 id -> name 映射
+  // 1. 搜集所有 tool_use 的 id -> name 映射（拆除 id 内嵌的 thoughtSignature）
   for (const msg of messages) {
     if (Array.isArray(msg.content)) {
       for (const part of msg.content) {
         if (part && part.type === 'tool_use' && part.id && part.name) {
+          const [ownId] = unsignedId(part.id);
+          toolCallIdToName.set(ownId, part.name);
           toolCallIdToName.set(part.id, part.name);
         }
       }
@@ -145,9 +153,14 @@ function convertAnthropicMessages(
             parts.push({ text: part.text });
           }
         } else if (part.type === 'tool_use') {
+          // 客户端回传的 tool_use.id 可能内嵌了上轮 thoughtSignature，拆出真实 id
+          const [ownId] = unsignedId(part.id);
+          const callId = ownId || part.id;
+          const queue = openByName.get(part.name);
+          if (queue) queue.push(callId); else openByName.set(part.name, [callId]);
           const functionCallPart: any = {
             functionCall: {
-              id: part.id,
+              id: callId,
               name: sanitizeToolName(part.name),
               args: part.input || {}
             }
@@ -164,10 +177,21 @@ function convertAnthropicMessages(
               ? part.content.map((c: any) => (typeof c === 'string' ? c : c.text || JSON.stringify(c))).join('\n')
               : JSON.stringify(part.content ?? '');
 
-          const toolName = toolCallIdToName.get(part.tool_use_id) || 'tool';
+          let [ownToolUseId] = unsignedId(part.tool_use_id);
+          const toolName = toolCallIdToName.get(ownToolUseId) || toolCallIdToName.get(part.tool_use_id) || 'tool';
+          // tool_result 没带 id 时，回退到该函数名下最早的未回应 call
+          if (!ownToolUseId) {
+            const queue = openByName.get(toolName);
+            if (queue && queue.length) ownToolUseId = queue[0];
+          }
+          const queue = openByName.get(toolName);
+          if (queue) {
+            const idx = queue.indexOf(ownToolUseId);
+            if (idx >= 0) queue.splice(idx, 1);
+          }
           parts.push({
             functionResponse: {
-              id: part.tool_use_id,
+              id: ownToolUseId || part.tool_use_id,
               name: sanitizeToolName(toolName),
               response: {
                 output: contentStr
@@ -419,7 +443,9 @@ export function registerAnthropicRoutes(
 
     const { bodyStream, accountUsed } = upstreamRes;
 
+    let stopAnthHeartbeat: () => void = () => {};
     if (isStream) {
+      stopAnthHeartbeat = startSseHeartbeat(reply);
       // Anthropic SSE 流式协议
       reply.raw.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
       reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -587,6 +613,7 @@ export function registerAnthropicRoutes(
         console.error('[AnthropicGateway] Stream error:', err.message);
       } finally {
         cleanup();
+        stopAnthHeartbeat();
       }
     } else {
       // 非流式 Anthropic JSON

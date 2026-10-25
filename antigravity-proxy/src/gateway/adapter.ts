@@ -7,8 +7,29 @@ import {
 import { resolveDynamicUpstreamModel, ThinkingEffort } from './models.js';
 // 工具参数 schema 清洗：与 anthropic 入口共用同一实现（anyOf/oneOf/allOf 在 CloudCode 侧非法）
 import { sanitizeGoogleSchema } from './schema.js';
-// 缓存 Gemini 思考签名：共享实现见 gateway/thought-signature.ts
-import { rememberThoughtSignature, resolveThoughtSignatureForReplay } from './thought-signature.js';
+// 缓存 + id 内嵌 Gemini 思考签名：共享实现见 gateway/thought-signature.ts
+import {
+  rememberThoughtSignature,
+  resolveThoughtSignatureForReplay,
+  signedId,
+  unsignedId
+} from './thought-signature.js';
+
+/** 解析 data URL（data:image/png;base64,xxxx）中的 mime 与 base64 数据。 */
+function parseDataUrl(url: string): { mimeType: string; data: string } | null {
+  const m = /^data:([^;,]*)(;base64)?,(.*)$/s.exec(url || '');
+  if (!m || !m[2] || !m[3]) return null;
+  return { mimeType: m[1] || 'image/png', data: m[3] };
+}
+
+/** 从图片 URL 猜测 mime 类型（远程图无法预读时使用）。 */
+function guessImageMime(url: string): string {
+  const low = (url || '').toLowerCase();
+  if (low.includes('.jpg') || low.includes('.jpeg')) return 'image/jpeg';
+  if (low.includes('.webp')) return 'image/webp';
+  if (low.includes('.gif')) return 'image/gif';
+  return 'image/png';
+}
 
 /**
  * 将 OpenAI 格式的 chat completions 请求转换为 Google CloudCode / Gemini 内部 payload
@@ -45,6 +66,8 @@ export function convertOpenAIToCloudCode(req: OpenAIChatCompletionRequest): {
   const contents: GoogleContent[] = [];
   let systemInstruction: { parts: { text: string }[] } | undefined = undefined;
   const toolCallIds = new Map<string, string>();
+  // 每个函数名下尚未被回应的 call id 队列：tool 结果只给 name 不带 id 时按序遍历配对
+  const openByName = new Map<string, string[]>();
 
   const normalizeToolName = (name: string) =>
     (name || 'tool').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128) || 'tool';
@@ -55,10 +78,16 @@ export function convertOpenAIToCloudCode(req: OpenAIChatCompletionRequest): {
     } else if (part?.type === 'text' && typeof part.text === 'string') {
       if (part.text) parts.push({ text: part.text });
     } else if (part?.type === 'image_url') {
-      // Google CloudCode models used by this adapter do not accept OpenAI image
-      // blocks reliably; preserve a clear textual marker instead of silently
-      // dropping the user's input.
-      parts.push({ text: `[image input: ${part.image_url?.url || 'unavailable'}]` });
+      // 图片走 Gemini 原生多模态字段：base64 data URL -> inlineData；
+      // 远程 URL -> fileData（跟随 Google 上游对 fileUri 的支持）。
+      // 早期实现把图片降级为文本标记，等于丢弃了图像输入。
+      const url = part.image_url?.url || '';
+      const data = parseDataUrl(url);
+      if (data) {
+        parts.push({ inlineData: { mimeType: data.mimeType, data: data.data } });
+      } else if (url) {
+        parts.push({ fileData: { mimeType: guessImageMime(url), fileUri: url } });
+      }
     }
   };
 
@@ -77,25 +106,40 @@ export function convertOpenAIToCloudCode(req: OpenAIChatCompletionRequest): {
       if (typeof msg.content === 'string') appendContentPart(parts, msg.content);
       else if (Array.isArray(msg.content)) msg.content.forEach(part => appendContentPart(parts, part));
       for (const call of msg.tool_calls || []) {
+        // 客户端回传的 id 可能内嵌了上轮的 thoughtSignature，先拆出真实 id
+        const [ownId] = unsignedId(call.id);
         const name = normalizeToolName(call.function?.name);
-        const id = call.id || `call_${contents.length}_${parts.length}`;
+        const id = ownId || `call_${contents.length}_${parts.length}`;
         toolCallIds.set(id, name);
+        const queue = openByName.get(name);
+        if (queue) queue.push(id); else openByName.set(name, [id]);
         let args: any = {};
         try { args = JSON.parse(call.function?.arguments || '{}'); } catch { args = { raw_arguments: call.function?.arguments || '' }; }
         // Gemini 3.x 多轮 functionCall 必须带 thought_signature（真实签名或
         // skip_thought_signature_validator 哨兵），否则上游 HTTP 400
-        parts.push({ functionCall: { id, name, args }, thoughtSignature: resolveThoughtSignatureForReplay(id) });
+        parts.push({ functionCall: { id, name, args }, thoughtSignature: resolveThoughtSignatureForReplay(call.id) });
       }
       contents.push({
         role: 'model',
         parts: parts.length ? parts : [{ text: '' }]
       });
     } else if (msg.role === 'tool') {
-      const name = msg.name || toolCallIds.get(msg.tool_call_id || '') || 'tool';
+      let [ownToolId] = unsignedId(msg.tool_call_id);
+      const name = msg.name || (ownToolId ? toolCallIds.get(ownToolId) : undefined) || 'tool';
+      // tool 结果没带 id 时，回退到该函数名下最早的未回应 call
+      if (!ownToolId) {
+        const queue = openByName.get(name);
+        if (queue && queue.length) ownToolId = queue[0];
+      }
+      const queue = openByName.get(name);
+      if (queue) {
+        const idx = queue.indexOf(ownToolId);
+        if (idx >= 0) queue.splice(idx, 1);
+      }
       const output = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content ?? '');
       contents.push({
         role: 'user',
-        parts: [{ functionResponse: { id: msg.tool_call_id, name: normalizeToolName(name), response: { output } } }]
+        parts: [{ functionResponse: { id: ownToolId || msg.tool_call_id, name: normalizeToolName(name), response: { output } } }]
       });
     } else {
       const parts: any[] = [];
@@ -243,9 +287,12 @@ export function extractTextFromGoogleChunk(rawJson: string): {
         }
         if (part.functionCall) {
           const sig = part.thoughtSignature || part.thought_signature;
-          rememberThoughtSignature(part.functionCall.id, sig);
+          const rawId = part.functionCall.id;
+          rememberThoughtSignature(rawId, sig);
           functionCalls.push({
-            id: part.functionCall.id,
+            // 签名编码进 id 返回给客户端：客户端原样回传即带回签名，
+            // 不依赖服务端缓存（重启 / 多实例 / 客户端改写 id 时仍可靠）
+            id: signedId(rawId, sig),
             name: part.functionCall.name,
             args: part.functionCall.args || {}
           });

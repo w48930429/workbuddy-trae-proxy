@@ -6,7 +6,29 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .models import resolve_dynamic_upstream_model, ThinkingEffort
 from .schema import sanitize_google_schema
-from .thought_signature import remember_thought_signature, resolve_thought_signature_for_replay
+from .thought_signature import (
+    remember_thought_signature,
+    resolve_thought_signature_for_replay,
+    signed_id,
+    unsigned_id,
+)
+
+def _parse_data_url(url: str) -> Optional[Tuple[str, str]]:
+    """解析 data URL（data:image/png;base64,xxxx）-> (mimeType, base64 数据)。"""
+    m = re.match(r"^data:([^;,]*)(;base64)?,(.*)$", url or "", re.S)
+    if not m or not m.group(2) or not m.group(3):
+        return None
+    return (m.group(1) or "image/png", m.group(3))
+
+def _guess_image_mime(url: str) -> str:
+    low = (url or "").lower()
+    if ".jpg" in low or ".jpeg" in low:
+        return "image/jpeg"
+    if ".webp" in low:
+        return "image/webp"
+    if ".gif" in low:
+        return "image/gif"
+    return "image/png"
 
 def normalize_tool_name(name: Optional[str]) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9_-]", "_", name or "tool")[:128]
@@ -48,6 +70,8 @@ def convert_openai_to_cloudcode(req: Dict[str, Any]) -> Tuple[Dict[str, Any], st
     contents: List[Dict[str, Any]] = []
     system_instruction: Optional[Dict[str, Any]] = None
     tool_call_ids: Dict[str, str] = {}
+    # 每个函数名下尚未被回应的 call id 队列：tool 结果只给 name 不带 id 时按序配对
+    open_by_name: Dict[str, List[str]] = {}
 
     def append_content_part(parts: List[Dict[str, Any]], part: Any):
         if isinstance(part, str):
@@ -59,8 +83,14 @@ def convert_openai_to_cloudcode(req: Dict[str, Any]) -> Tuple[Dict[str, Any], st
                 if part["text"]:
                     parts.append({"text": part["text"]})
             elif p_type == "image_url":
-                img_url = (part.get("image_url") or {}).get("url") or "unavailable"
-                parts.append({"text": f"[image input: {img_url}]"})
+                # 图片走 Gemini 原生多模态字段：base64 data URL -> inlineData；
+                # 远程 URL -> fileData。早期实现把图片降级为文本标记，等于丢弃图像输入。
+                url = (part.get("image_url") or {}).get("url") or ""
+                data = _parse_data_url(url)
+                if data:
+                    parts.append({"inlineData": {"mimeType": data[0], "data": data[1]}})
+                elif url:
+                    parts.append({"fileData": {"mimeType": _guess_image_mime(url), "fileUri": url}})
 
     for msg in req.get("messages", []):
         role = msg.get("role")
@@ -89,8 +119,12 @@ def convert_openai_to_cloudcode(req: Dict[str, Any]) -> Tuple[Dict[str, Any], st
             for call in tool_calls:
                 func = call.get("function") or {}
                 name = normalize_tool_name(func.get("name"))
-                call_id = call.get("id") or f"call_{len(contents)}_{len(parts)}"
+                raw_call_id = call.get("id")
+                # 客户端回传的 id 可能内嵌了上轮 thoughtSignature，先拆出真实 id
+                own_id, _ = unsigned_id(raw_call_id)
+                call_id = own_id or f"call_{len(contents)}_{len(parts)}"
                 tool_call_ids[call_id] = name
+                open_by_name.setdefault(name, []).append(call_id)
                 raw_args = func.get("arguments", "{}")
                 try:
                     args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
@@ -98,7 +132,7 @@ def convert_openai_to_cloudcode(req: Dict[str, Any]) -> Tuple[Dict[str, Any], st
                     args = {"raw_arguments": raw_args}
                 parts.append({
                     "functionCall": {"id": call_id, "name": name, "args": args},
-                    "thoughtSignature": resolve_thought_signature_for_replay(call_id),
+                    "thoughtSignature": resolve_thought_signature_for_replay(raw_call_id),
                 })
             contents.append({
                 "role": "model",
@@ -106,14 +140,22 @@ def convert_openai_to_cloudcode(req: Dict[str, Any]) -> Tuple[Dict[str, Any], st
             })
 
         elif role == "tool":
-            call_id = msg.get("tool_call_id") or ""
-            name = msg.get("name") or tool_call_ids.get(call_id) or "tool"
+            own_tool_id, _ = unsigned_id(msg.get("tool_call_id"))
+            name = msg.get("name") or tool_call_ids.get(own_tool_id) or "tool"
+            # tool 结果没带 id 时，回退到该函数名下最早的未回应 call
+            if not own_tool_id:
+                queue = open_by_name.get(name)
+                if queue:
+                    own_tool_id = queue[0]
+            queue = open_by_name.get(name)
+            if queue and own_tool_id in queue:
+                queue.remove(own_tool_id)
             output = content if isinstance(content, str) else json.dumps(content or "")
             contents.append({
                 "role": "user",
                 "parts": [{
                     "functionResponse": {
-                        "id": call_id,
+                        "id": own_tool_id or msg.get("tool_call_id") or "",
                         "name": normalize_tool_name(name),
                         "response": {"output": output},
                     }
@@ -247,9 +289,12 @@ def extract_text_from_google_chunk(raw_json: str) -> Dict[str, Any]:
             if part.get("functionCall"):
                 fc = part["functionCall"]
                 sig = part.get("thoughtSignature") or part.get("thought_signature")
-                remember_thought_signature(fc.get("id"), sig)
+                raw_id = fc.get("id")
+                remember_thought_signature(raw_id, sig)
                 function_calls.append({
-                    "id": fc.get("id"),
+                    # 签名编码进 id 返回给客户端：客户端原样回传即带回签名，
+                    # 不依赖服务端缓存（重启 / 多实例 / 客户端改写 id 时仍可靠）
+                    "id": signed_id(raw_id, sig),
                     "name": fc.get("name"),
                     "args": fc.get("args") or {},
                 })
