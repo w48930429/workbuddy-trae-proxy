@@ -71,6 +71,14 @@ SUPPORTED_MODELS: List[ModelDefinition] = [
         "maxOutputTokens": 65536,
     },
     {
+        "id": "gemini-3.5-flash",
+        "name": "Gemini 3.5 Flash",
+        "pool": "cli",
+        "description": "Google 官方 Gemini 3.5 Flash 极速底座 (实测上游可用)",
+        "contextLength": 650000,
+        "maxOutputTokens": 65536,
+    },
+    {
         "id": "gemini-3.1-pro",
         "name": "Gemini 3.1 Pro",
         "pool": "cli",
@@ -154,6 +162,14 @@ def resolve_dynamic_upstream_model(input_model: str, effort: ThinkingEffort = "h
     if "sonnet" in clean or "haiku" in clean:
         return "claude-sonnet-4-6", "sandbox"
 
+    # 0. Gemini 4 / Argon 前瞻映射 (待 Google 向公众 Code Assist 通道开放)
+    if "4.0" in clean or "gemini-4" in clean or "argon" in clean:
+        if effort == "low" or clean.endswith("-low"):
+            return "gemini-4-flash-low", "cli"
+        if effort == "medium" or clean.endswith("-medium"):
+            return "gemini-4-flash-medium", "cli"
+        return "gemini-4-flash-high", "cli"
+
     # 3. Gemini 3.8
     if "3.8" in clean:
         if effort == "low" or clean.endswith("-low"):
@@ -177,6 +193,12 @@ def resolve_dynamic_upstream_model(input_model: str, effort: ThinkingEffort = "h
         if effort == "medium" or clean.endswith("-medium"):
             return "gemini-3.6-flash-medium", "cli"
         return "gemini-3.6-flash-high", "cli"
+
+    # 5.1 Gemini 3.5
+    if "3.5" in clean:
+        if effort == "low" or clean.endswith("-low"):
+            return "gemini-3.5-flash-low", "cli"
+        return "gemini-3.5-flash", "cli"
 
     # 6. Gemini 3.1 / Pro
     if "3.1" in clean or "pro" in clean:

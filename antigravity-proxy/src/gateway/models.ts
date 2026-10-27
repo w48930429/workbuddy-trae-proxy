@@ -78,6 +78,14 @@ export const SUPPORTED_MODELS: ModelDefinition[] = [
     maxOutputTokens: 65536
   },
   {
+    id: 'gemini-3.5-flash',
+    name: 'Gemini 3.5 Flash',
+    pool: 'cli',
+    description: 'Google 官方 Gemini 3.5 Flash 极速底座 (实测上游可用)',
+    contextLength: 650000,
+    maxOutputTokens: 65536
+  },
+  {
     id: 'gemini-3.1-pro',
     name: 'Gemini 3.1 Pro',
     pool: 'cli',
@@ -178,6 +186,17 @@ export function resolveDynamicUpstreamModel(
     return { upstreamModel: 'claude-sonnet-4-6', pool: 'sandbox' };
   }
 
+  // 0. Gemini 4 / Argon 前瞻映射 (待 Google 向公众 Code Assist 通道开放)
+  if (clean.includes('4.0') || clean.includes('gemini-4') || clean.includes('argon')) {
+    if (effort === 'low' || clean.endsWith('-low')) {
+      return { upstreamModel: 'gemini-4-flash-low', pool: 'cli' };
+    }
+    if (effort === 'medium' || clean.endsWith('-medium')) {
+      return { upstreamModel: 'gemini-4-flash-medium', pool: 'cli' };
+    }
+    return { upstreamModel: 'gemini-4-flash-high', pool: 'cli' };
+  }
+
   // 3. Gemini 3.8: 动态思考强度完全由客户端/框架控制
   if (clean.includes('3.8')) {
     if (effort === 'low' || clean.endsWith('-low')) {
@@ -210,6 +229,14 @@ export function resolveDynamicUpstreamModel(
     }
     return { upstreamModel: 'gemini-3.6-flash-high', pool: 'cli' };
   }
+  // 5.1 Gemini 3.5: 动态思考强度控制 (实测上游支持 gemini-3.5-flash 与 gemini-3.5-flash-low)
+  if (clean.includes('3.5')) {
+    if (effort === 'low' || clean.endsWith('-low')) {
+      return { upstreamModel: 'gemini-3.5-flash-low', pool: 'cli' };
+    }
+    return { upstreamModel: 'gemini-3.5-flash', pool: 'cli' };
+  }
+
 
   // 6. Gemini 3.1 / Pro: 动态思考强度完全由客户端/框架控制
   if (clean.includes('3.1') || clean.includes('pro')) {

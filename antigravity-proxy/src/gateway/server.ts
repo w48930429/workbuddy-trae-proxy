@@ -12,6 +12,7 @@ import { SUPPORTED_MODELS } from './models.js';
 import { convertOpenAIToCloudCode, createOpenAIChunk, extractTextFromGoogleChunk } from './adapter.js';
 import { registerAdminRoutes } from '../admin/routes.js';
 import { registerAnthropicRoutes } from './anthropic.js';
+import { startSseHeartbeat } from './streaming.js';
 import { QuotaManager } from '../pool/quota-manager.js';
 
 export async function createServer(
@@ -280,8 +281,11 @@ export async function createServer(
     }
 
     const { bodyStream, accountUsed } = upstreamRes;
+    let stopChatHeartbeat: () => void = () => {};
 
     if (isStream) {
+      // 上游长思考无输出时，下游反代/客户端会判空闲断连：15s 心跳保活（上游 419f840）。
+      stopChatHeartbeat = startSseHeartbeat(reply);
       // 开启 SSE 模式
       reply.raw.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
       reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -347,6 +351,7 @@ export async function createServer(
         console.error('[Gateway] SSE Streaming error:', e.message);
       } finally {
         cleanup();
+        stopChatHeartbeat();
       }
     } else {
       // 非流式，聚合文本一次性返回
@@ -582,7 +587,9 @@ export async function createServer(
       return parsed.text || '';
     };
 
+    let stopRespHeartbeat: () => void = () => {};
     if (input.stream) {
+      stopRespHeartbeat = startSseHeartbeat(reply);
       reply.raw.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
       reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
       reply.raw.setHeader('Connection', 'keep-alive');
@@ -635,6 +642,8 @@ export async function createServer(
       } catch (err: any) {
         pool.releaseAccount(accountUsed.id, { code: 500, message: err.message });
         reply.raw.end();
+      } finally {
+        stopRespHeartbeat();
       }
       return;
     }

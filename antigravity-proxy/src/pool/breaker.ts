@@ -3,6 +3,7 @@ import { Account, AppConfig, GoogleCloudCodePayload } from '../types.js';
 import { AccountPool } from './account-pool.js';
 import { TokenRefresher } from './refresher.js';
 
+import { classifyUpstreamError } from './error-policy.js';
 import { QuotaManager } from './quota-manager.js';
 
 export interface UpstreamExecutionResult {
@@ -355,11 +356,19 @@ export class RequestExecutor {
           }
           continue;
         }
-
         // 处理 403 封禁或无权限
         if (res.statusCode === 403) {
           const errBody = await res.body.text();
-          console.error(`[Executor] Account ${account.email} hit 403 Forbidden:`, errBody);
+          // 上游错误分类（ag e8f9d23）：终局性封禁直接隔离、地域错误单独标记，
+          // 避免后台反复探测 Google 已判死的账号。
+          const classified = classifyUpstreamError(res.statusCode, errBody);
+          if (classified.kind === 'policy_blocked') {
+            console.error(`[Executor] Account ${account.email} hit 403 TERMINAL (${classified.reason}):`, errBody.substring(0, 120));
+          } else if (classified.kind === 'location') {
+            console.error(`[Executor] Account ${account.email} hit 403 LOCATION:`, errBody.substring(0, 120));
+          } else {
+            console.error(`[Executor] Account ${account.email} hit 403 Forbidden:`, errBody);
+          }
           this.pool.releaseAccount(account.id, { code: 403, message: errBody });
           continue;
         }
