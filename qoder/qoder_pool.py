@@ -12,6 +12,8 @@
   - CooldownQuota (30min): 额度/权限类失败 (401/403)
   - CooldownRate (60s): 上游频控 (429)
   - CooldownTransient (15s): 瞬时上游故障 (418/5xx/传输抖动)
+  - Queue (10605/isQueued): 排队限流，由 call_qoder 原地等待重试，
+    不冷却、不换号，等待上限见 qoder_route.QUEUE_* 常量
 """
 
 from __future__ import annotations
@@ -33,10 +35,27 @@ import qoder_cosy as cosy
 COOLDOWN_QUOTA = 30 * 60        # 30 分钟：额度/权限类失败
 COOLDOWN_RATE = 60              # 60 秒：频控
 COOLDOWN_TRANSIENT = 15         # 15 秒：瞬时故障
+COOLDOWN_BANNED = 24 * 3600     # 24 小时：账号封禁/风控停用（比普通 403 更久）
 TRANSIENT_MAX_RETRIES = 2       # 同账号瞬时故障额外重试次数
 
 
 # ── 错误分类 ──────────────────────────────────────────────────────────────
+
+# Qoder 的封禁/风控停用文案（论坛与客户端实测口径）：
+#   "You have too many free trial accounts, so usage for this account is
+#    temporarily restricted. Please use your first account to continue."
+# 与 10605 队列、114/115/119 配额不同，这类限制不会在几分钟内自愈。
+BAN_MARKERS = [
+    "too many free trial accounts",
+    "temporarily restricted",
+    "account has been restricted",
+    "account is suspended",
+    "account suspended",
+    "temporarily frozen",
+    "账号存在异常行为",
+    "封禁",
+    "违反活动规则",
+]
 
 CONTENT_POLICY_MARKERS = [
     "DataInspectionFailed",
@@ -72,16 +91,25 @@ ACCOUNT_EXHAUSTED_MARKERS = [
     "quota", "credit", "exceed", "10605", "rate limit", "too many request",
 ]
 
+# 账号级登录过期（code 105）：Qoder2Api 实测「Login expired」/code 105 需要
+# 重建 session，仍失败则按 24 小时停用——过期不会在几分钟内自愈。
+AUTH_EXPIRED_MARKERS = ["code=105", '"code":"105"', '"code": "105"',
+                        "login expired", "session expired"]
 
-class UpstreamError(Exception):
+# Agent 额度用尽（code 115）：消息里带 agentLimitResetTime（毫秒），
+# 到点才恢复；没有时间戳时按 10 分钟保守处理。
+AGENT_LIMIT_MARKERS = ["code=115", '"code":"115"', '"code": "115"',
+                       "agent limit", "лимит агента"]
+AGENT_LIMIT_DEFAULT_COOLDOWN = 10 * 60
+AUTH_EXPIRED_COOLDOWN = 24 * 3600
+
+
+class UpstreamError(client.UpstreamError):
     """上游错误，携带 HTTP 状态 + 详情 + 分类。"""
 
     def __init__(self, status: int, detail: str, err_type: str = "", message: str = ""):
-        self.status = status
-        self.detail = detail
-        self.err_type = err_type or "upstream_error"
         self.message = message or detail
-        super().__init__(self.message)
+        super().__init__(status, detail, err_type=err_type or "upstream_error")
 
 
 class NoAccountError(Exception):
@@ -125,13 +153,87 @@ def is_account_exhausted_detail(detail: str) -> bool:
     return _contains_any(d, ACCOUNT_EXHAUSTED_MARKERS)
 
 
+def is_queued_detail(detail: str) -> bool:
+    """上游排队限流：code 10605 / isQueued。
+
+    这是「等一下就好」的拒绝，与额度耗尽（402/10605 之外）不同，
+    由 call_qoder 原地等待 retryAfterSeconds 后重试。
+    """
+    d = detail.lower()
+    return "isqueued" in d or "10605" in d
+
+
+def is_queued_error(err: Exception) -> bool:
+    if isinstance(err, (UpstreamError, client.UpstreamError)):
+        return is_queued_detail(err.detail)
+    return is_queued_detail(str(err))
+
+
+def is_account_banned(err: Exception) -> bool:
+    """账号级封禁/风控停用（不是 10605 队列，也不是 114/115/119 配额）。
+
+    这类限制按天计，普通 403 的 30 分钟冷却不够：到点重试只会再撞一次。
+    """
+    if isinstance(err, (UpstreamError, client.UpstreamError)):
+        d = (err.detail or "").lower()
+        return _contains_any(d, BAN_MARKERS)
+    return _contains_any(str(err).lower(), BAN_MARKERS)
+
+
+def is_auth_expired_error(err: Exception) -> bool:
+    """登录/session 过期（code 105）：先换凭证重建 session，仍失败按天停用。"""
+    if isinstance(err, (UpstreamError, client.UpstreamError)):
+        d = (err.detail or "").lower()
+        return _contains_any(d, AUTH_EXPIRED_MARKERS)
+    return _contains_any(str(err).lower(), AUTH_EXPIRED_MARKERS)
+
+
+def is_agent_limit_error(err: Exception) -> bool:
+    """Agent 额度用尽（code 115）：冷却到 agentLimitResetTime，或默认 10 分钟。"""
+    if isinstance(err, (UpstreamError, client.UpstreamError)):
+        d = (err.detail or "").lower()
+        return _contains_any(d, AGENT_LIMIT_MARKERS)
+    return _contains_any(str(err).lower(), AGENT_LIMIT_MARKERS)
+
+
+def agent_limit_reset_at(err: Exception) -> Optional[float]:
+    """从 code 115 的详情里取 agentLimitResetTime（毫秒 → epoch 秒）。"""
+    detail = getattr(err, "detail", "") or str(err)
+    idx = detail.find("agentLimitResetTime")
+    if idx < 0:
+        return None
+    rest = detail[idx + len("agentLimitResetTime"):]
+    digits = ""
+    started = False
+    for ch in rest:
+        if ch.isdigit():
+            digits += ch
+            started = True
+        elif started:
+            break
+    if not digits:
+        return None
+    ms = int(digits)
+    return (ms / 1000.0) if ms > 0 else None
+
+
+def retry_after_seconds(err: Exception) -> Optional[int]:
+    """错误详情里上游要求的等待秒数；无则 None。"""
+    if isinstance(err, (UpstreamError, client.UpstreamError)):
+        return _retry_after_from_detail(err.detail)
+    return None
+
+
 def should_failover(err: Exception) -> bool:
     """判断某次上游失败是否值得换号。"""
     if err is None:
         return False
-    if isinstance(err, UpstreamError):
+    if isinstance(err, (UpstreamError, client.UpstreamError)):
         if err.err_type == "content_policy_rejected":
             return False
+        # 登录过期（105）与 agent 额度用尽（115）都是账号级状态：换号有意义。
+        if is_auth_expired_error(err) or is_agent_limit_error(err):
+            return True
         if err.status in (401, 403, 429):
             return True
         if err.status == 418 or err.status >= 500:
@@ -144,7 +246,18 @@ def should_failover(err: Exception) -> bool:
 
 def cooldown_for(err: Exception) -> int:
     """给出错误对应的冷却时长（秒）。"""
-    if isinstance(err, UpstreamError):
+    if isinstance(err, (UpstreamError, client.UpstreamError)):
+        # 封禁/停用按天计，优先于 retryAfterSeconds 与普通 403 的 30 分钟。
+        if is_account_banned(err):
+            return COOLDOWN_BANNED
+        if is_auth_expired_error(err):
+            return AUTH_EXPIRED_COOLDOWN
+        if is_agent_limit_error(err):
+            reset_at = agent_limit_reset_at(err)
+            if reset_at:
+                return max(60, min(int(reset_at - time.time()),
+                                   COOLDOWN_BANNED))
+            return AGENT_LIMIT_DEFAULT_COOLDOWN
         d = _retry_after_from_detail(err.detail)
         if d is not None:
             return d
@@ -204,7 +317,7 @@ def error_status(err: Exception) -> int:
     """取错误对应的 HTTP 状态码。"""
     if isinstance(err, NoAccountError):
         return 503
-    if isinstance(err, UpstreamError):
+    if isinstance(err, (UpstreamError, client.UpstreamError)):
         if err.err_type == "content_policy_rejected":
             return 400
         if err.err_type == "upstream_transient_error":
@@ -313,8 +426,9 @@ def build_slot_from_secret(acct: accounts.Account, proxy: str = "") -> Slot:
 
 
 def is_token_expired(err: Exception) -> bool:
-    """判断错误是否为 token 失效（401 Unauthorized）——可尝试凭证轮换。"""
-    return isinstance(err, UpstreamError) and err.status == 401
+    """判断错误是否为 token/session 失效（401 或 code 105）——可尝试凭证轮换。"""
+    return (isinstance(err, (UpstreamError, client.UpstreamError))
+            and (err.status == 401 or is_auth_expired_error(err)))
 
 
 def rotate_slot_credential(slot: Slot, proxy: str = "") -> bool:

@@ -6,6 +6,7 @@
 3. 猫猫旅行与日常结算 (Cat Travel & Welfare)：自动派出猫猫旅行或领取归来奖励。
 4. 状态持久化与看板展示：暴露状态、执行记录、支持手动立即触发与开关切换。
 """
+import random
 import threading
 import time
 import wb_tasks
@@ -131,8 +132,19 @@ class Scheduler:
         travel_count = 0
         daily_chat_count = 0
 
-        for acc in list(self.pool.accounts):
+        for idx, acc in enumerate(list(self.pool.accounts)):
             uid8 = acc.uid[:8] if acc.uid else "?"
+            # 账号间随机错峰（2~5 秒）：整点巡检给多个账号同时发请求，是出口 IP
+            # 频率风控的明显特征。上游 #394 的处置口径。
+            if idx > 0:
+                time.sleep(random.uniform(2.0, 5.0))
+            # 上游账号级风控限制（403 / code 11140）中的账号一律跳过：无人值守的
+            # 巡检/打卡再去「试探」一次，只会让同一台设备上的其他账号连坐。
+            # 限制期限持久化在 restrictedUntil，重启后仍然有效。
+            if getattr(acc, "restricted_until", 0.0) > time.time():
+                self.log("跳过受限账号 [%s]：上游风控限制剩余 %ds"
+                         % (uid8, int(acc.restricted_until - time.time())))
+                continue
             # 1. 检查 Token 剩余寿命 (小于 2 小时自动刷新保活)
             exp = acc.expires_at or 0
             if exp and (exp - time.time()) < 7200:

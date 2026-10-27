@@ -20,12 +20,21 @@ from typing import Optional
 import qoder_accounts as accounts
 import qoder_client as client
 import qoder_cosy as cosy
+import qoder_logger as qlog
 import qoder_pool as pool
+
+log = qlog.info
 
 BASEPROMPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qoder_baseprompt.json")
 
 USAGE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qoder_data", "usage.jsonl")
 _seq_counter = 0
+
+# 上游排队限流（code 10605 / isQueued）：同账号原地等待重试。免费档账号被
+# 排进 p3 队列时，换号只是把同样的排队换个账号再挨一次，只有等待有意义。
+QUEUE_MAX_WAITS = 2           # 单个请求内最多原地等待次数
+QUEUE_DEFAULT_WAIT_SECONDS = 30  # 详情里没有 retryAfterSeconds 时的兜底等待
+QUEUE_MAX_WAIT_SECONDS = 60    # 单次等待上限（详情可能给到 300）
 
 
 def record_qoder_usage(model: str, account_id: str, stream: bool, outcome: str,
@@ -194,8 +203,6 @@ def reload_pool(proxy: str = "") -> pool.Pool:
 # ── 模型映射 ──────────────────────────────────────────────────────────────
 
 def map_model(model: str, agent: str = "", user_mappings: dict = None) -> str:
-    if model.startswith("qoder-"):
-        model = model[len("qoder-"):]
     if not model:
         return model
 
@@ -779,6 +786,7 @@ def call_qoder(payload: dict, on_delta=None, proxy: str = "") -> tuple[int, str]
     last_err = None
     collected_content = []
     collected_usage = {}
+    waited = 0
 
     while True:
         slot, ok = pick_slot_for_model(p, mapped, tried)
@@ -791,7 +799,7 @@ def call_qoder(payload: dict, on_delta=None, proxy: str = "") -> tuple[int, str]
         emitted_any = False
         err = None
 
-        for _attempt in range(2):
+        while True:
             nid = cosy.new_uuid()
             body["request_id"] = nid
             body["chat_record_id"] = nid
@@ -823,6 +831,17 @@ def call_qoder(payload: dict, on_delta=None, proxy: str = "") -> tuple[int, str]
             emitted_any, err = stream_with_slot(slot, qurl, body, extra, on_delta_raw)
             if err is None:
                 break
+            # 排队限流（10605 / isQueued）：等上游指定的 retryAfterSeconds 后
+            # 原地重试同一账号，不冷却也不换号 —— 免费档被排进 p3 队列时
+            # 这是唯一能拿到响应的路径。已开始出内容就不再等，直接走失败路径。
+            if (not emitted_any and pool.is_queued_error(err)
+                    and waited < QUEUE_MAX_WAITS):
+                delay = pool.retry_after_seconds(err) or QUEUE_DEFAULT_WAIT_SECONDS
+                waited += 1
+                log("qoder: %s queued on '%s', retry in %ds (%d/%d)"
+                    % (model, slot.id, delay, waited, QUEUE_MAX_WAITS))
+                time.sleep(min(delay, QUEUE_MAX_WAIT_SECONDS))
+                continue
             # token 失效 → 尝试凭证轮换（dt- ↔ drt-）后重试同一账号，每账号一次
             if (not emitted_any and pool.is_token_expired(err)
                     and slot.id not in refreshed):
@@ -869,8 +888,10 @@ def call_qoder(payload: dict, on_delta=None, proxy: str = "") -> tuple[int, str]
 def _friendly_error(err: Exception) -> tuple[str, str]:
     if isinstance(err, pool.NoAccountError):
         return NO_ACCOUNT_MESSAGE, "no_available_account"
-    if isinstance(err, pool.UpstreamError):
-        return err.message, err.err_type
+    if isinstance(err, (pool.UpstreamError, client.UpstreamError)):
+        msg = getattr(err, "message", None) or str(err)
+        etype = getattr(err, "err_type", "") or "upstream_error"
+        return msg, etype
     return str(err), "qoder_error"
 
 
@@ -888,16 +909,11 @@ def qoder_models(proxy: str = "") -> list[dict]:
             resp = slot.bearer.call_get(ep.model_list_url)
             raw = client.parse_qoder_models(resp)
             for m in raw:
-                # The advertised id must be the name a client can actually
-                # call. _is_qoder_model() routes on the "qoder-" prefix, so
-                # advertising the bare internal key (gmodel, qmodel_38max, ...)
-                # produced a list where every entry 400s upstream with
-                # "service info not found". Advertise the routable name and
-                # keep the internal key alongside for the dispatcher.
-                disp = m.get("display_name") or m.get("key", "")
-                mid = disp if disp.startswith("qoder-") else "qoder-" + disp
+                # Advertise the name a client can actually call. The internal
+                # key (gmodel, qmodel_38max, ...) is not a valid wire model, so
+                # the display name is used and the key is kept alongside.
                 models.append({
-                    "id": mid,
+                    "id": m.get("display_name") or m.get("key", ""),
                     "object": "model",
                     "created": int(time.time()),
                     "owned_by": "qoder",

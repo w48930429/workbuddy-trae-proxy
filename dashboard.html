@@ -90,6 +90,8 @@ table.data-cards tr.tr-free{background:rgba(34,197,94,.08)!important;border-colo
 .badge.warn{color:#b45309;background:rgba(245,158,11,.14);border-color:rgba(245,158,11,.35)}
 .badge.bad{color:#b91c1c;background:rgba(239,68,68,.14);border-color:rgba(239,68,68,.35)}
 .badge.mini{padding:1px 6px;font-size:10px}
+@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+.spin{display:inline-block;animation:spin 1s linear infinite}
 .cool-list{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
 .cool-pill{display:inline-block;padding:1px 7px;border-radius:999px;font-size:10px;font-weight:600;
   color:#b45309;background:rgba(245,158,11,.14);border:1px solid rgba(245,158,11,.35);white-space:nowrap}
@@ -124,6 +126,10 @@ button.sec{background:#fff;border-color:var(--line);color:var(--fg);box-shadow:v
 button.sec:hover{background:var(--panel2);border-color:var(--line-hover)}
 button.danger{border-color:rgba(220,38,38,.3);background:rgba(220,38,38,.06);color:var(--bad)}
 button.danger:hover{background:var(--bad);color:#fff;border-color:var(--bad)}
+button.btn-toggle-on{background:var(--accent2);border-color:var(--accent2);color:#fff}
+button.btn-toggle-on:hover{background:#15803d;border-color:#15803d;color:#fff}
+button.btn-toggle-off{background:var(--bad);border-color:var(--bad);color:#fff}
+button.btn-toggle-off:hover{background:#b91c1c;border-color:#b91c1c;color:#fff}
 button.mini{padding:3px 9px;font-size:11px}
 .id-btn-group{display:inline-flex;gap:2px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:1px}
 .id-btn{background:transparent;border:none;color:var(--dim);padding:2px 6px;border-radius:4px;font-size:11px;font-weight:500;cursor:pointer;transition:all .15s}
@@ -533,8 +539,8 @@ a:hover{text-decoration:underline}
     <button class="sec" onclick="openImport()">导入账号</button>
     <button class="sec" onclick="fetchCredits(this)">刷新积分</button>
     <button class="sec" onclick="autoAssignSlots()" title="把尚未绑定出口的已启用账号依次分配到已启用的代理槽；已有绑定的账号不受影响">分配代理出口给未绑定账号</button>
-    <button class="sec" onclick="setAll(true, this)">全部启用</button>
-    <button class="sec" onclick="setAll(false, this)">全部停用</button>
+    <button class="btn-toggle-on" onclick="setAll(true, this)">全部启用</button>
+    <button class="btn-toggle-off" onclick="setAll(false, this)">全部停用</button>
     
   </div>
     <div id="accounts"></div>
@@ -546,20 +552,26 @@ a:hover{text-decoration:underline}
 
   <!-- 版本模型库与能力清单 -->
   <section>
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-      <h2 style="margin:0">当前版本模型库与能力清单 <em id="availModelCount"></em></h2>
-      <div style="font-size:12px;color:var(--dim)">展示当前视图下官方对话大模型、上下文容量、推理/视觉能力及在售倍率</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+      <div>
+        <h2 style="margin:0">当前版本模型库与能力清单 <em id="availModelCount"></em></h2>
+        <div style="font-size:12px;color:var(--dim)">展示当前视图下官方对话大模型、上下文容量、推理/视觉能力及在售倍率</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="sec mini" id="btnBenchAllFree" onclick="benchmarkAllFreeModels(this)" style="font-weight:600">⚡ 免费模型一键测速</button>
+      </div>
     </div>
     <div style="overflow-x:auto">
       <table id="modelsTable" class="data-cards">
         <thead>
           <tr>
-            <th style="text-align:center;width:150px">消费倍率 / 优惠</th>
-            <th style="text-align:left;width:220px">模型 ID</th>
-            <th style="text-align:center;width:160px">模型能力</th>
-            <th style="text-align:center;width:110px">上下文窗口</th>
-            <th style="text-align:center;width:100px">最大输出</th>
-            <th style="text-align:left">思考档位</th>
+            <th style="text-align:center;width:140px">消费倍率 / 优惠</th>
+            <th style="text-align:left;width:200px">模型 ID</th>
+            <th style="text-align:center;width:140px">模型能力</th>
+            <th style="text-align:center;width:100px">上下文窗口</th>
+            <th style="text-align:center;width:90px">最大输出</th>
+            <th style="text-align:left;width:110px">思考档位</th>
+            <th style="text-align:center;width:170px">实测速度 / 测速</th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -671,8 +683,8 @@ a:hover{text-decoration:underline}
           <button class="sec" onclick="document.getElementById('traeImportFile').click()">导入账号</button>
           <input type="file" id="traeImportFile" accept=".json" style="display:none" onchange="traeImportFilePicked(this)">
           <button class="sec" onclick="traeRefreshCredits(this)">刷新积分</button>
-          <button class="sec" onclick="traeSetAll(false, this)">全部停用</button>
-          <button class="sec" onclick="traeSetAll(true, this)">全部启用</button>
+          <button class="btn-toggle-off" onclick="traeSetAll(false, this)">全部停用</button>
+          <button class="btn-toggle-on" onclick="traeSetAll(true, this)">全部启用</button>
           <button class="sec" id="traePriorityBtn" onclick="traeTogglePriority(this)">扣分顺序: 读取中…</button>
           <button class="sec" onclick="openTraeGuide()">获取 Token 说明</button>
         </div>
@@ -691,6 +703,7 @@ a:hover{text-decoration:underline}
           <div style="font-size:12px;color:var(--dim);margin-top:4px">展示当前 Trae 上游对话大模型、计费消耗、能力标签、上下文容量及通道分类</div>
         </div>
         <div style="display:flex;gap:8px;align-items:center">
+          <button class="sec mini" onclick="benchmarkAllTraeModels(this)">⚡ 批量测速</button>
           <button class="sec mini" onclick="loadTraeModels(this)">刷新模型清单</button>
         </div>
       </div>
@@ -704,11 +717,11 @@ a:hover{text-decoration:underline}
               <th style="text-align:center;width:110px">上下文窗口</th>
               <th style="text-align:center;width:100px">最大输出</th>
               <th style="text-align:left">通道与调度说明</th>
+              <th style="text-align:center;width:140px">实测速度 / 测速</th>
             </tr>
           </thead>
           <tbody>
-            <tr><td colspan="6" class="empty">正在拉取 Trae 模型清单...</td></tr>
-          </tbody>
+            <tr><td colspan="7" class="empty">正在拉取 Trae 模型清单...</td></tr>
         </table>
       </div>
     </section>
@@ -1115,7 +1128,7 @@ a:hover{text-decoration:underline}
     <div id="qoderCards" class="cards" style="margin-bottom:22px">
       <div class="card"><div class="k">可用账号</div><div class="v" id="qoderKpiAccounts">—</div><div class="s">Qoder 账号池</div></div>
       <div class="card accent2"><div class="k">总请求</div><div class="v" id="qoderKpiRequests">—</div><div class="s">累计请求数</div></div>
-      <div class="card accent"><div class="k">总 Token</div><div class="v" id="qoderKpiTokens">—</div><div class="s">输入 + 输出</div></div>
+      <div class="card accent"><div class="k">剩余积分</div><div class="v" id="qoderKpiTokens">—</div><div class="s">已启用账号总和</div></div>
       <div class="card"><div class="k">成功率</div><div class="v" id="qoderKpiSuccess">—</div><div class="s">completed / total</div></div>
     </div>
 
@@ -1137,6 +1150,7 @@ a:hover{text-decoration:underline}
           <div style="font-size:12px;color:var(--dim);margin-top:4px">展示当前 Qoder 上游对话大模型、消费倍率、上下文容量与推理能力</div>
         </div>
         <div style="display:flex;gap:8px;align-items:center">
+          <button class="sec mini" onclick="benchmarkAllQoderModels(this)">⚡ 批量测速</button>
           <button class="sec mini" onclick="loadQoderModelsTable(this)">刷新模型清单</button>
         </div>
       </div>
@@ -1150,11 +1164,11 @@ a:hover{text-decoration:underline}
               <th style="text-align:center;width:110px">上下文窗口</th>
               <th style="text-align:center;width:100px">最大输出</th>
               <th style="text-align:left">内部路由 Key</th>
+              <th style="text-align:center;width:140px">实测速度 / 测速</th>
             </tr>
           </thead>
           <tbody>
-            <tr><td colspan="6" class="empty">正在拉取 Qoder 模型清单...</td></tr>
-          </tbody>
+            <tr><td colspan="7" class="empty">正在拉取 Qoder 模型清单...</td></tr>
         </table>
       </div>
     </section>
@@ -1202,10 +1216,39 @@ a:hover{text-decoration:underline}
         </button>
       </div>
     </div>
-    <div style="width:100%;height:calc(100vh - 160px);min-height:720px;background:#0b0f19;border-radius:12px;overflow:hidden;border:1px solid var(--line);box-shadow:var(--shadow-md)">
+    <!-- 反重力模型性能与实测探针工具栏 -->
+    <div style="background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <span style="font-weight:600;font-size:13px;display:inline-flex;align-items:center;gap:6px">
+          ⚡ <b>实测探针</b>
+        </span>
+        <div style="display:flex;align-items:center;gap:6px">
+          <label style="font-size:12px;color:var(--dim)">选择模型:</label>
+          <select id="agBenchmarkModelSelect" style="padding:4px 8px;font-size:12px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--fg)">
+            <option value="gemini-2.5-flash">gemini-2.5-flash (极速推荐)</option>
+            <option value="gemini-2.5-pro">gemini-2.5-pro (推理/编程)</option>
+            <option value="claude-3-7-sonnet">claude-3-7-sonnet (Claude 旗舰)</option>
+            <option value="claude-3-5-sonnet">claude-3-5-sonnet (Claude 3.5)</option>
+            <option value="claude-3-opus">claude-3-opus (深度推理)</option>
+            <option value="claude-3-5-haiku">claude-3-5-haiku (高速轻量)</option>
+            <option value="gemini-3.8-flash">gemini-3.8-flash (Gemini 最新)</option>
+            <option value="gemini-3.5-flash">gemini-3.5-flash (Gemini 3.5 极速)</option>
+          </select>
+        </div>
+        <button class="primary mini" id="btnAgBenchmark" onclick="benchmarkAntigravitySelected(this)" style="padding:4px 12px;font-size:12px">
+          ⚡ 测速
+        </button>
+        <button class="sec mini" id="btnAgBenchmarkAll" onclick="benchmarkAllAntigravityModels(this)" style="padding:4px 10px;font-size:12px">
+          ⚡ 常用模型一键全测
+        </button>
+      </div>
+      <div id="agBenchmarkResult" style="display:flex;align-items:center;gap:8px;font-size:12px">
+        <span style="color:var(--dim)">就绪 (支持 SSE 流式测速及 TTFT 延迟探针)</span>
+      </div>
+    </div>
+    <div style="width:100%;height:calc(100vh - 220px);min-height:680px;background:#0b0f19;border-radius:12px;overflow:hidden;border:1px solid var(--line);box-shadow:var(--shadow-md)">
       <iframe id="iframeAntigravity" src="http://127.0.0.1:43810/admin/" style="width:100%;height:100%;border:none;display:block" title="Antigravity Console"></iframe>
     </div>
-  </div>
   <footer>每 5 秒自动刷新 · 数据来自本机反代 <span class="mono" id="logfile"></span></footer>
 </main>
 
@@ -1548,7 +1591,7 @@ function renderAvailableModels(){
   const countEm = document.getElementById('availModelCount');
   if(countEm) countEm.textContent = '(共 ' + validModels.length + ' 个)';
   if(!validModels.length){
-    tb.innerHTML = '<tr><td colspan="6" class="empty">暂无可用模型</td></tr>';
+    tb.innerHTML = '<tr><td colspan="7" class="empty">暂无可用模型</td></tr>';
     return;
   }
   // 优先按倍率从小到大排序展示（0.00x 免费模型置顶）
@@ -1625,6 +1668,41 @@ function renderAvailableModels(){
       effort = '<span class="badge-effort">原生</span>';
     }
 
+    // 6. 实测速度与测速按钮
+    let speedHtml = '<span style="color:var(--dim)">—</span>';
+    const benchKey = (window.VIEW_REALM || 'intl') + ':' + m.id;
+    const benchRes = window.BENCHMARK_RESULTS && (window.BENCHMARK_RESULTS[benchKey] || window.BENCHMARK_RESULTS[m.id]);
+    if(isFree){
+      if(benchRes && benchRes.loading){
+        speedHtml = '<span class="badge warn mini" style="display:inline-flex;align-items:center;gap:4px;font-size:11px"><span class="spin">⟳</span> 测速中...</span>';
+      } else if(benchRes && benchRes.speed != null){
+        speedHtml = '<div style="display:inline-flex;flex-direction:column;align-items:center;gap:2px">'
+          + '<span class="badge ok" style="font-weight:700;font-size:11px;background:rgba(38,187,130,.15);color:#26bb82">⚡ ' + benchRes.speed + ' tok/s</span>'
+          + '<span style="font-size:10px;color:var(--dim)">' + (benchRes.ttft != null ? ('TTFT ' + benchRes.ttft + 'ms') : '') + ' · <a href="javascript:void(0)" data-model="' + esc(m.id) + '" onclick="benchmarkModel(this.dataset.model, this)" style="color:var(--accent);text-decoration:none">重测</a></span>'
+          + '</div>';
+      } else if(benchRes && benchRes.error){
+        speedHtml = '<div style="display:inline-flex;flex-direction:column;align-items:center;gap:2px">'
+          + '<span class="badge bad mini" title="' + esc(benchRes.error) + '">测速失败</span>'
+          + '<span style="font-size:10px"><a href="javascript:void(0)" data-model="' + esc(m.id) + '" onclick="benchmarkModel(this.dataset.model, this)" style="color:var(--accent);text-decoration:none">重试</a></span>'
+          + '</div>';
+      } else {
+        const hist = (window.LATEST_PERF && window.LATEST_PERF.by_model && window.LATEST_PERF.by_model[m.id] && window.LATEST_PERF.by_model[m.id].tokens_per_sec) ? window.LATEST_PERF.by_model[m.id] : null;
+        let histHtml = '';
+        if(hist && hist.tokens_per_sec && hist.tokens_per_sec.avg){
+          histHtml = '<span style="font-size:10px;color:var(--dim);margin-right:4px" title="近期历史平均速度">均速 ' + hist.tokens_per_sec.avg.toFixed(1) + 't/s</span>';
+        }
+        speedHtml = '<div style="display:inline-flex;align-items:center;gap:4px;justify-content:center">'
+          + histHtml
+          + '<button class="sec mini" data-model="' + esc(m.id) + '" onclick="benchmarkModel(this.dataset.model, this)" style="padding:2px 8px;font-size:11px;font-weight:600;color:var(--accent);border-color:rgba(37,99,235,.3)">⚡ 测速</button>'
+          + '</div>';
+      }
+    } else {
+      const hist = (window.LATEST_PERF && window.LATEST_PERF.by_model && window.LATEST_PERF.by_model[m.id] && window.LATEST_PERF.by_model[m.id].tokens_per_sec) ? window.LATEST_PERF.by_model[m.id] : null;
+      if(hist && hist.tokens_per_sec && hist.tokens_per_sec.avg){
+        speedHtml = '<span style="font-size:11px;font-weight:600;color:var(--dim)">' + hist.tokens_per_sec.avg.toFixed(1) + ' tok/s</span>';
+      }
+    }
+
     return '<tr' + (isFree ? ' class="tr-free"' : '') + '>'
       + '<td style="text-align:center" data-label="消费倍率">' + credBadge + '</td>'
       + '<td style="text-align:left" class="mono" data-label="模型 ID"><b>' + esc(m.id) + '</b></td>'
@@ -1632,8 +1710,152 @@ function renderAvailableModels(){
       + '<td style="text-align:center" data-label="上下文">' + ctx + '</td>'
       + '<td style="text-align:center" data-label="最大输出">' + maxOut + '</td>'
       + '<td style="text-align:left" data-label="思考档位">' + effort + '</td>'
+      + '<td style="text-align:center" data-label="实测速度">' + speedHtml + '</td>'
       + '</tr>';
   }).join('');
+}
+
+window.BENCHMARK_RESULTS = window.BENCHMARK_RESULTS || {};
+try {
+  const savedBench = sessionStorage.getItem('wb_bench_results');
+  if(savedBench) Object.assign(window.BENCHMARK_RESULTS, JSON.parse(savedBench));
+} catch(e){}
+
+function saveBenchResults(){
+  try {
+    sessionStorage.setItem('wb_bench_results', JSON.stringify(window.BENCHMARK_RESULTS));
+  } catch(e){}
+}
+
+async function benchmarkModel(modelId, btn){
+  if(!modelId) return;
+  const realm = window.VIEW_REALM || 'intl';
+  const benchKey = realm + ':' + modelId;
+  window.BENCHMARK_RESULTS[benchKey] = { loading: true };
+  window.BENCHMARK_RESULTS[modelId] = window.BENCHMARK_RESULTS[benchKey];
+  renderAvailableModels();
+
+  const startTime = performance.now();
+  let firstTokenTime = null;
+  let replyText = '';
+  let completionTokens = 0;
+
+  try {
+    const resp = await fetch('/v1/chat/completions?realm=' + encodeURIComponent(realm), {
+      method: 'POST',
+      headers: authHeaders({
+        'Content-Type': 'application/json',
+        'X-Realm': realm
+      }),
+      body: JSON.stringify({
+        model: modelId,
+        messages: [{ role: 'user', content: '请用中文写一段50字左右的短文，简要介绍人工智能。' }],
+        stream: true,
+        stream_options: { include_usage: true },
+        max_tokens: 120,
+        temperature: 0.7
+      })
+    });
+
+    if(!resp.ok){
+      const errText = await resp.text();
+      let msg = 'HTTP ' + resp.status;
+      try {
+        const j = JSON.parse(errText);
+        if(j.error && j.error.message) msg = j.error.message;
+      } catch(_) {}
+      throw new Error(msg);
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+
+    while(true){
+      const { done, value } = await reader.read();
+      if(done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for(const line of lines){
+        const trimmed = line.trim();
+        if(!trimmed || !trimmed.startsWith('data:')) continue;
+        const dataStr = trimmed.slice(5).trim();
+        if(dataStr === '[DONE]') break;
+        try {
+          const parsed = JSON.parse(dataStr);
+          if(parsed.choices && parsed.choices.length > 0){
+            const delta = parsed.choices[0].delta || {};
+            const content = delta.content || delta.reasoning_content || '';
+            if(content){
+              if(firstTokenTime === null) firstTokenTime = performance.now();
+              replyText += content;
+            }
+          }
+          if(parsed.usage && parsed.usage.completion_tokens){
+            completionTokens = parsed.usage.completion_tokens;
+          }
+        } catch(_) {}
+      }
+    }
+
+    const endTime = performance.now();
+    const ttftMs = firstTokenTime !== null ? Math.round(firstTokenTime - startTime) : Math.round(endTime - startTime);
+    const genSec = (firstTokenTime !== null ? Math.max(0.1, (endTime - firstTokenTime) / 1000.0) : Math.max(0.1, (endTime - startTime) / 1000.0));
+
+    if(!completionTokens){
+      completionTokens = Math.max(1, Math.round(replyText.length * 1.3));
+    }
+    const speed = Number((completionTokens / genSec).toFixed(1));
+
+    const resultObj = {
+      speed: speed,
+      ttft: ttftMs,
+      tokens: completionTokens,
+      genSec: Number(genSec.toFixed(2)),
+      at: Date.now()
+    };
+    window.BENCHMARK_RESULTS[benchKey] = resultObj;
+    window.BENCHMARK_RESULTS[modelId] = resultObj;
+    saveBenchResults();
+    toast('模型 ' + modelId + ' 测速完成：' + speed + ' tok/s (首字 ' + ttftMs + 'ms)', 'ok');
+  } catch(err){
+    console.error('benchmark error for ' + modelId, err);
+    const errObj = {
+      error: err.message || '测速失败',
+      at: Date.now()
+    };
+    window.BENCHMARK_RESULTS[benchKey] = errObj;
+    window.BENCHMARK_RESULTS[modelId] = errObj;
+    toast('模型 ' + modelId + ' 测速失败: ' + err.message, 'bad');
+  } finally {
+    renderAvailableModels();
+  }
+}
+
+async function benchmarkAllFreeModels(btn){
+  const freeModels = (MODELS_DATA || []).filter(m => {
+    if(!m || !m.id) return false;
+    if(m.owned_by && m.owned_by !== 'workbuddy') return false;
+    const c = (m.credits || '').toString().toLowerCase().replace('x', '').trim();
+    return (c === '0.00' || c === '0' || m.id === 'hy3' || m.id === 'hy4-preview-f' || (m.id === 'deepseek-v4.1-flash' && window.VIEW_REALM === 'intl'));
+  });
+  if(!freeModels.length){
+    toast('当前视图下无可用免费模型', 'warn');
+    return;
+  }
+  if(btn){
+    btn.disabled = true;
+    btn.textContent = '⏳ 正在批量测速...';
+  }
+  for(const m of freeModels){
+    await benchmarkModel(m.id);
+  }
+  if(btn){
+    btn.disabled = false;
+    btn.textContent = '⚡ 免费模型一键测速';
+  }
+  toast('全部免费模型测速完成！', 'ok');
 }
 
 let CURRENT_GROWTH_UID = 'all';
@@ -1837,7 +2059,7 @@ async function doCheckin(btn){
     const res = r.results || [];
     if(!res.length) toast("未发现国内版账号", "warn");
     else {
-      const summary = res.map(x => (x.nickname||x.uid.slice(0,6)) + ": " + (x.ok ? "签到成功" : (x.error||x.msg))).join("；");
+      const summary = res.map(x => (x.nickname||x.uid.slice(0,6)) + ": " + (x.ok ? (x.msg && x.msg !== "ok" ? x.msg : "签到成功") : (x.error||x.msg))).join("；");
       toast("每日签到: " + summary, res.some(x => x.ok) ? "ok" : "warn");
     }
     await refreshActiveRealm(); window.updateUI(); loadAccounts(); loadModels();
@@ -2089,7 +2311,7 @@ function accountThrottleList(a){
   }).filter(Boolean);
   return items.length ? '<div class="thr-items">' + items.join('') + '</div>' : '';
 }
-
+const coolPills = accountThrottleList;
 
 function renderModelThrottles(){
   const section = document.getElementById('modelThrottleSection');
@@ -2177,7 +2399,12 @@ function accountRow(a){
     : 0;
   // 状态列必须体现模型级限流：上游 code 6004 只封一个模型，账号本身仍然在线，
   // 若这里继续显示「可用」就会让人以为该账号什么都能跑，实际请求会被 429。
-  const state = !a.enabled ? '<span class="badge off">已停用</span>'
+  const restrictedUntil = Number(a.restrictedUntil || 0);
+  const restricted = restrictedUntil > Date.now() / 1000;
+  const restrictedLeft = restricted ? coolRemain(restrictedUntil) : '';
+  const restrictedTitle = esc(String(a.restrictedDetail || '账号存在异常行为，已被限制使用').slice(0, 400));
+  const state = restricted ? '<span class="badge bad" title="上游风控限制（403 / code 11140）：' + restrictedTitle + '">风控限制 ' + restrictedLeft + '</span>'
+              : !a.enabled ? '<span class="badge off">已停用</span>'
               : a.reserveBlocked ? '<span class="badge warn">保留积分</span>'
               : a.dailyLimitBlocked ? '<span class="badge warn" title="今日已用 ' + fmt(a.dailyTokensToday || 0) + ' / ' + fmt(a.dailyTokenLimit || 0) + ' token，暂停接单（本地 0 点恢复）">日限额</span>'
               : cooldownList.length ? '<span class="badge warn" title="上游仅限流这些模型，同账号其它模型仍可正常调用">部分模型限流</span>'
@@ -2189,7 +2416,8 @@ function accountRow(a){
   // 过滤只看标记本身，不看冷却是否还在：冷却到期后徽标与清单都已归零，此时再把
   // 标记当成红字显示出来，反而会让人以为账号出了问题（冷却已过 → 模型确实可用）。
   const THROTTLE_MARK = 'HTTP 429 (model throttled)';
-  const err = a.lastError && a.lastError !== THROTTLE_MARK
+  const RESTRICT_MARK = 'HTTP 403 (account restricted)';
+  const err = a.lastError && a.lastError !== THROTTLE_MARK && a.lastError !== RESTRICT_MARK
     ? '<div class="hint" style="color:var(--warn);margin:2px 0 0">' + esc(a.lastError) + '</div>' : '';
   const cred = a.credits;
   const credText = cred ? ('<b style="color:var(--accent2)">' + fmt(cred.remain) + '</b> / ' + fmt(cred.size)) : '<span style="color:var(--dim)">未查询</span>';
@@ -2209,7 +2437,7 @@ function accountRow(a){
     + '<td class="acct-actions" style="text-align:center;white-space:nowrap;vertical-align:middle">'
     + '<div class="acct-actions-col">'
     +   '<div class="acct-actions-row">'
-    +     '<button class="sec mini" onclick="toggleAccount(&quot;' + uidAttr + '&quot;,' + (!a.enabled) + ', this)">' + (a.enabled ? '停用' : '启用') + '</button>'
+    +     '<button class="' + (a.enabled ? 'btn-toggle-off' : 'btn-toggle-on') + ' mini" onclick="toggleAccount(&quot;' + uidAttr + '&quot;,' + (!a.enabled) + ', this)">' + (a.enabled ? '停用' : '启用') + '</button>'
     +     '<button class="sec mini" onclick="testAccount(&quot;' + uidAttr + '&quot;, this)">测试</button>'
     +     '<button class="sec mini" onclick="refreshOne(&quot;' + uidAttr + '&quot;, this)">刷新凭证</button>'
     +   '</div>'
@@ -2728,6 +2956,7 @@ async function refreshInner(){
       getJSON('/usage/recent?limit=' + RECENT_LIMIT + '&page=' + RECENT_PAGE + '&realm=' + encodeURIComponent(window.VIEW_REALM)),
       getJSON('/usage/perf?realm=' + encodeURIComponent(window.VIEW_REALM)),
     ]);
+    window.LATEST_PERF = perf;
     document.getElementById('statusDot').className = 'dot';
   }catch(e){
     document.getElementById('statusDot').className = 'dot err';
@@ -3820,17 +4049,21 @@ function switchMainTab(tab){
 let qoderRecentLimit = 20;
 let qoderRecentPage = 1;
 let qoderAccountsCache = [];
+let qoderPoolCache = {};
 let qoderQuotaCache = {};
 let qoderModelsCache = [];
 
 async function loadQoderData(force){
   try{
-    const [acct, usage, models] = await Promise.all([
+    const [acct, usage, models, pool] = await Promise.all([
       getJSON('/qoder/accounts'),
       getJSON('/qoder/usage'),
       getJSON('/qoder/models').catch(() => ({models: []})),
+      getJSON('/qoder/pool').catch(() => ({slots: []})),
     ]);
     qoderAccountsCache = acct.accounts || [];
+    qoderPoolCache = {};
+    ((pool && pool.slots) || []).forEach(s => { if(s && s.id) qoderPoolCache[s.id] = s; });
     qoderModelsCache = models.models || [];
     renderQoderKpi(usage);
     renderQoderAccounts(usage);
@@ -3843,16 +4076,45 @@ async function loadQoderData(force){
   }catch(e){ toast('Qoder 数据加载失败: ' + e.message); }
 }
 
+function calcQoderRemainingCredits(){
+  let sum = 0;
+  let hasAny = false;
+  qoderAccountsCache.forEach(a => {
+    if(a.enabled !== false){
+      const q = qoderQuotaCache[a.id];
+      if(q){
+        hasAny = true;
+        sum += (Number(q.user_remaining) || 0) + (Number(q.addon_remaining) || 0);
+      }
+    }
+  });
+  return hasAny ? sum : null;
+}
+
+function updateQoderRemainingCredits(){
+  const el = document.getElementById('qoderKpiTokens');
+  if(!el) return;
+  const rem = calcQoderRemainingCredits();
+  if(rem !== null){
+    el.textContent = fmt(rem);
+  } else if(!qoderAccountsCache.some(a => a.enabled !== false)){
+    el.textContent = '0';
+  } else {
+    el.textContent = '—';
+  }
+}
+
 function renderQoderKpi(usage){
   const byAcct = usage.by_account || {};
-  const acctCount = qoderAccountsCache.length;
+  const enabled = qoderAccountsCache.filter(a => a.enabled !== false);
+  const slots = Object.values(qoderPoolCache);
+  const acctCount = slots.length ? slots.filter(s => s.available).length : enabled.length;
   const requests = usage.requests || 0;
-  const totalTokens = usage.total_tokens || 0;
   let completed = 0;
   // Count completed from recent (approximate)
   document.getElementById('qoderKpiAccounts').textContent = acctCount;
   document.getElementById('qoderKpiRequests').textContent = fmt(requests);
-  document.getElementById('qoderKpiTokens').textContent = fmt(totalTokens);
+  updateQoderRemainingCredits();
   document.getElementById('qoderKpiSuccess').textContent = requests > 0 ? '—' : '—';
 }
 
@@ -3866,7 +4128,7 @@ function renderQoderAccounts(usage){
   }
   let html = '<div class="table-wrap"><table class="data-cards"><thead><tr>'
     + '<th style="text-align:left">账号</th>'
-    + '<th style="text-align:center;width:80px">状态</th>'
+    + '<th style="text-align:center;width:120px">状态</th>'
     + '<th style="text-align:center;width:76px">区域</th>'
     + '<th style="text-align:center">Plan</th>'
     + '<th style="text-align:center">用户额度</th>'
@@ -3883,9 +4145,23 @@ function renderQoderAccounts(usage){
     const addonRem = q ? fmt(q.addon_remaining) : '—';
     const addonTot = q ? fmt(q.addon_total) : '—';
     const isEnabled = (a.enabled !== false);
-    const stateBadge = isEnabled
-      ? '<span class="badge ok">可用</span>'
-      : '<span class="badge off">已停用</span>';
+    const slot = qoderPoolCache[a.id];
+    const coolingMs = slot && Number(slot.cooling_remaining_ms) > 0 ? Number(slot.cooling_remaining_ms) : 0;
+    const lastErr = slot && slot.last_error ? String(slot.last_error) : '';
+    const errTitle = lastErr ? ' title="' + esc(lastErr) + '"' : '';
+    let stateBadge;
+    if(!isEnabled){
+      stateBadge = '<span class="badge off">已停用</span>';
+    }else if(coolingMs > 0){
+      const remain = coolRemain(Date.now() / 1000 + coolingMs / 1000);
+      stateBadge = '<span class="badge warn"' + errTitle + '>冷却' + (remain ? ' ' + remain : '中') + '</span>';
+    }else if(q && q.is_quota_exceeded){
+      stateBadge = '<span class="badge bad"' + errTitle + '>额度耗尽</span>';
+    }else if(slot && slot.available === false){
+      stateBadge = '<span class="badge off"' + errTitle + '>不可用</span>';
+    }else{
+      stateBadge = '<span class="badge ok">可用</span>';
+    }
     const idAttr = esc(String(a.id || '').replace(/[^\w.@-]/g, ''));
     const nameAttr = esc(a.name || a.email || a.id);
     html += '<tr>'
@@ -3899,7 +4175,7 @@ function renderQoderAccounts(usage){
       + '<td style="text-align:right" data-label="总 Token">' + fmt(u.total_tokens) + '</td>'
       + '<td class="acct-actions" style="text-align:center;white-space:nowrap;vertical-align:middle" data-label="操作">'
       +   '<div class="acct-actions-row">'
-      +     '<button class="sec mini" onclick="qoderToggleAccount(\'' + idAttr + '\',' + (!isEnabled) + ', this)">' + (isEnabled ? '停用' : '启用') + '</button>'
+      +     '<button class="' + (isEnabled ? 'btn-toggle-off' : 'btn-toggle-on') + ' mini" onclick="qoderToggleAccount(\'' + idAttr + '\',' + (!isEnabled) + ', this)">' + (isEnabled ? '停用' : '启用') + '</button>'
       +     '<button class="sec mini" onclick="qoderCheckinOne(\'' + idAttr + '\', this)">签到</button>'
       +     '<button class="danger mini" onclick="qoderDeleteAccount(\'' + idAttr + '\',\'' + nameAttr + '\', this)">删除</button>'
       +   '</div>'
@@ -4002,6 +4278,7 @@ async function qoderRefreshQuota(btn){
     // Re-render accounts with quota data
     const usage = await getJSON('/qoder/usage');
     renderQoderAccounts(usage);
+    updateQoderRemainingCredits();
     toast('额度刷新完成', 'success');
   }catch(e){ toast('额度刷新失败: ' + e.message, 'error'); }
   if(btn) btn.disabled = false;
@@ -4024,24 +4301,21 @@ async function loadQoderModelsTable(btn){
   }
 }
 
-// 接口不可用时的兜底表：数值取自 2026-10-10 实拉的上游返回，
+// 接口不可用时的兜底表：数值取自 2026-10-21 实拉的上游返回，
 // 含 price_factor（每 1K Token 消耗倍率）与 max_output_tokens。
 function getFallbackQoderModels(){
   return [
-    {id:'qoder-Auto', qoder_key:'auto', is_reasoning:true, context_window:200000, price_factor:0.5, max_output_tokens:32768},
-    {id:'qoder-Qwen3.8-Max', qoder_key:'qmodel_38max', is_reasoning:true, context_window:200000, price_factor:0.5, max_output_tokens:32768},
-    {id:'qoder-Qwen3.8-Flash', qoder_key:'qfmodel', is_reasoning:true, context_window:200000, price_factor:0.0, max_output_tokens:32768},
-    {id:'qoder-Qwen3.7-Max', qoder_key:'qmodel_latest', is_reasoning:true, context_window:200000, price_factor:0.5, max_output_tokens:32768},
-    {id:'qoder-Qwen3.7-Plus', qoder_key:'qmodel', is_reasoning:true, context_window:200000, price_factor:0.1, max_output_tokens:32768},
-    {id:'qoder-Qwen3.7-Flash', qoder_key:'q37fmodel', is_reasoning:true, context_window:200000, price_factor:0.1, max_output_tokens:32768},
-    {id:'qoder-DeepSeek-V4-Pro', qoder_key:'dmodel', is_reasoning:true, context_window:200000, price_factor:0.5, max_output_tokens:32768},
-    {id:'qoder-DeepSeek-Flash', qoder_key:'dfmodel', is_reasoning:false, context_window:200000, price_factor:0.1, max_output_tokens:16384},
-    {id:'qoder-GLM-5.3', qoder_key:'gmodel', is_reasoning:true, context_window:200000, price_factor:0.8, max_output_tokens:32768},
-    {id:'qoder-GLM-5.3-Flash', qoder_key:'gfmodel', is_reasoning:true, context_window:200000, price_factor:0.1, max_output_tokens:32768},
-    {id:'qoder-GLM-5.2', qoder_key:'gm51model', is_reasoning:true, context_window:200000, price_factor:0.6, max_output_tokens:32768},
-    {id:'qoder-Kimi-K3', qoder_key:'kmodel_latest', is_reasoning:false, context_window:200000, price_factor:1.4, max_output_tokens:16384},
-    {id:'qoder-Kimi-K2.8-Preview', qoder_key:'kmodel', is_reasoning:true, context_window:200000, price_factor:0.8, max_output_tokens:32768},
-    {id:'qoder-MiniMax-M2.7', qoder_key:'mmodel', is_reasoning:false, context_window:200000, price_factor:0.2, max_output_tokens:16384}
+    {id:'Auto', qoder_key:'auto', is_reasoning:true, context_window:200000, price_factor:0.5, max_output_tokens:32768},
+    {id:'Qwen3.8-Max', qoder_key:'qmodel_38max', is_reasoning:true, context_window:200000, price_factor:0.5, max_output_tokens:32768},
+    {id:'Qwen3.8-Flash', qoder_key:'qfmodel', is_reasoning:true, context_window:200000, price_factor:0.0, max_output_tokens:32768},
+    {id:'Qwen3.7-Plus', qoder_key:'qmodel', is_reasoning:true, context_window:200000, price_factor:0.1, max_output_tokens:32768},
+    {id:'DeepSeek-V4-Pro', qoder_key:'dmodel', is_reasoning:true, context_window:200000, price_factor:0.5, max_output_tokens:32768},
+    {id:'DeepSeek-Flash', qoder_key:'dfmodel', is_reasoning:false, context_window:200000, price_factor:0.0, max_output_tokens:16384},
+    {id:'GLM-5.3', qoder_key:'gmodel', is_reasoning:true, context_window:200000, price_factor:0.8, max_output_tokens:32768},
+    {id:'GLM-5.3-Flash', qoder_key:'gfmodel', is_reasoning:true, context_window:200000, price_factor:0.1, max_output_tokens:32768},
+    {id:'Kimi-K3', qoder_key:'kmodel_latest', is_reasoning:false, context_window:200000, price_factor:1.4, max_output_tokens:16384},
+    {id:'Kimi-K2.8-Preview', qoder_key:'kmodel', is_reasoning:true, context_window:200000, price_factor:0.8, max_output_tokens:32768},
+    {id:'MiniMax-M3.1-Flash', qoder_key:'mmodel', is_reasoning:false, context_window:200000, price_factor:0.1, max_output_tokens:16384}
   ];
 }
 
@@ -4050,9 +4324,10 @@ function renderQoderModelsTable(models){
   if(!tb) return;
   const countEm = document.getElementById('qoderAvailModelCount');
   const list = [...((models && models.length) ? models : getFallbackQoderModels())];
+  window.LAST_QODER_MODELS = list;
   if(countEm) countEm.textContent = '(共 ' + list.length + ' 个)';
   if(!list.length){
-    tb.innerHTML = '<tr><td colspan="6" class="empty">暂无可用 Qoder 模型</td></tr>';
+    tb.innerHTML = '<tr><td colspan="7" class="empty">暂无可用 Qoder 模型</td></tr>';
     return;
   }
   // 优先按消费倍率升序排序展示（0.00x 或低倍率置顶）
@@ -4069,8 +4344,8 @@ function renderQoderModelsTable(models){
   };
 
   tb.innerHTML = list.map(m => {
-    // 展示去掉 qoder- 前缀（调用时需要，列表里另有「内部路由 Key」列说明）
-    const dispName = String(m.id || '').replace(/^qoder-/, '');
+    // 模型名即调用名，不再有路由前缀
+    const dispName = String(m.id || '');
     const nameHtml = '<div style="font-weight:600;font-size:13px;color:var(--fg)">' + esc(dispName) + '</div>'
       + '<div style="font-size:10px;color:var(--dim);margin-top:1px">调用名 ' + esc(m.id || '') + '</div>';
 
@@ -4107,8 +4382,30 @@ function renderQoderModelsTable(models){
 
     // 5. 内部路由 Key
     const keyHtml = '<span class="mono" style="color:var(--accent);font-weight:600;font-size:12px">' + esc(m.qoder_key || m.id) + '</span>'
-      + '<div style="font-size:10px;color:var(--dim);margin-top:2px">前缀 qoder- 强制直通</div>';
+      + '<div style="font-size:10px;color:var(--dim);margin-top:2px">调用名即上游模型名</div>';
 
+
+    // 6. 实测速度与测速按钮
+    let speedHtml = '<span style="color:var(--dim)">—</span>';
+    const benchKey = 'qoder:' + m.id;
+    const benchRes = window.BENCHMARK_RESULTS && (window.BENCHMARK_RESULTS[benchKey] || window.BENCHMARK_RESULTS[m.id]);
+    if(benchRes && benchRes.loading){
+      speedHtml = '<span class="badge warn mini" style="display:inline-flex;align-items:center;gap:4px;font-size:11px"><span class="spin">⟳</span> 测速中...</span>';
+    } else if(benchRes && benchRes.speed != null){
+      speedHtml = '<div style="display:inline-flex;flex-direction:column;align-items:center;gap:2px">'
+        + '<span class="badge ok" style="font-weight:700;font-size:11px;background:rgba(38,187,130,.15);color:#26bb82">⚡ ' + benchRes.speed + ' tok/s</span>'
+        + '<span style="font-size:10px;color:var(--dim)">' + (benchRes.ttft != null ? ('TTFT ' + benchRes.ttft + 'ms') : '') + ' · <a href="javascript:void(0)" data-model="' + esc(m.id) + '" onclick="benchmarkQoderModel(this.dataset.model, this)" style="color:var(--accent);text-decoration:none">重测</a></span>'
+        + '</div>';
+    } else if(benchRes && benchRes.error){
+      speedHtml = '<div style="display:inline-flex;flex-direction:column;align-items:center;gap:2px">'
+        + '<span class="badge bad mini" title="' + esc(benchRes.error) + '">测速失败</span>'
+        + '<span style="font-size:10px"><a href="javascript:void(0)" data-model="' + esc(m.id) + '" onclick="benchmarkQoderModel(this.dataset.model, this)" style="color:var(--accent);text-decoration:none">重试</a></span>'
+        + '</div>';
+    } else {
+      speedHtml = '<div style="display:inline-flex;align-items:center;gap:4px;justify-content:center">'
+        + '<button class="sec mini" data-model="' + esc(m.id) + '" onclick="benchmarkQoderModel(this.dataset.model, this)" style="padding:2px 8px;font-size:11px;font-weight:600;color:var(--accent);border-color:rgba(37,99,235,.3)">⚡ 测速</button>'
+        + '</div>';
+    }
 
     return '<tr' + (isFree ? ' class="tr-free"' : '') + '>'
       + '<td style="text-align:center" data-label="消费倍率">' + billingHtml + '</td>'
@@ -4117,6 +4414,7 @@ function renderQoderModelsTable(models){
       + '<td style="text-align:center" data-label="上下文窗口">' + ctx + '</td>'
       + '<td style="text-align:center" data-label="最大输出">' + maxOut + '</td>'
       + '<td style="text-align:left" data-label="内部路由 Key">' + keyHtml + '</td>'
+      + '<td style="text-align:center" data-label="实测速度">' + speedHtml + '</td>'
       + '</tr>';
   }).join('');
 }
@@ -4156,6 +4454,9 @@ async function qoderToggleAccount(id, enable, btn){
   try{
     await postJSON('/qoder/account/set', { id: id, enabled: enable });
     toast(enable ? 'Qoder 账号已启用' : 'Qoder 账号已停用', 'ok');
+    const acct = qoderAccountsCache.find(a => a.id === id);
+    if(acct) acct.enabled = enable;
+    updateQoderRemainingCredits();
     await loadQoderData(true);
   }catch(e){
     toast('操作失败: ' + (e && e.message ? e.message : e), 'bad');
@@ -4170,6 +4471,9 @@ async function qoderDeleteAccount(id, name, btn){
   try{
     await postJSON('/qoder/account/delete', { id: id });
     toast('已成功删除 Qoder 账号 [' + name + ']', 'ok');
+    qoderAccountsCache = qoderAccountsCache.filter(a => a.id !== id);
+    delete qoderQuotaCache[id];
+    updateQoderRemainingCredits();
     await loadQoderData(true);
   }catch(e){
     toast('删除失败: ' + (e && e.message ? e.message : e), 'bad');
@@ -5044,9 +5348,9 @@ function renderAnalytics(data){
 // Trae 多账号管理（与 WorkBuddy 账号块同构）
 let TRAE_ACCOUNTS = [];
 
-async function loadTraeToken(){
+async function loadTraeToken(force = false){
   try{
-    const r = await getJSON('/trae/accounts');
+    const r = await getJSON('/trae/accounts' + (force ? '?refresh=1' : ''));
     TRAE_ACCOUNTS = r.accounts || [];
     renderTraeAccount();
     traeRenderPriority();
@@ -5147,7 +5451,7 @@ function traeRow(a){
     + '<td style="text-align:left;white-space:nowrap" data-label="积分">' + credText + '</td>'
     + '<td class="mono" style="text-align:left;font-size:11px;color:var(--dim)" data-label="Token">' + esc(String(a.token_mask || '')) + '</td>'
     + '<td class="acct-actions" style="text-align:center;white-space:nowrap;vertical-align:middle">'
-    +   '<button class="sec mini" onclick="traeToggle(\'' + uidAttr + '\',' + (!a.enabled) + ', this)">' + (a.enabled ? '停用' : '启用') + '</button>'
+    +   '<button class="' + (a.enabled ? 'btn-toggle-off' : 'btn-toggle-on') + ' mini" onclick="traeToggle(\'' + uidAttr + '\',' + (!a.enabled) + ', this)">' + (a.enabled ? '停用' : '启用') + '</button>'
     +   '<button class="sec mini" onclick="traeCheckinOne(\'' + uidAttr + '\', this)">签到</button>'
     +   '<button class="danger mini" onclick="traeDelete(\'' + uidAttr + '\', this)">删除</button>'
     + '</td>'
@@ -5189,6 +5493,10 @@ function renderTraeAccount(){
   // 直接顺序调用时 traeStatCards 读到的仍是上一轮按钮文案（曾显示「读取中…」）。
   // 这里先 await 拿到真值，再渲染汇总卡片。
   traeRenderPriority().then(traeStatCards);
+}
+
+function openTraeGuide(){
+  alert('【Trae 账号说明】\n\n1. 官方 OAuth：点击「+ 添加账号 (OAuth)」在浏览器中完成授权即可。\n2. 导入账号：若已有包含 token 的导出配置，可点击「导入账号」直接导入。');
 }
 
 async function startTraeOAuth(){
@@ -5245,9 +5553,12 @@ async function traeCheckinOne(uid, btn){
   if(btn){ btn.disabled = true; btn.textContent = '...'; }
   try{
     const r = await postJSON('/trae/checkin', { user_id: uid });
-    const mine = (r.results || []).find(x => x.user_id === uid) || {};
-    toast('签到: ' + (mine.message || mine.status || '完成'), mine.status === 'success' ? 'ok' : (mine.status === 'already' ? 'info' : 'bad'));
-    await loadTraeToken();
+    const results = Array.isArray(r.results) ? r.results : (r.results ? [r.results] : []);
+    const mine = results.find(x => x.user_id === uid) || {};
+    const st = mine.status;
+    const toastType = st === 'success' ? 'ok' : (st === 'already' ? 'info' : (st === 'device_limited' ? 'warn' : 'bad'));
+    toast('签到: ' + (mine.message || st || '完成'), toastType);
+    await loadTraeToken(true);
   }catch(e){ toast('签到失败: ' + e.message, 'bad'); }
   finally{ if(btn){ btn.disabled = false; btn.textContent = '签到'; } }
 }
@@ -5257,11 +5568,17 @@ async function traeCheckinAll(btn){
   if(btn){ btn.disabled = true; btn.textContent = '签到中...'; }
   try{
     const r = await postJSON('/trae/checkin', {});
-    const ok = (r.results || []).filter(x => x.status === 'success').length;
-    const already = (r.results || []).filter(x => /已签|已领取|重复/.test(x.message || '')).length;
-    const fail = (r.results || []).filter(x => x.status === 'fail').length;
-    toast('签到完成: 成功 ' + ok + ' · 已签 ' + already + ' · 失败 ' + fail, fail ? 'warn' : 'ok');
-    await loadTraeToken();
+    const results = Array.isArray(r.results) ? r.results : (r.results ? [r.results] : []);
+    const ok = results.filter(x => x.status === 'success').length;
+    const devLimited = results.filter(x => x.status === 'device_limited' || /设备/.test(x.message || '')).length;
+    const already = results.filter(x => x.status === 'already' && !/设备/.test(x.message || '')).length;
+    const fail = results.filter(x => x.status === 'fail').length;
+    let summary = '签到完成: 成功 ' + ok;
+    if (already) summary += ' · 账号已签 ' + already;
+    if (devLimited) summary += ' · 设备限签 ' + devLimited;
+    if (fail) summary += ' · 失败 ' + fail;
+    toast(summary, (fail || devLimited) ? 'warn' : 'ok');
+    await loadTraeToken(true);
   }catch(e){ toast('签到失败: ' + e.message, 'bad'); }
   finally{ if(btn){ btn.disabled = false; btn.textContent = old; } }
 }
@@ -5270,7 +5587,7 @@ async function traeRefreshCredits(btn){
   const old = btn ? btn.textContent : '';
   if(btn){ btn.disabled = true; btn.textContent = '刷新中...'; }
   try{
-    await loadTraeToken();
+    await loadTraeToken(true);
     toast('积分已刷新', 'ok');
   }catch(e){ toast('刷新失败: ' + e.message, 'bad'); }
   finally{ if(btn){ btn.disabled = false; btn.textContent = old; } }
@@ -5431,9 +5748,10 @@ function renderTraeModels(models){
   if(!tb) return;
   const countEm = document.getElementById('traeModelCount');
   const list = [...((models && models.length) ? models : getFallbackTraeModels())];
+  window.LAST_TRAE_MODELS = list;
   if(countEm) countEm.textContent = '(共 ' + list.length + ' 个)';
   if(!list.length){
-    tb.innerHTML = '<tr><td colspan="6" class="empty">暂无可用 Trae 模型</td></tr>';
+    tb.innerHTML = '<tr><td colspan="7" class="empty">暂无可用 Trae 模型</td></tr>';
     return;
   }
   // 优先按积分倍率升序排序展示
@@ -5496,6 +5814,28 @@ function renderTraeModels(models){
     const idHtml = '<div style="font-weight:600;font-size:13px;color:var(--fg)">' + esc(m.id) + '</div>'
       + (m.name && m.name !== m.id ? '<div style="font-size:11px;color:var(--dim)">' + esc(m.name) + '</div>' : '');
 
+    // 6. 实测速度与测速按钮
+    let speedHtml = '<span style="color:var(--dim)">—</span>';
+    const benchKey = 'trae:' + m.id;
+    const benchRes = window.BENCHMARK_RESULTS && (window.BENCHMARK_RESULTS[benchKey] || window.BENCHMARK_RESULTS['trae-' + m.id] || window.BENCHMARK_RESULTS[m.id]);
+    if(benchRes && benchRes.loading){
+      speedHtml = '<span class="badge warn mini" style="display:inline-flex;align-items:center;gap:4px;font-size:11px"><span class="spin">⟳</span> 测速中...</span>';
+    } else if(benchRes && benchRes.speed != null){
+      speedHtml = '<div style="display:inline-flex;flex-direction:column;align-items:center;gap:2px">'
+        + '<span class="badge ok" style="font-weight:700;font-size:11px;background:rgba(38,187,130,.15);color:#26bb82">⚡ ' + benchRes.speed + ' tok/s</span>'
+        + '<span style="font-size:10px;color:var(--dim)">' + (benchRes.ttft != null ? ('TTFT ' + benchRes.ttft + 'ms') : '') + ' · <a href="javascript:void(0)" data-model="' + esc(m.id) + '" onclick="benchmarkTraeModel(this.dataset.model, this)" style="color:var(--accent);text-decoration:none">重测</a></span>'
+        + '</div>';
+    } else if(benchRes && benchRes.error){
+      speedHtml = '<div style="display:inline-flex;flex-direction:column;align-items:center;gap:2px">'
+        + '<span class="badge bad mini" title="' + esc(benchRes.error) + '">测速失败</span>'
+        + '<span style="font-size:10px"><a href="javascript:void(0)" data-model="' + esc(m.id) + '" onclick="benchmarkTraeModel(this.dataset.model, this)" style="color:var(--accent);text-decoration:none">重试</a></span>'
+        + '</div>';
+    } else {
+      speedHtml = '<div style="display:inline-flex;align-items:center;gap:4px;justify-content:center">'
+        + '<button class="sec mini" data-model="' + esc(m.id) + '" onclick="benchmarkTraeModel(this.dataset.model, this)" style="padding:2px 8px;font-size:11px;font-weight:600;color:var(--accent);border-color:rgba(37,99,235,.3)">⚡ 测速</button>'
+        + '</div>';
+    }
+
     return '<tr' + (isFree ? ' class="tr-free"' : '') + '>'
       + '<td style="text-align:center" data-label="消费积分">' + rateBadge + '</td>'
       + '<td style="text-align:left" class="mono" data-label="模型 ID">' + idHtml + '</td>'
@@ -5503,8 +5843,423 @@ function renderTraeModels(models){
       + '<td style="text-align:center" data-label="上下文">' + ctx + '</td>'
       + '<td style="text-align:center" data-label="最大输出">' + maxOut + '</td>'
       + '<td style="text-align:left" data-label="通道与调度">' + channelBadge + '</td>'
+      + '<td style="text-align:center" data-label="实测速度">' + speedHtml + '</td>'
       + '</tr>';
   }).join('');
+}
+
+async function benchmarkTraeModel(modelId, btn){
+  if(!modelId) return;
+  const benchKey = 'trae:' + modelId;
+  window.BENCHMARK_RESULTS = window.BENCHMARK_RESULTS || {};
+  window.BENCHMARK_RESULTS[benchKey] = { loading: true };
+  window.BENCHMARK_RESULTS['trae-' + modelId] = window.BENCHMARK_RESULTS[benchKey];
+  window.BENCHMARK_RESULTS[modelId] = window.BENCHMARK_RESULTS[benchKey];
+  renderTraeModels(window.LAST_TRAE_MODELS);
+
+  const startTime = performance.now();
+  let firstTokenTime = null;
+  let replyText = '';
+  let completionTokens = 0;
+
+  try {
+    const rawId = modelId.replace(/^trae-/, '');
+    const reqModel = 'trae-' + rawId;
+    const resp = await fetch('/v1/chat/completions', {
+      method: 'POST',
+      headers: authHeaders({
+        'Content-Type': 'application/json'
+      }),
+      body: JSON.stringify({
+        model: reqModel,
+        messages: [{ role: 'user', content: '请用中文一句话输出：1加1等于几？' }],
+        stream: true,
+        stream_options: { include_usage: true },
+        max_tokens: 64,
+        temperature: 0.1
+      })
+    });
+
+    if(!resp.ok){
+      const errText = await resp.text();
+      let msg = 'HTTP ' + resp.status;
+      try {
+        const j = JSON.parse(errText);
+        if(j.error && j.error.message) msg = j.error.message;
+      } catch(_) {}
+      throw new Error(msg);
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+
+    while(true){
+      const { done, value } = await reader.read();
+      if(done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for(const line of lines){
+        const trimmed = line.trim();
+        if(!trimmed || !trimmed.startsWith('data:')) continue;
+        const dataStr = trimmed.slice(5).trim();
+        if(dataStr === '[DONE]') break;
+        try {
+          const parsed = JSON.parse(dataStr);
+          if(parsed.choices && parsed.choices.length > 0){
+            const delta = parsed.choices[0].delta || {};
+            const content = delta.content || delta.reasoning_content || '';
+            if(content){
+              if(firstTokenTime === null) firstTokenTime = performance.now();
+              replyText += content;
+            }
+          }
+          if(parsed.usage && parsed.usage.completion_tokens){
+            completionTokens = parsed.usage.completion_tokens;
+          }
+        } catch(_) {}
+      }
+    }
+
+    const endTime = performance.now();
+    const ttftMs = firstTokenTime !== null ? Math.round(firstTokenTime - startTime) : Math.round(endTime - startTime);
+    const genSec = (firstTokenTime !== null ? Math.max(0.1, (endTime - firstTokenTime) / 1000.0) : Math.max(0.1, (endTime - startTime) / 1000.0));
+
+    if(!completionTokens){
+      completionTokens = Math.max(1, Math.round(replyText.length * 1.3));
+    }
+    const speed = Number((completionTokens / genSec).toFixed(1));
+
+    const resultObj = {
+      speed: speed,
+      ttft: ttftMs,
+      tokens: completionTokens,
+      genSec: Number(genSec.toFixed(2)),
+      at: Date.now()
+    };
+    window.BENCHMARK_RESULTS[benchKey] = resultObj;
+    window.BENCHMARK_RESULTS['trae-' + modelId] = resultObj;
+    window.BENCHMARK_RESULTS[modelId] = resultObj;
+    saveBenchResults();
+    toast('Trae 模型 ' + modelId + ' 测速完成：' + speed + ' tok/s (首字 ' + ttftMs + 'ms)', 'ok');
+  } catch(err){
+    console.error('Trae benchmark error for ' + modelId, err);
+    const errObj = {
+      error: err.message || '测速失败',
+      at: Date.now()
+    };
+    window.BENCHMARK_RESULTS[benchKey] = errObj;
+    window.BENCHMARK_RESULTS['trae-' + modelId] = errObj;
+    window.BENCHMARK_RESULTS[modelId] = errObj;
+    toast('Trae 模型 ' + modelId + ' 测速失败: ' + err.message, 'bad');
+  } finally {
+    renderTraeModels(window.LAST_TRAE_MODELS);
+  }
+}
+
+async function benchmarkAllTraeModels(btn){
+  const list = window.LAST_TRAE_MODELS || getFallbackTraeModels();
+  if(!list.length){
+    toast('暂无可用的 Trae 模型', 'warn');
+    return;
+  }
+  if(btn){
+    btn.disabled = true;
+    btn.textContent = '⏳ 正在批量测速...';
+  }
+  for(const m of list){
+    await benchmarkTraeModel(m.id);
+  }
+  if(btn){
+    btn.disabled = false;
+    btn.textContent = '⚡ 批量测速';
+  }
+  toast('Trae 模型批量测速全部完成', 'ok');
+}
+
+async function benchmarkQoderModel(modelId, btn){
+  if(!modelId) return;
+  const benchKey = 'qoder:' + modelId;
+  window.BENCHMARK_RESULTS = window.BENCHMARK_RESULTS || {};
+  window.BENCHMARK_RESULTS[benchKey] = { loading: true };
+  window.BENCHMARK_RESULTS[modelId] = window.BENCHMARK_RESULTS[benchKey];
+  renderQoderModelsTable(window.LAST_QODER_MODELS);
+
+  const startTime = performance.now();
+  let firstTokenTime = null;
+  let replyText = '';
+  let completionTokens = 0;
+
+  try {
+    const resp = await fetch('/qoder/v1/chat/completions', {
+      method: 'POST',
+      headers: authHeaders({
+        'Content-Type': 'application/json'
+      }),
+      body: JSON.stringify({
+        model: modelId,
+        messages: [{ role: 'user', content: '请用中文一句话输出：1加1等于几？' }],
+        stream: true,
+        stream_options: { include_usage: true },
+        max_tokens: 64,
+        temperature: 0.1
+      })
+    });
+
+    if(!resp.ok){
+      const errText = await resp.text();
+      let msg = 'HTTP ' + resp.status;
+      try {
+        const j = JSON.parse(errText);
+        if(j.error && j.error.message) msg = j.error.message;
+      } catch(_) {}
+      throw new Error(msg);
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+
+    while(true){
+      const { done, value } = await reader.read();
+      if(done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for(const line of lines){
+        const trimmed = line.trim();
+        if(!trimmed || !trimmed.startsWith('data:')) continue;
+        const dataStr = trimmed.slice(5).trim();
+        if(dataStr === '[DONE]') break;
+        try {
+          const parsed = JSON.parse(dataStr);
+          if(parsed.choices && parsed.choices.length > 0){
+            const delta = parsed.choices[0].delta || {};
+            const content = delta.content || delta.reasoning_content || '';
+            if(content){
+              if(firstTokenTime === null) firstTokenTime = performance.now();
+              replyText += content;
+            }
+          }
+          if(parsed.usage && parsed.usage.completion_tokens){
+            completionTokens = parsed.usage.completion_tokens;
+          }
+        } catch(_) {}
+      }
+    }
+
+    const endTime = performance.now();
+    const ttftMs = firstTokenTime !== null ? Math.round(firstTokenTime - startTime) : Math.round(endTime - startTime);
+    const genSec = (firstTokenTime !== null ? Math.max(0.1, (endTime - firstTokenTime) / 1000.0) : Math.max(0.1, (endTime - startTime) / 1000.0));
+
+    if(!completionTokens){
+      completionTokens = Math.max(1, Math.round(replyText.length * 1.3));
+    }
+    const speed = Number((completionTokens / genSec).toFixed(1));
+
+    const resultObj = {
+      speed: speed,
+      ttft: ttftMs,
+      tokens: completionTokens,
+      genSec: Number(genSec.toFixed(2)),
+      at: Date.now()
+    };
+    window.BENCHMARK_RESULTS[benchKey] = resultObj;
+    window.BENCHMARK_RESULTS[modelId] = resultObj;
+    saveBenchResults();
+    toast('Qoder 模型 ' + modelId + ' 测速完成：' + speed + ' tok/s (首字 ' + ttftMs + 'ms)', 'ok');
+  } catch(err){
+    console.error('Qoder benchmark error for ' + modelId, err);
+    const errObj = {
+      error: err.message || '测速失败',
+      at: Date.now()
+    };
+    window.BENCHMARK_RESULTS[benchKey] = errObj;
+    window.BENCHMARK_RESULTS[modelId] = errObj;
+    toast('Qoder 模型 ' + modelId + ' 测速失败: ' + err.message, 'bad');
+  } finally {
+    renderQoderModelsTable(window.LAST_QODER_MODELS);
+  }
+}
+
+async function benchmarkAllQoderModels(btn){
+  const list = window.LAST_QODER_MODELS || getFallbackQoderModels();
+  if(!list.length){
+    toast('暂无可用的 Qoder 模型', 'warn');
+    return;
+  }
+  if(btn){
+    btn.disabled = true;
+    btn.textContent = '⏳ 正在批量测速...';
+  }
+  for(const m of list){
+    await benchmarkQoderModel(m.id);
+  }
+  if(btn){
+    btn.disabled = false;
+    btn.textContent = '⚡ 批量测速';
+  }
+  toast('Qoder 模型批量测速全部完成', 'ok');
+}
+
+async function benchmarkAntigravityModel(modelId, btn){
+  if(!modelId) return null;
+  const resEl = document.getElementById('agBenchmarkResult');
+  if(resEl){
+    resEl.innerHTML = '<span class="badge warn mini" style="display:inline-flex;align-items:center;gap:4px"><span class="spin">⟳</span> 正在测试 ' + esc(modelId) + '...</span>';
+  }
+  if(btn) btn.disabled = true;
+
+  const startTime = performance.now();
+  let firstTokenTime = null;
+  let replyText = '';
+  let completionTokens = 0;
+
+  try {
+    // 优先通过代理路径 /ag/v1/chat/completions；若网络不可达回退至直连 43810
+    let resp;
+    try {
+      resp = await fetch('/ag/v1/chat/completions', {
+        method: 'POST',
+        headers: authHeaders({
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer sk-antigravity'
+        }),
+        body: JSON.stringify({
+          model: modelId,
+          messages: [{ role: 'user', content: 'Say hello in 5 words' }],
+          stream: true,
+          max_tokens: 32
+        })
+      });
+    } catch(fetchErr) {
+      const directUrl = window.location.protocol + '//' + (window.location.hostname || '127.0.0.1') + ':43810/v1/chat/completions';
+      resp = await fetch(directUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer sk-antigravity'
+        },
+        body: JSON.stringify({
+          model: modelId,
+          messages: [{ role: 'user', content: 'Say hello in 5 words' }],
+          stream: true,
+          max_tokens: 32
+        })
+      });
+    }
+
+    if(!resp.ok){
+      const errText = await resp.text();
+      let msg = 'HTTP ' + resp.status;
+      try {
+        const j = JSON.parse(errText);
+        if(j.error && j.error.message) msg = j.error.message;
+      } catch(_) {}
+      throw new Error(msg);
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+
+    while(true){
+      const { done, value } = await reader.read();
+      if(done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for(const line of lines){
+        const trimmed = line.trim();
+        if(!trimmed || !trimmed.startsWith('data:')) continue;
+        const dataStr = trimmed.slice(5).trim();
+        if(dataStr === '[DONE]') break;
+        try {
+          const parsed = JSON.parse(dataStr);
+          if(parsed.choices && parsed.choices.length > 0){
+            const delta = parsed.choices[0].delta || {};
+            const content = delta.content || delta.reasoning_content || '';
+            if(content){
+              if(firstTokenTime === null) firstTokenTime = performance.now();
+              replyText += content;
+            }
+          }
+          if(parsed.usage && parsed.usage.completion_tokens){
+            completionTokens = parsed.usage.completion_tokens;
+          }
+        } catch(_) {}
+      }
+    }
+
+    const endTime = performance.now();
+    const ttftMs = firstTokenTime !== null ? Math.round(firstTokenTime - startTime) : Math.round(endTime - startTime);
+    const genSec = (firstTokenTime !== null ? Math.max(0.1, (endTime - firstTokenTime) / 1000.0) : Math.max(0.1, (endTime - startTime) / 1000.0));
+
+    if(!completionTokens){
+      completionTokens = Math.max(1, Math.round(replyText.length * 1.3));
+    }
+    const speed = Number((completionTokens / genSec).toFixed(1));
+
+    const resultObj = {
+      model: modelId,
+      speed: speed,
+      ttft: ttftMs,
+      tokens: completionTokens,
+      genSec: Number(genSec.toFixed(2)),
+      at: Date.now()
+    };
+    window.BENCHMARK_RESULTS = window.BENCHMARK_RESULTS || {};
+    window.BENCHMARK_RESULTS['antigravity:' + modelId] = resultObj;
+    saveBenchResults();
+
+    if(resEl){
+      resEl.innerHTML = '<span class="mono" style="color:var(--accent);font-weight:600">' + esc(modelId) + '</span>: '
+        + '<span class="badge ok" style="font-weight:700;background:rgba(38,187,130,.15);color:#26bb82">⚡ ' + speed + ' tok/s</span> '
+        + '<span style="color:var(--dim);font-size:11px">TTFT ' + ttftMs + 'ms · 耗时 ' + resultObj.genSec + 's</span>';
+    }
+    toast('反重力模型 ' + modelId + ' 测速完成：' + speed + ' tok/s (首字 ' + ttftMs + 'ms)', 'ok');
+    return resultObj;
+  } catch(err){
+    console.error('Antigravity benchmark error for ' + modelId, err);
+    if(resEl){
+      resEl.innerHTML = '<span class="badge bad mini" title="' + esc(err.message) + '">测速失败: ' + esc(err.message) + '</span>';
+    }
+    toast('反重力模型 ' + modelId + ' 测速失败: ' + err.message, 'bad');
+    return null;
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function benchmarkAntigravitySelected(btn){
+  const sel = document.getElementById('agBenchmarkModelSelect');
+  const modelId = sel ? sel.value : 'gemini-2.5-flash';
+  await benchmarkAntigravityModel(modelId, btn);
+}
+
+async function benchmarkAllAntigravityModels(btn){
+  const models = ['gemini-2.5-flash', 'gemini-2.5-pro', 'claude-3-7-sonnet', 'claude-3-5-sonnet'];
+  if(btn){
+    btn.disabled = true;
+    btn.textContent = '⏳ 正在批量测速...';
+  }
+  const results = [];
+  for(const mid of models){
+    const r = await benchmarkAntigravityModel(mid, null);
+    if(r) results.push(r);
+  }
+  if(btn){
+    btn.disabled = false;
+    btn.textContent = '⚡ 常用模型一键全测';
+  }
+  const resEl = document.getElementById('agBenchmarkResult');
+  if(resEl && results.length){
+    resEl.innerHTML = results.map(r =>
+      '<span class="badge ok" style="font-size:11px;background:rgba(38,187,130,.15);color:#26bb82" title="TTFT ' + r.ttft + 'ms">' + esc(r.model) + ' ⚡ ' + r.speed + 't/s</span>'
+    ).join(' ');
+  }
+  toast('反重力常用模型测速完成 (测试了 ' + results.length + ' 个模型)', 'ok');
 }
 
 window.addEventListener('load', () => { loadTraeToken(); loadTraeModels(); });

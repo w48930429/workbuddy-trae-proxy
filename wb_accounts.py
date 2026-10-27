@@ -10,7 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from wb_fingerprint import derive_id, generate_request_id
+from wb_fingerprint import derive_id, generate_request_id, session_id
 import wb_identity
 import wb_settings
 import wb_webagent
@@ -40,6 +40,11 @@ DAILY_CHAT_MODEL = "deepseek-v4.1-flash"
 DAILY_CHAT_WEB_PROMPT = "Hi"
 #: 网页通道一轮最多等多久（秒）。实测一次「Hi」十几秒就跑完，留足余量。
 WEB_TURN_TIMEOUT = int(os.environ.get("WB_WEB_TURN_TIMEOUT") or "120")
+# 上游账号级风控限制（403 / code 11140「账号存在异常行为，已被限制使用」）的
+# 冷却时长。官方工单口径是「临时风控 1-3 个工作日自动解除」，期间官方客户端
+# 同样报这个错；取 2 小时作第一档，到期再试一次即可。与普通冷却不同，这个
+# 期限会落盘（restrictedUntil），重启/换身分/刷新 token 都不能绕过。
+RESTRICTED_ACCOUNT_COOLDOWN = 7200.0
 
 
 def _retryable(exc):
@@ -123,8 +128,8 @@ REALM_CONFIGS = {
         "billing_upstream": "https://www.workbuddy.ai",
         "origin": "https://www.workbuddy.ai",
         "domain": "www.workbuddy.ai",
-        "chat_ua": "WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2",
-        "billing_ua": "WorkBuddy/5.5.2",
+        "chat_ua": wb_identity.DESKTOP_UA_INTL,
+        "billing_ua": "WorkBuddy/%s" % wb_identity.DESKTOP_VERSION_INTL,
         "info_filename": "workbuddy-desktop-ai.info",
         "cache_dir_name": ".workbuddy-ai",
         "has_checkin": False,
@@ -135,8 +140,8 @@ REALM_CONFIGS = {
         "billing_upstream": "https://www.codebuddy.cn",
         "origin": "https://www.codebuddy.cn",
         "domain": "copilot.tencent.com",
-        "chat_ua": "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1",
-        "billing_ua": "WorkBuddy/5.5.6",
+        "chat_ua": wb_identity.DESKTOP_UA_CN,
+        "billing_ua": "WorkBuddy/%s" % wb_identity.DESKTOP_VERSION_CN,
         "info_filename": "workbuddy-desktop.info",
         "cache_dir_name": ".workbuddy",
         "has_checkin": True,
@@ -148,12 +153,16 @@ AUTH_TOKEN_PATH = "/v2/plugin/auth/token"
 LOGIN_ACCOUNT_PATH = "/v2/plugin/login/account"
 REFRESH_PATH = "/v2/plugin/auth/token/refresh"
 CHECKIN_PATH = "/v2/billing/meter/daily-checkin"
+COMPENSATION_STATUS_PATH = "/billing/meter/compensation-status"
+CLAIM_COMPENSATION_PATH = "/billing/meter/claim-compensation"
+CHECK_GIFT_PATH = "/billing/meter/check-gift-claimed"
+CLAIM_GIFT_PATH = "/billing/meter/claim-gift"
 GET_RESOURCE_PATH = "/v2/billing/meter/get-user-resource"
 
 LOGIN_PENDING = 11217
 LOGIN_TTL_SECONDS = 600
 USER_AGENT = REALM_CONFIGS['intl']['chat_ua']
-DEFAULT_UA_VERSION = '5.5.2'
+DEFAULT_UA_VERSION = wb_identity.DESKTOP_VERSION_INTL
 
 def get_realm_config(realm):
     return REALM_CONFIGS.get(realm) or REALM_CONFIGS["intl"]
@@ -233,6 +242,16 @@ class Account(object):
         self.enabled = data.get("enabled", True)
         self.last_error = str(data.get("lastError") or "")
         self.cooldown_until = float(data.get("cooldownUntil") or 0)
+        # 上游账号级风控限制（HTTP 403 / code 11140「账号存在异常行为，已被限制
+        # 使用」）的解除时刻。与普通冷却不同，这个期限**持久化**：上游的限制按
+        # 小时到工作日计，网关重启 / 换身分 / 刷新 token 都不能让它重新入池，
+        # 否则同一台设备上的其它账号会被一个个送进风控（见 note_restricted）。
+        try:
+            self.restricted_until = max(0.0, float(data.get("restrictedUntil") or 0))
+        except (TypeError, ValueError):
+            self.restricted_until = 0.0
+        # 运行时详情（不落盘），面板悬停时显示上游原文。
+        self.restricted_detail = ""
         # Per-model throttling. Upstream rate limits (code 6004 "usage exceeds
         # frequency limit") apply to ONE model for one account, not to the whole
         # account: other models keep working. Cooldown the offending model only,
@@ -287,6 +306,7 @@ class Account(object):
             "enabled": self.enabled,
             "lastError": self.last_error,
             "cooldownUntil": self.cooldown_until,
+            "restrictedUntil": self.restricted_until,
             "credits": self.credits,
             "lastCheckin": self.last_checkin,
             "lastDailyChat": self.last_daily_chat,
@@ -329,6 +349,11 @@ class Account(object):
             "lastError": last_error,
             "inCooldown": deadline > now,
             "cooldownFor": round(max(0.0, deadline - now)) or None,
+            "restrictedUntil": int(self.restricted_until or 0),
+            "restricted": bool(self.restricted_until > now),
+            "restrictedFor": (round(self.restricted_until - now)
+                              if self.restricted_until > now else None),
+            "restrictedDetail": self.restricted_detail,
             "modelCooldowns": models,
             "addedAt": self.added_at,
             "file": os.path.basename(self.path) if self.path else None,
@@ -345,7 +370,7 @@ class Account(object):
             "canCheckin": self.realm == "cn",
             "canDailyChat": self.realm == "intl",
             "machineId": derive_id(self.uid, "machine"),
-            "sessionId": derive_id(self.uid, "session"),
+            "sessionId": session_id(self.uid),
         }
 
     def save(self, directory):
@@ -451,6 +476,15 @@ class Account(object):
 
         chat 用途走 wb_identity（CLI 頭 / WorkBuddy 頭，可切換）；
         billing 用途維持原本的輕量標頭，計費端點不吃那套身分。
+
+        chat 标头按 5.8.4 抓包对齐：官方对话请求不带 X-Machine-ID /
+        X-Session-ID（那两个只用于反馈上报），所以这里也不再发——之前发的
+        是每个账号恒定的派生值，反而是一处「网关特征」。
+
+        billing 标头仍带 X-Machine-ID / X-Session-ID，但两个都必须按账号派生：
+        网关是一个进程冒充几十台设备，一旦取进程级的值，全部账号就会共用同一个
+        session id，那是一条把它们串起来的关联键（与每账号一台设备的隔离口径
+        相悖）。见 wb_fingerprint.session_id。
         """
         cfg = get_realm_config(self.realm)
 
@@ -469,7 +503,7 @@ class Account(object):
                 "Accept-Language": "en-US" if self.realm == "intl" else "zh-CN",
                 "X-Request-ID": generate_request_id(self.uid),
                 "X-Machine-ID": derive_id(self.uid, "machine"),
-                "X-Session-ID": derive_id(self.uid, "session"),
+                "X-Session-ID": session_id(self.uid),
             }
             if self.enterprise_id:
                 headers["X-Enterprise-Id"] = self.enterprise_id
@@ -485,7 +519,6 @@ class Account(object):
             realm=self.realm,
             uid=self.uid,
             token=self.access_token,
-            conversation_id=getattr(self, "conversation_id", None),
             enterprise_id=self.enterprise_id,
             tenant_id=self.enterprise_id,
         )
@@ -497,8 +530,6 @@ class Account(object):
             "Referer": cfg["origin"] + "/",
             "X-CodeBuddy-Request": "1",
             "Accept-Language": "en-US" if self.realm == "intl" else "zh-CN",
-            "X-Machine-ID": derive_id(self.uid, "machine"),
-            "X-Session-ID": derive_id(self.uid, "session"),
         }
         headers.update(identity)
         return headers
@@ -693,6 +724,11 @@ class Account(object):
         """
         if self.realm != "intl":
             return {"ok": False, "error": "daily chat is only for international accounts"}
+        if getattr(self, "restricted_until", 0) > time.time():
+            left = int(self.restricted_until - time.time())
+            return {"ok": False, "restricted": True,
+                    "error": "账号被上游风控限制（403 / code 11140），剩余 %ds，"
+                             "解封前不再重试" % left}
         import wb_proxy
         url = self.chat_base_url() + wb_proxy.CHAT_PATH
         headers = self.headers("chat")
@@ -735,7 +771,87 @@ class Account(object):
                 err = exc.read().decode("utf-8", "replace")
             except Exception:
                 err = str(exc)
+            import wb_proxy
+            if exc.code == 403 and wb_proxy.restriction_is_account_level(err):
+                self.note_restricted(detail=err)
+                if self.path and os.path.exists(os.path.dirname(self.path)):
+                    self.save(os.path.dirname(self.path))
+                return {"ok": False, "restricted": True,
+                        "error": "账号被上游风控限制（403 / code 11140）："
+                                 "账号存在异常行为，已被限制使用，请申诉或等待解封"}
             return {"ok": False, "error": f"HTTP {exc.code}: {err[:100]}"}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def claim_compensation(self):
+        """领取官方加赠/补偿积分（例如 500 积分活动）。"""
+        if self.realm != "cn":
+            return {"ok": False, "error": "compensation claim is only available for CN realm accounts"}
+        cfg = get_realm_config("cn")
+        headers = self.headers(purpose="billing")
+        headers["Content-Type"] = "application/json"
+        status_url = cfg["billing_upstream"] + COMPENSATION_STATUS_PATH
+        try:
+            status_res = http_json(status_url, data=b"{}", method="POST", headers=headers,
+                                   timeout=15, proxy=self.proxy)
+            data = status_res.get("data") or {}
+            if not data.get("active"):
+                return {"ok": True, "claimed": False, "active": False, "msg": "活动未开启"}
+            if data.get("claimed"):
+                return {"ok": True, "claimed": True, "already": True, "credit": data.get("credit_num", 500), "msg": "已领取过加赠积分"}
+
+            claim_url = cfg["billing_upstream"] + CLAIM_COMPENSATION_PATH
+            claim_res = http_json(claim_url, data=b"{}", method="POST", headers=headers,
+                                  timeout=15, proxy=self.proxy)
+            code = claim_res.get("code", -1)
+            if code == 0:
+                credit = data.get("credit_num", 500)
+                return {"ok": True, "claimed": True, "credit": credit, "msg": f"成功领取 {credit} 加赠积分"}
+            return {"ok": False, "code": code, "error": claim_res.get("msg") or "领取加赠积分失败"}
+        except urllib.error.HTTPError as exc:
+            try:
+                body = json.loads(exc.read().decode("utf-8") or "{}")
+                if body.get("code") == 10001:
+                    return {"ok": True, "claimed": True, "already": True, "msg": body.get("msg") or "已领取过"}
+                return {"ok": False, "error": body.get("msg") or f"HTTP {exc.code}"}
+            except Exception:
+                return {"ok": False, "error": f"HTTP {exc.code}"}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def claim_gift(self):
+        """领取官方权益礼包（例如 1500 积分拉新/新手活动）。"""
+        if self.realm != "cn":
+            return {"ok": False, "error": "gift claim is only available for CN realm accounts"}
+        cfg = get_realm_config("cn")
+        headers = self.headers(purpose="billing")
+        headers["Content-Type"] = "application/json"
+        status_url = cfg["billing_upstream"] + CHECK_GIFT_PATH
+        try:
+            status_res = http_json(status_url, data=b"{}", method="POST", headers=headers,
+                                   timeout=15, proxy=self.proxy)
+            data = status_res.get("data") or {}
+            if not data.get("active"):
+                return {"ok": True, "claimed": False, "active": False, "msg": "礼包活动未开启"}
+            if data.get("claimed"):
+                return {"ok": True, "claimed": True, "already": True, "credit": data.get("credit_num", 1500), "msg": "已领取过权益礼包"}
+
+            claim_url = cfg["billing_upstream"] + CLAIM_GIFT_PATH
+            claim_res = http_json(claim_url, data=b"{}", method="POST", headers=headers,
+                                  timeout=15, proxy=self.proxy)
+            code = claim_res.get("code", -1)
+            if code == 0:
+                credit = data.get("credit_num", 1500)
+                return {"ok": True, "claimed": True, "credit": credit, "msg": f"成功领取 {credit} 权益礼包"}
+            return {"ok": False, "code": code, "error": claim_res.get("msg") or "领取礼包失败"}
+        except urllib.error.HTTPError as exc:
+            try:
+                body = json.loads(exc.read().decode("utf-8") or "{}")
+                if body.get("code") == 10001:
+                    return {"ok": True, "claimed": True, "already": True, "msg": body.get("msg") or "已领取过"}
+                return {"ok": False, "error": body.get("msg") or f"HTTP {exc.code}"}
+            except Exception:
+                return {"ok": False, "error": f"HTTP {exc.code}"}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
@@ -753,15 +869,50 @@ class Account(object):
             self.last_checkin = time.strftime("%Y-%m-%d %H:%M:%S")
             if self.path and os.path.exists(os.path.dirname(self.path)):
                 self.save(os.path.dirname(self.path))
-            return {"ok": (code == 0 or code == 10001), "code": code, "msg": msg, "data": payload.get("data")}
+            result = {"ok": (code == 0 or code == 10001), "code": code, "msg": msg, "data": payload.get("data")}
         except urllib.error.HTTPError as exc:
             try:
                 body = json.loads(exc.read().decode("utf-8") or "{}")
-                return {"ok": False, "error": body.get("msg") or ("HTTP %d" % exc.code)}
+                code = body.get("code", -1)
+                msg = body.get("msg") or ("HTTP %d" % exc.code)
+                is_already = (code == 10001) or ("已签到" in msg)
+                result = {"ok": is_already, "code": code, "msg": msg, "data": body.get("data")}
+                if is_already:
+                    self.last_checkin = time.strftime("%Y-%m-%d %H:%M:%S")
+                    if self.path and os.path.exists(os.path.dirname(self.path)):
+                        self.save(os.path.dirname(self.path))
             except Exception:
-                return {"ok": False, "error": "HTTP %d" % exc.code}
+                result = {"ok": False, "error": "HTTP %d" % exc.code}
         except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+            result = {"ok": False, "error": str(exc)}
+
+        # 顺带检查并自动领取额外的官方福利/活动积分（如 500 积分补偿包、1500 积分权益包）
+        extra_rewards = []
+        try:
+            comp = self.claim_compensation()
+            if comp.get("ok") and comp.get("claimed") and not comp.get("already"):
+                extra_rewards.append(comp.get("msg"))
+        except Exception:
+            pass
+
+        try:
+            gift = self.claim_gift()
+            if gift.get("ok") and gift.get("claimed") and not gift.get("already"):
+                extra_rewards.append(gift.get("msg"))
+        except Exception:
+            pass
+
+        if extra_rewards:
+            reward_note = "（额外获得：" + "，".join(extra_rewards) + "）"
+            base_msg = result.get("msg") or ("签到成功" if result.get("ok") else "签到完成")
+            result["msg"] = base_msg + reward_note
+            result["extra_rewards"] = extra_rewards
+            result["ok"] = True
+            try:
+                self.fetch_credits()
+            except Exception:
+                pass
+        return result
 
     def fetch_credits(self):
         cfg = get_realm_config(self.realm)
@@ -837,10 +988,36 @@ class Account(object):
             return 0.0
         now = time.time()
         with self._throttle_lock:
-            wait = max(0.0, self.cooldown_until - now)
+            wait = max(0.0, self.cooldown_until - now,
+                       self.restricted_until - now)
             if model:
                 wait = max(wait, max(0.0, self.model_cooldowns.get(model, 0.0) - now))
         return wait
+
+    def note_restricted(self, detail="", cooldown=None):
+        """上游账号级风控限制（403 / code 11140）：按小时冷却并持久化。
+
+        与普通冷却的区别：
+        - 固定 2 小时（可用 cooldown 覆盖），不吃 single_account 的 3 秒兜底；
+        - 落盘到 restrictedUntil：重启 / 刷新 token / 换身分 / 一键测试都不会
+          把它放回池子，只有真正成功一次（上游已解除）才清；
+        - 反复命中不延长第一次的期限，避免探测把窗口越推越长。
+        """
+        now = time.time()
+        wait = (RESTRICTED_ACCOUNT_COOLDOWN if cooldown is None
+                else float(cooldown))
+        with self._throttle_lock:
+            self.last_error = "HTTP 403 (account restricted)"
+            self.restricted_detail = str(detail or "")[:2000]
+            if self.restricted_until <= now:
+                self.restricted_until = now + max(1.0, wait)
+        return self.restricted_until
+
+    def clear_restriction(self):
+        """Clear the upstream restriction after a request actually succeeds."""
+        with self._throttle_lock:
+            self.restricted_until = 0.0
+            self.restricted_detail = ""
 
     def clear_error(self, model=None):
         with self._throttle_lock:

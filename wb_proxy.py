@@ -200,13 +200,6 @@ def _qoder_fallback_enabled() -> bool:
     except Exception:
         return False
 
-def _is_qoder_model(model: str) -> bool:
-    """Check if a model should be routed to Qoder."""
-    if not model:
-        return False
-    prefix = (PROXY_CONFIG.get("upstreams") or {}).get("qoder", {}).get("model_prefix", "qoder-")
-    return model.startswith(prefix)
-
 def try_qoder_failover(payload: dict, want_stream: bool = False) -> tuple:
     """Attempt request via Qoder when WorkBuddy+Trae both fail.
 
@@ -243,10 +236,16 @@ def port_owner_hint(port):
         return "netstat -ano | findstr :%d" % port
     return "lsof -nP -iTCP:%d -sTCP:LISTEN" % port
 CURRENT_REALM = os.environ.get("WB_PROXY_DEFAULT_REALM", "intl")
+#: Models both exits serve although their family prefix is domestic-only.
+#: intl's /v3/config lists minimax-m3.1-flash (2026-10-20), so the "minimax-"
+#: rule must not pin it to cn - the rest of the family stays cn-only.
+DUAL_REALM_MODELS = {"minimax-m3.1-flash"}
 def detect_model_realm(model_id):
     if not model_id:
         return CURRENT_REALM
     m = str(model_id).lower()
+    if m in DUAL_REALM_MODELS:
+        return CURRENT_REALM
     intl_only = {
         "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
         "gpt-5.5", "gpt-5.4", "gpt-5.3-codex", "gemini-3.5-flash",
@@ -287,6 +286,8 @@ def exclusive_realm(model_id):
     if not model_id:
         return ""
     m = str(model_id).lower()
+    if m in DUAL_REALM_MODELS:
+        return ""
     if m in INTL_EXCLUSIVE or m.startswith(INTL_EXCLUSIVE_PREFIXES):
         return "intl"
     if m in CN_EXCLUSIVE or m.startswith(CN_EXCLUSIVE_PREFIXES):
@@ -3549,6 +3550,118 @@ def parse_rate_limit_reset(detail):
         return None
 
 
+# ---------------------------------------------------------------------------
+# 上游账号级风控限制（403 / code 11140）
+#
+# 实测正文：{"code":11140,"msg":"request illegal","displayMsg":{
+#   "en":"Your account has been restricted due to unusual activity",
+#   "zh":"账号存在异常行为，已被限制使用"}}
+#
+# 这是账号级标记，不是内容审核：同一请求换账号、换身分、刷新 token 都无效。
+# 社区复盘给出的红线是「看到 11140 立即停手，解封前严禁换号继续打同一台设备」，
+# 否则设备指纹会连坐。旧实现冷却该号后立刻换下一个号继续同一请求，一个请求
+# 能遍历整个池子。这里的默认策略：冷却并持久化该号、默认不再换号；同一窗口内
+# 多个账号被限制时整池暂停，期间一个上游请求都不发。
+#
+#   WB_RESTRICTED_403_ROTATE_MAX  一次请求最多再换几个号（默认 0 = 不换）
+#   WB_RESTRICTION_WAVE_MIN       窗口内几个号被限制就整池暂停（默认 2）
+#   WB_RESTRICTION_WAVE_WINDOW    连坐判定的时间窗，秒（默认 900）
+#   WB_RESTRICTION_HOLD_SECONDS   整池暂停时长，秒（默认 1800；0 = 关闭暂停）
+# ---------------------------------------------------------------------------
+def _env_number(name, default, cast=float):
+    try:
+        return max(0, cast(os.environ.get(name) or default))
+    except (TypeError, ValueError):
+        return default
+
+
+RESTRICTED_403_COOLDOWN = wb_accounts.RESTRICTED_ACCOUNT_COOLDOWN
+RESTRICTED_403_ROTATE_MAX = int(_env_number("WB_RESTRICTED_403_ROTATE_MAX", 0, int))
+RESTRICTION_WAVE_MIN = max(1, int(_env_number("WB_RESTRICTION_WAVE_MIN", 2, int)))
+RESTRICTION_WAVE_WINDOW = _env_number("WB_RESTRICTION_WAVE_WINDOW", 900.0)
+RESTRICTION_HOLD_SECONDS = _env_number("WB_RESTRICTION_HOLD_SECONDS", 1800.0)
+
+_RESTRICTION_LOCK = threading.Lock()
+_RESTRICTION_EVENTS = {}   # realm -> {uid: epoch}
+_RESTRICTION_HOLD = {}     # realm -> 暂停到哪个 epoch
+
+
+def reset_restriction_state():
+    """清空连坐保护状态（测试，以及人工确认「已申诉、可以恢复派发」时用）。"""
+    with _RESTRICTION_LOCK:
+        _RESTRICTION_EVENTS.clear()
+        _RESTRICTION_HOLD.clear()
+
+
+def restriction_hold_remaining(realm, now=None):
+    """该区域整池暂停还剩多少秒（0 = 没有暂停）。"""
+    now = time.time() if now is None else now
+    with _RESTRICTION_LOCK:
+        return max(0.0, _RESTRICTION_HOLD.get(realm, 0.0) - now)
+
+
+def note_account_restriction(realm, uid="", now=None):
+    """记一次账号级风控限制；返回整池暂停的到期 epoch（0 = 尚未触发）。
+
+    同一窗口内达到 RESTRICTION_WAVE_MIN 个不同账号被限制，就认为上游在按设备/
+    出口做连坐清扫：把整个区域暂停 RESTRICTION_HOLD_SECONDS，期间不再向上游
+    发任何请求。按 uid 去重，同一个号反复探测不会把暂停骗出来。
+    """
+    now = time.time() if now is None else now
+    uid = str(uid or "").strip() or "-"
+    with _RESTRICTION_LOCK:
+        events = {key: at for key, at in _RESTRICTION_EVENTS.get(realm, {}).items()
+                  if now - at <= RESTRICTION_WAVE_WINDOW}
+        events[uid] = now
+        _RESTRICTION_EVENTS[realm] = events
+        if len(events) < RESTRICTION_WAVE_MIN or RESTRICTION_HOLD_SECONDS <= 0:
+            return 0.0
+        until = max(_RESTRICTION_HOLD.get(realm, 0.0),
+                    now + RESTRICTION_HOLD_SECONDS)
+        _RESTRICTION_HOLD[realm] = until
+    log("upstream restriction wave on %s: %d account(s) restricted within %.0fs; "
+        "pausing dispatch for %.0fs to avoid cross-account bans (uid %s)"
+        % (realm, len(events), RESTRICTION_WAVE_WINDOW,
+           RESTRICTION_HOLD_SECONDS, uid[:8]))
+    return until
+
+
+def restriction_hold_message(realm, remaining):
+    """整池暂停期间交给客户端的说明。"""
+    return ("上游风控已限制本区域账号（403 / code 11140，账号存在异常行为）。"
+            "网关已暂停派发 %d 秒，避免继续换号重试导致同设备账号连坐被封。"
+            "请勿换号或高频重试；按 WorkBuddy 官方渠道申诉（通常 1-3 个工作日"
+            "自动解除），解封后再恢复。" % int(remaining))
+
+
+def _persist_restriction(account):
+    """把 restrictedUntil 落盘；失败只记日志，不影响请求路径。"""
+    try:
+        path = getattr(account, "path", "") or ""
+        if path:
+            account.save(os.path.dirname(path))
+    except Exception as exc:
+        log("account %s: restriction not persisted: %s"
+            % ((getattr(account, "uid", "") or "?")[:8], exc))
+
+
+#: 识别风控限制 403 的正文特征。内容审核的 403 走原路径，二者必须分开：
+#: 对被限制的账号换提示词/换号都没有意义。code 用正则匹配（requestId 是 hex，
+#: 裸字符串 "11140" 可能撞上）。
+_RESTRICTED_403_CODE_RE = re.compile(r'"code"\s*:\s*"?11140"?')
+_RESTRICTION_403_MARKERS = ("unusual activity", "账号存在异常行为", "已被限制")
+
+
+def restriction_is_account_level(detail):
+    """True when a 403 body says the ACCOUNT is restricted, not the content."""
+    if not detail:
+        return False
+    if _RESTRICTED_403_CODE_RE.search(detail):
+        return True
+    lowered = detail.lower()
+    return any(marker in lowered for marker in _RESTRICTION_403_MARKERS)
+
+
 def open_upstream(payload, session_key=None, target_realm=None):
     # Refresh the daily token guard before picking. The scan underneath is
     # incremental and TTL-cached, so this is a stat() plus a cached dict on
@@ -3557,6 +3670,13 @@ def open_upstream(payload, session_key=None, target_realm=None):
     apply_daily_token_limit()
     realm = target_realm or detect_model_realm(payload.get("model")) or CURRENT_REALM
     model = str(payload.get("model") or "")
+    # 连坐保护：同一区域刚有账号被上游风控限制，整池暂停派发。这里直接快速
+    # 失败、一个上游请求都不发——继续打只会把同一台设备上的其他账号也送走。
+    hold = restriction_hold_remaining(realm)
+    if hold > 0:
+        raise RateLimited(None, "upstream account restriction in effect",
+                          wait=int(hold) + 1,
+                          message=restriction_hold_message(realm, hold))
     upstream_body = build_upstream_body(payload)
     # PATCHED-BY-OPS: 客户端未提供会话标识时，用对话稳定前缀兜底。
     # 位置放在 build_upstream_body 之后，保证键与真正发往上游的消息一致
@@ -3573,6 +3693,7 @@ def open_upstream(payload, session_key=None, target_realm=None):
     last_429 = None
     last_429_detail = ""
     last_403_detail = ""
+    restricted_rotations = 0
     transient_hits = 0
     # Read once per request, not per attempt: this is a panel setting, and a
     # settings read on every retry would be pure overhead.
@@ -3602,11 +3723,17 @@ def open_upstream(payload, session_key=None, target_realm=None):
         else:
             attempt_body = upstream_body
         attempt_data = json.dumps(attempt_body, ensure_ascii=False).encode("utf-8")
+        # 会话头族（X-Conversation-ID 等）由身分构造里每次请求现生成：上游不拿
+        # 这个 id 存历史，不需要按会话复用；缺了它上游的渠道校验会回 400 /
+        # code 11-128（`conversation id missing`），补的是「有」而不是「稳定」。
         req = urllib.request.Request(chat_url, data=attempt_data, method="POST",
                                      headers=account.headers(purpose="chat"))
         try:
             resp = wb_accounts.urlopen(req, timeout=600, proxy=account.proxy)
             account.clear_error(model=model)
+            # 真正成功一次才说明上游已解除限制；这里清掉持久化标记。
+            if getattr(account, "restricted_until", 0):
+                account.clear_restriction()
             reset_switch_counter(account, model)
             return resp, account
         except urllib.error.HTTPError as exc:
@@ -3642,9 +3769,28 @@ def open_upstream(payload, session_key=None, target_realm=None):
                 continue
             if exc.code == 403:
                 try:
-                    detail = exc.read(400).decode("utf-8", "replace")
+                    detail = exc.read(600).decode("utf-8", "replace")
                 except Exception:
                     detail = ""
+                # 风控限制 403 与内容审核 403 分流：前者是账号级的坏，换提示词
+                # 救不了。按社区复盘红线处理：冷却并持久化该号，默认停手，
+                # 不再把同一请求换到下一个号继续打（设备指纹会连坐）。
+                if restriction_is_account_level(detail):
+                    account.note_restricted(detail=detail,
+                                            cooldown=RESTRICTED_403_COOLDOWN)
+                    _persist_restriction(account)
+                    log("account %s restricted by upstream (403 11140), "
+                        "cooling %.0fs (persisted)" % (account.uid[:8],
+                                                       RESTRICTED_403_COOLDOWN))
+                    if session_key and POOL:
+                        POOL.affinity.unbind(session_key)
+                    last_error = exc
+                    last_403_detail = detail
+                    note_account_restriction(realm, account.uid)
+                    if restricted_rotations >= RESTRICTED_403_ROTATE_MAX:
+                        break
+                    restricted_rotations += 1
+                    continue
                 log("upstream 403 for '%s' (content review), passing through" % model)
                 if session_key and POOL:
                     POOL.affinity.unbind(session_key)
@@ -5682,7 +5828,9 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if path.startswith("/settings"):
             return True
-        if path.startswith("/logs") or path.startswith("/trae") or path.startswith("/qoder"):
+        if path.startswith("/logs") or path.startswith("/trae"):
+            return True
+        if path.startswith("/qoder") and not path.startswith("/qoder/v1/"):
             return True
         return False
     def do_OPTIONS(self):
@@ -5749,11 +5897,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_trae(path, {})
         if path == "/qoder/dashboard":
             return self._serve_qoder_dashboard()
+        if path.startswith("/qoder/v1/"):
+            if not self._authorized():
+                return
+            sub = path[len("/qoder"):]
+            if sub in ("/v1/models", "/models"):
+                return self._get_qoder_v1_models()
+            return self._error(404, "not found", "invalid_request_error")
         if path == "/qoder/oauth/poll":
             login_id = query.get("login_id", [""])[0]
             return self._route_qoder_oauth_poll(login_id)
         if path.startswith("/qoder/") and (self._authorized() or self._panel_ok()):
             return self._handle_qoder(path, query)
+        if (path.startswith("/ag/") or path.startswith("/antigravity/")) and (self._authorized() or self._panel_ok()):
+            return self._proxy_to_antigravity("GET")
         return self._error(404, "not found", "invalid_request_error")
     def _get_dashboard(self):
         return self._dashboard()
@@ -6589,6 +6746,14 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             return self._error(500, "qoder models failed: %s" % e)
 
+    def _get_qoder_v1_models(self):
+        """OpenAI-shaped model list for the /qoder/v1 surface."""
+        try:
+            models = qoder_route.qoder_models()
+        except Exception:
+            models = []
+        return self._json(200, {"object": "list", "data": models})
+
     def _route_qoder_quota(self):
         try:
             import qoder_accounts
@@ -6738,7 +6903,10 @@ class Handler(BaseHTTPRequestHandler):
         """Trae 多账号列表（vault + 状态 + 积分）。"""
         try:
             import trae_accounts
-            return self._json(200, {"ok": True, "accounts": trae_accounts.list_accounts()})
+            from urllib.parse import urlparse, parse_qs
+            q = parse_qs(urlparse(self.path).query)
+            force = bool(q.get("refresh") or q.get("force"))
+            return self._json(200, {"ok": True, "accounts": trae_accounts.list_accounts(force=force)})
         except Exception as e:
             return self._error(500, f"trae accounts list failed: {e}")
 
@@ -6784,7 +6952,8 @@ class Handler(BaseHTTPRequestHandler):
             import trae_accounts
             uid = str((self._read_payload() or {}).get("user_id", "") or "")
             if uid:
-                return self._json(200, {"ok": True, "results": trae_accounts.checkin_one(uid)})
+                res = trae_accounts.checkin_one(uid)
+                return self._json(200, {"ok": True, "results": [res]})
             return self._json(200, {"ok": True, "results": trae_accounts.checkin_all()})
         except Exception as e:
             return self._error(500, f"trae checkin failed: {e}")
@@ -7728,6 +7897,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?")[0]
+        qoder_forced = False
+        if path.startswith("/qoder/v1/"):
+            if not self._authorized():
+                return
+            qoder_forced = True
+            path = path[len("/qoder"):]
         if path == "/settings/save":
             if not self._panel_ok():
                 return self._error(401, "panel password required", "invalid_request_error")
@@ -7748,6 +7923,11 @@ class Handler(BaseHTTPRequestHandler):
             if payload is None:
                 return
             return self._route_qoder_oauth_start(payload)
+        if (path.startswith("/ag/") or path.startswith("/antigravity/")) and (self._authorized() or self._panel_ok()):
+            payload = self._payload_or_error()
+            if payload is None:
+                return
+            return self._proxy_to_antigravity("POST", payload)
         if self._is_panel_route(path) and not self._panel_ok():
 
             return self._error(401, "panel password required", "invalid_request_error")
@@ -7784,11 +7964,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(503, "gateway is at its concurrent chat limit "
                                     "(%d in flight); retry shortly" % MAX_CONCURRENT_CHAT)
         try:
-            return self._dispatch_chat_post(path, payload)
+            return self._dispatch_chat_post(path, payload, qoder_forced=qoder_forced)
         finally:
             _chat_slots.release()
 
-    def _dispatch_chat_post(self, path, payload):
+    def _dispatch_chat_post(self, path, payload, qoder_forced=False):
         # 先擋背景請求：Codex 自己發的（記憶整理／環境建議／自動複核）
         # 不算「使用者實際使用」，一律本地拒絕，不碰上游。
         if BLOCK_BACKGROUND_REQUESTS:
@@ -7801,20 +7981,44 @@ class Handler(BaseHTTPRequestHandler):
                     pass
                 return self._error(400, background_request_message(reason),
                                    "invalid_request_error")
-        # Qoder Claude Messages API (/v1/messages)
-        if path in ("/v1/messages", "/messages") and _qoder_enabled():
+        # Qoder Claude Messages API (/qoder/v1/messages)
+        if path in ("/v1/messages", "/messages") and (_qoder_enabled() or qoder_forced):
             return self._route_to_qoder_claude(payload)
-        # Qoder Codex Responses API (/v1/responses with qoder model)
-        if path in ("/v1/responses", "/responses") and _qoder_enabled():
-            model_name = payload.get("model") or ""
-            if _is_qoder_model(model_name):
-                return self._route_to_qoder_codex(payload)
+        # Qoder Codex Responses API (/qoder/v1/responses)
+        if path in ("/v1/responses", "/responses") and qoder_forced:
+            return self._route_to_qoder_codex(payload)
         if path in ("/v1/responses", "/responses"):
             return self._handle_responses(payload)
-        # Qoder 路由：qoder- 前缀的模型直接走 Qoder 上游
+        # Qoder 路由：/qoder/v1/... 路径直接走 Qoder 上游
         model_name = payload.get("model") or ""
-        if _qoder_enabled() and _is_qoder_model(model_name):
+        if _qoder_enabled() and qoder_forced:
             return self._route_to_qoder(payload)
+        # Trae 路由：trae- 前缀的模型直接直通 Trae 账号池
+        if model_name.startswith("trae-"):
+            raw_model = model_name[5:]
+            try:
+                import trae_proxy
+                mapped = trae_proxy.map_model(raw_model) or trae_proxy.map_model(model_name) or raw_model
+                want_stream = bool(payload.get("stream"))
+                trae_payload = dict(payload)
+                trae_payload["model"] = mapped
+                log("trae: direct routing model=%s -> %s (stream=%s)" % (model_name, mapped, want_stream))
+                if want_stream:
+                    if self._try_trae_failover_stream(mapped, trae_payload):
+                        return
+                    return self._error(502, "【Trae 流式请求失败】Trae 账号池调用失败或额度不足。")
+                else:
+                    status, body, usage = trae_proxy.try_trae(mapped, trae_payload)
+                    self.send_response(status if status else 200)
+                    self.send_header("Content-Type", "application/json")
+                    if cors_origin_allowed(self.path):
+                        self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write((body or "").encode("utf-8"))
+                    return
+            except Exception as exc:
+                log("trae direct route error: %s" % exc)
+                return self._error(502, "Trae upstream error: %s" % exc)
         # Diagnostics: what the client actually asked for, and what we forward.
         # Only the knobs that change behaviour are logged - never message text.
         forwarded = build_upstream_body(payload)
@@ -8099,7 +8303,7 @@ class Handler(BaseHTTPRequestHandler):
     def _route_to_qoder(self, payload):
         """Route request to Qoder upstream (streaming + non-streaming)."""
         want_stream = bool(payload.get("stream"))
-        model = payload.get("model") or "qoder-sonnet"
+        model = payload.get("model") or "sonnet"
         t_start = time.time()
         log("qoder: routing model=%s stream=%s" % (model, want_stream))
 
@@ -8122,12 +8326,22 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 status, body = qoder_route.call_qoder(payload, on_delta=on_delta)
                 if status != 200:
+                    # 把上游真正的原因带进流里：客户端拿到 finish_reason:"error"
+                    # 时至少能看到是排队/额度/审核，而不是一个空 error。
+                    err_detail = body
+                    try:
+                        err_detail = (json.loads(body).get("error", {})
+                                      or {}).get("message", body)
+                    except ValueError:
+                        pass
                     err_chunk = {
                         "id": "chatcmpl-err",
                         "object": "chat.completion.chunk",
                         "created": int(time.time()),
                         "model": model,
                         "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+                        "error": {"message": err_detail[:500],
+                                  "type": "upstream_error"},
                     }
                     self.wfile.write(("data: " + json.dumps(err_chunk) + "\n\n").encode("utf-8"))
                 self.wfile.write(b"data: [DONE]\n\n")
@@ -8159,6 +8373,66 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             log("qoder: non-stream error: %s" % exc)
             return self._error(502, "qoder upstream error: %s" % exc)
+
+    def _proxy_to_antigravity(self, method="GET", payload=None):
+        """Forward requests to Antigravity proxy service on 127.0.0.1:43810."""
+        path = self.path.split("?")[0]
+        if path.startswith("/ag/"):
+            target_sub = path[3:]
+        elif path.startswith("/antigravity/"):
+            target_sub = path[12:]
+        else:
+            target_sub = path
+        query_str = ("?" + self.path.split("?", 1)[1]) if "?" in self.path else ""
+        target_url = f"http://127.0.0.1:43810{target_sub}{query_str}"
+
+        headers = {}
+        for k, v in self.headers.items():
+            if k.lower() not in ("host", "content-length"):
+                headers[k] = v
+        if "authorization" not in [k.lower() for k in headers]:
+            headers["Authorization"] = "Bearer sk-antigravity"
+
+        req_data = None
+        if payload is not None:
+            req_data = json.dumps(payload).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+            headers["Content-Length"] = str(len(req_data))
+
+        want_stream = bool(payload and payload.get("stream"))
+        req = urllib.request.Request(target_url, data=req_data, headers=headers, method=method)
+        try:
+            resp = urllib.request.urlopen(req, timeout=60)
+            self.send_response(resp.status)
+            for hk, hv in resp.getheaders():
+                if hk.lower() not in ("transfer-encoding", "connection"):
+                    self.send_header(hk, hv)
+            if cors_origin_allowed(self.path):
+                self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+
+            if want_stream or "text/event-stream" in resp.headers.get("Content-Type", ""):
+                while True:
+                    chunk = resp.read(1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+            else:
+                body = resp.read()
+                self.wfile.write(body)
+        except urllib.error.HTTPError as e:
+            err_body = e.read()
+            self.send_response(e.code)
+            for hk, hv in e.headers.items():
+                if hk.lower() not in ("transfer-encoding", "connection"):
+                    self.send_header(hk, hv)
+            if cors_origin_allowed(self.path):
+                self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(err_body)
+        except Exception as exc:
+            return self._error(502, f"Antigravity service unreachable (127.0.0.1:43810): {exc}")
 
     def _chat_stream_response(self, upstream, model, fp, account, t_start):
             self.send_response(200)
