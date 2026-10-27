@@ -402,10 +402,9 @@ def claude_models(proxy: str = "") -> list[dict]:
                 max_out = 32768 if is_reasoning else 16384
                 models.append({
                     # Same contract as qoder_route.qoder_models(): advertise the
-                    # name a client can actually call. _is_qoder_model() routes
-                    # on the "qoder-" prefix, so the bare internal key produced a
-                    # list where every entry 400s with "service info not found".
-                    "id": ("qoder-" + m["display_name"]) if m.get("display_name") else ("qoder-" + m.get("key", "")),
+                    # name a client can actually call, keep the internal key
+                    # alongside for the dispatcher.
+                    "id": m["display_name"] if m.get("display_name") else m.get("key", ""),
                     "qoder_key": m.get("key", ""),
                     "object": "model",
                     "created": 1687864820,
@@ -426,7 +425,7 @@ def claude_models(proxy: str = "") -> list[dict]:
                      "q37fmodel", "dmodel", "dfmodel", "gmodel", "gfmodel",
                      "gm51model", "kmodel_latest", "kmodel", "mmodel"]:
             models.append({
-                "id": "qoder-" + key, "object": "model", "created": 1687864820,
+                "id": key, "object": "model", "created": 1687864820,
                 "owned_by": "qoder", "qoder_key": key, "display_name": key, "context_window": 180000})
     return models
 

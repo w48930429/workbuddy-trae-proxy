@@ -90,12 +90,17 @@ def _post_json(url: str, jwt: str, device_id: str, machine_id: str, body: dict =
 def checkin_account(jwt: str, device_id: str, machine_id: str) -> dict:
     """单账号每日签到：POST checkin_credits/claim，body {}。
 
-    code==0 → 成功；message 含「已签/已领取/重复」→ already；其余 → fail。
+    code==0 → 成功；
+    code!=0 且设备限签（code 9095 或含「设备」）→ device_limited；
+    code!=0 且含「已签/已领取/重复/already」→ already；其余 → fail。
     """
     data = _post_json(CHECKIN_CLAIM_URL, jwt, device_id, machine_id)
     code = data.get("code")
     msg = data.get("message", "") or ("HTTP-OK" if code == 0 else "unknown")
-    already = isinstance(code, int) and code != 0 and any(
+    device_limited = isinstance(code, int) and code != 0 and (
+        code == 9095 or "设备" in msg
+    )
+    already = isinstance(code, int) and code != 0 and not device_limited and any(
         t in msg for t in ("已签", "已领取", "重复", "already")
     )
     reward = None
@@ -110,6 +115,8 @@ def checkin_account(jwt: str, device_id: str, machine_id: str) -> dict:
             break
     if code == 0:
         status = "success"
+    elif device_limited:
+        status = "device_limited"
     elif already:
         status = "already"
     else:
@@ -148,7 +155,7 @@ def query_credits(jwt: str, device_id: str, machine_id: str) -> dict:
             "work": round(work, 2), "total_limit": round(total_limit, 2)}
 
 
-def list_accounts() -> list:
+def list_accounts(force: bool = False) -> list:
     """vault 全部账号 + per-uid 状态/积分缓存，组成面板列表行。"""
     state = _load_state()
     secrets = trae_vault.load_trae_secrets()
@@ -168,10 +175,10 @@ def list_accounts() -> list:
         }
         jwt = data.get("token", "")
         entry["token_mask"] = (jwt[:12] + "…") if jwt else ""
-        # 积分：有缓存用缓存（fresh 内），无缓存且凭证可用时现查
+        # 积分：有缓存用缓存（fresh 内），无缓存或 force 时现查
         cached = st.get("credits")
         cached_at = st.get("credits_at", 0)
-        if jwt and cred and (not cached or now - cached_at > 300):
+        if jwt and cred and (force or not cached or now - cached_at > 300):
             try:
                 entry["credits"] = query_credits(jwt, cred.device_id, cred.machine_id)
                 state[uid] = {**st, "credits": entry["credits"], "credits_at": now}
@@ -227,6 +234,16 @@ def checkin_one(uid: str) -> dict:
         return {"user_id": uid, "status": "fail", "message": "无凭证"}
     try:
         r = checkin_account(jwt, cred.device_id, cred.machine_id)
+        now = time.time()
+        st = state.get(uid, {})
+        st["last_checkin"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            st["credits"] = query_credits(jwt, cred.device_id, cred.machine_id)
+            st["credits_at"] = now
+        except Exception:
+            st["credits_at"] = 0
+        state[uid] = st
+        _save_state(state)
         return {"user_id": uid, "user_name": data.get("user_name", ""), **r}
     except Exception as exc:
         return {"user_id": uid, "status": "fail", "message": str(exc)[:120]}
@@ -239,6 +256,7 @@ def checkin_all() -> list:
     creds = trae_icube.get_device_credentials()
     cred = creds[0] if creds else None
     results = []
+    now = time.time()
     for uid, data in secrets.items():
         st = state.get(uid, {})
         if not st.get("enabled", True):
@@ -253,9 +271,17 @@ def checkin_all() -> list:
         try:
             r = checkin_account(jwt, cred.device_id, cred.machine_id)
             results.append({"user_id": uid, "user_name": data.get("user_name", ""), **r})
+            st["last_checkin"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            try:
+                st["credits"] = query_credits(jwt, cred.device_id, cred.machine_id)
+                st["credits_at"] = now
+            except Exception:
+                st["credits_at"] = 0
+            state[uid] = st
         except Exception as exc:
             results.append({"user_id": uid, "user_name": data.get("user_name", ""),
                             "status": "fail", "message": str(exc)[:120]})
+    _save_state(state)
     return results
 
 
@@ -273,7 +299,7 @@ def import_account(token: str, refresh_token: str = "", user_name: str = "",
             payload_part = jwt.split(".")[1]
             payload_part += "=" * (-len(payload_part) % 4)
             claims = json.loads(_b64.urlsafe_b64decode(payload_part).decode())
-            uid = str(claims.get("user_id") or claims.get("sub") or claims.get("uid") or "")
+            uid = str(claims.get("user_id") or claims.get("sub") or claims.get("uid") or (claims.get("data") or {}).get("id") or "")
         except Exception:
             uid = ""
     if not uid:

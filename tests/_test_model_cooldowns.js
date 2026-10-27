@@ -48,9 +48,10 @@ assert.equal(fmtCoolAt(until), localTime);
 assert.equal(fmtCoolAt('bad-value'), '');
 
 const row = accountRow(base({modelCooldowns: [{model: 'glm-5.3', expiresAt: until}]}));
-assert(row.includes('glm-5.3 · ' + localTime + ' 恢复'));
-assert(row.includes('时间为本地时间'));
-assert(row.includes('>可用</span>')); // The account still serves other models.
+assert(row.includes('glm-5.3'));
+assert(row.includes('恢复 ' + localTime));
+assert(row.includes('本地时间'));
+assert(row.includes('部分模型限流')); // The account indicates partial model throttling.
 assert(!row.includes('冷却 600s'));
 const throttled = accountRow(base({lastError: 'HTTP 429 (model throttled)',
   modelCooldowns: [{model: 'glm-5.3', expiresAt: until}]}));
@@ -63,7 +64,7 @@ const multi = accountRow(base({modelCooldowns: [
   {model: 'glm-5.2', expiresAt: until}, {model: 'glm-5.3', expiresAt: until + 60},
 ]}));
 assert(multi.indexOf('glm-5.2') < multi.indexOf('glm-5.3'));
-assert.equal((multi.match(/class="cool-pill"/g) || []).length, 2);
+assert.equal((multi.match(/class="thr-item[\s"]/g) || []).length, 2);
 
 const unsafe = accountRow(base({modelCooldowns: [
   {model: '"><img src=x onerror=alert(1)>', expiresAt: until},
@@ -71,6 +72,6 @@ const unsafe = accountRow(base({modelCooldowns: [
 ]}));
 assert(!unsafe.includes('<img src=x'));
 assert(unsafe.includes('&quot;&gt;&lt;img'));
-assert(!unsafe.includes('invalid ·'));
+assert(!unsafe.includes('<b>invalid</b>'));
 
 console.log('model cooldown dashboard assertions passed');

@@ -2,7 +2,7 @@
 
 流程（桌面端抓包还原）：
   GET  /sash/api/v1/me/campaigns               查询活动
-  POST /sash/api/v1/me/campaigns/{id}/claim     领取（空 body）
+  POST /sash/api/v1/me/campaigns/{id}/claim     领取（空 body；对所有 CLAIMABLE 逐个领取并聚合）
   GET  /sash/api/v1/me/daily-check-in/status    只读统计（legacy，常 DISABLED）
 
 本地记录签到历史（<data_root>/checkin_history.json）以计算真实连续签到天数。
@@ -210,24 +210,21 @@ def campaigns_checkin(device_token: str, res: CheckinResult, host: str, proxy: s
         return res
 
     campaigns = (body or {}).get("campaigns") or []
-    target = None
-    benefit_campaign = None
-    already_claimed = False
-    for c in campaigns:
-        if not isinstance(c, dict) or c.get("actionType") != "CLAIM_BENEFIT":
-            continue
-        benefit_campaign = c
-        if c.get("claimStatus") == "CLAIMABLE":
-            target = c
-        elif c.get("claimStatus") == "CLAIMED":
-            already_claimed = True
+    benefit_campaigns = [c for c in campaigns
+                         if isinstance(c, dict) and c.get("actionType") == "CLAIM_BENEFIT"]
+    claimables = [c for c in benefit_campaigns if c.get("claimStatus") == "CLAIMABLE"]
+    already_claimed = any(c.get("claimStatus") == "CLAIMED" for c in benefit_campaigns)
 
-    window_src = target or benefit_campaign
+    # 每日窗口取窗口最短的活动（daily 重置；限时活动跨度数月，不能代表窗口）。
+    def _span(c: dict) -> int:
+        s, e = int(c.get("startAt") or 0), int(c.get("endAt") or 0)
+        return (e - s) if (s > 0 and e > s) else 1 << 62
+    window_src = min(benefit_campaigns, key=_span) if benefit_campaigns else None
     if window_src and int(window_src.get("startAt") or 0) > 0:
         res.window_date = datetime.fromtimestamp(
             int(window_src["startAt"])).strftime("%Y-%m-%d")
 
-    if target is None:
+    if not claimables:
         if already_claimed:
             res.status = STATUS_ALREADY
             res.message = _window_hint(res, "今日已领取")
@@ -236,27 +233,38 @@ def campaigns_checkin(device_token: str, res: CheckinResult, host: str, proxy: s
             res.message = "无可用签到活动"
         return res
 
-    claim_path = f"/sash/api/v1/me/campaigns/{target.get('campaignId')}/claim"
-    status, body, raw = _do_checkin_request("POST", claim_path, device_token, None, host, proxy)
-    if status != 200:
-        res.message = f"领取失败 HTTP {status}: {raw[:300]}"
-        return res
-
-    body = body or {}
-    claim_status = body.get("status")
-    if claim_status == "CLAIMED":
-        if body.get("replayed"):
-            res.status = STATUS_ALREADY
-            res.message = _window_hint(res, "今日已领取")
+    # 逐个领取全部可领活动（daily + 限时活动可能同时 CLAIMABLE，
+    # 旧逻辑只保留最后一个 target，会漏领）。
+    fresh, replayed, failed = [], [], []
+    for c in claimables:
+        claim_path = f"/sash/api/v1/me/campaigns/{c.get('campaignId')}/claim"
+        status, cbody, craw = _do_checkin_request(
+            "POST", claim_path, device_token, None, host, proxy)
+        key = c.get("campaignKey", "")
+        if status != 200:
+            failed.append(f"{key} HTTP {status}")
+            continue
+        cbody = cbody or {}
+        if cbody.get("status") == "CLAIMED":
+            item = (key, int((cbody.get("benefit") or {}).get("amount") or 0),
+                    cbody.get("expiresAt", ""))
+            (replayed if cbody.get("replayed") else fresh).append(item)
         else:
-            res.status = STATUS_CLAIMED
-            benefit = body.get("benefit") or {}
-            res.amount = int(benefit.get("amount") or 0)
-            res.expires_at = body.get("expiresAt", "")
-            res.message = f"领取成功 +{res.amount} {target.get('campaignKey', '')}"
-        return res
+            failed.append(f"{key} {cbody.get('status')}")
 
-    res.message = f"未知状态: {claim_status}"
+    res.amount = sum(a for _, a, _ in fresh + replayed)
+    fail_suffix = ("（失败: " + ", ".join(failed) + "）") if failed else ""
+    if fresh:
+        res.status = STATUS_CLAIMED
+        res.expires_at = fresh[0][2]
+        res.message = "领取成功 " + " + ".join(
+            f"+{a} {k}" for k, a, _ in fresh) + (
+            f"（另 {len(replayed)} 项此前已领）" if replayed else "") + fail_suffix
+    elif replayed:
+        res.status = STATUS_ALREADY
+        res.message = _window_hint(res, "今日已领取")
+    else:
+        res.message = "领取失败: " + ", ".join(failed)
     return res
 
 

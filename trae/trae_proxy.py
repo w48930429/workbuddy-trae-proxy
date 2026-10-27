@@ -43,8 +43,9 @@ WORKSPACE_ID = "e04cdd"
 TRAE_SUPPORTED = {
     "glm-5.3-flash", "glm-5.3-flashx", "glm-5.3", "glm-5.2",
     "deepseek-v4.1-flash",
-    "kimi-k3", "kimi-k2.8-preview", "kimi-k2.6",
-    "minimax-m3", "minimax-m2.7",
+    "kimi-k3", "kimi-k2.8-preview", "kimi-k2.6", "kimi-k2.7-code",
+    "minimax-m3", "minimax-m2.7", "minimax-m3.1-flash",
+    "mimo-v2.6-pro", "mimo-v2.6-flash",
     "qwen3.8-flash", "qwen3.8-max", "qwen-3.7-plus", "qwen-3.6-plus",
     "doubao-seed-code", "doubao-seed-evolving",
     "doubao-seed-2.1-pro", "doubao-seed-2.1-turbo",
@@ -70,9 +71,13 @@ TRAE_RATES = {
     "deepseek-v4.1-flash": 0.08,
     "kimi-k3": 1.83,
     "kimi-k2.8-preview": 0.98,
-    "kimi-k2.6": 0.83,          # kimi-k2.7-code 同价
+    "kimi-k2.6": 0.83,
+    "kimi-k2.7-code": 1.06,     # 2026-10-20 实测（积分差分包，非官方倍率）
     "minimax-m3": 0.26,
     "minimax-m2.7": 0.19,       # minimax-m2/m2.1 同价
+    "minimax-m3.1-flash": 0.14,  # 2026-10-20 实测
+    "mimo-v2.6-pro": 0.24,       # 2026-10-20 实测
+    "mimo-v2.6-flash": 0.08,     # 2026-10-20 实测
     "qwen3.8-flash": 0.08,
     "qwen3.8-max": 1.5,
     "qwen-3.7-plus": 0.25,
@@ -261,6 +266,13 @@ def map_model(model: str):
             return tr
     if lower in TRAE_SUPPORTED:
         return model
+    if lower.startswith("trae-"):
+        sub = lower[5:]
+        if sub in TRAE_SUPPORTED:
+            return sub
+        for wb, tr in _model_map().items():
+            if wb.lower() == sub:
+                return tr
     return None
 
 
