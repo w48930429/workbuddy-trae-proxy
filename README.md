@@ -296,6 +296,7 @@ export OPENAI_API_KEY="你在看板设置中添加并绑定的API_Key"
 - **默认不再换号重试**：一个请求打到受限账号就停手，避免同一请求遍历账号池导致设备指纹连坐（`WB_RESTRICTED_403_ROTATE_MAX`，默认 0）。同一区域 900 秒内出现 2 个不同账号被限制时，整池暂停派发 1800 秒（`WB_RESTRICTION_*` 可调），期间一个上游请求都不发，直接返回 429 与申诉指引。
 - **巡检跳过受限账号**，账号之间加入 2~5 秒随机错峰；看板账号行显示「风控限制 剩余 N 小时」，悬停可看上游原文。
 - **Qoder 侧同步补了每账号状态处理**：`10605` 是模型队列（30 秒原地重试）；`105` 登录/session 过期先尝试 dt-/drt- 凭证轮换、仍失败按 24 小时停用；`115` agent 额度用尽按消息里的 `agentLimitResetTime` 冷却到重置时刻（无时间戳兜底 10 分钟）；「too many free trial accounts / temporarily restricted / 账号封禁」按 24 小时封禁冷却。全部写入 `pool_state.json`，重启后仍然生效；看板 Qoder 账号行显示冷却剩余与上游原文。
+- **antigravity-proxy-py 的 Google OAuth 凭据改为仅从环境变量读取**：启动前必须设置 `OAUTH_CLIENT_ID` 与 `OAUTH_CLIENT_SECRET`；源码不再内置默认值，`config.json` 中的旧凭据会在读取时被清除且不再写回。缺失时令牌刷新会跳过并打印明确错误。
 - 新增 `tests/_test_restricted_403.py`（10 项：识别、持久化、默认不换号、开关恢复轮转、连坐暂停、内容审核不误伤、调度跳过）。
 
 ### v1.6.10
