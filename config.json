@@ -14,8 +14,7 @@
     },
     "qoder": {
       "enabled": true,
-      "region": "cn",
-      "model_prefix": "qoder-"
+      "region": "cn"
     }
   },
   "trae_device": {
@@ -44,30 +43,30 @@
         "total": 0.0,
         "general": 0.0,
         "work": 0.0,
-        "total_limit": 4100.0
+        "total_limit": 0.0
       },
-      "credits_at": 1791807029.1020513,
-      "last_checkin": "2026-10-09 23:59:42"
-    },
-    "": {
-      "credits": {
-        "total": 0.0,
-        "general": 0.0,
-        "work": 0.0,
-        "total_limit": 950.0
-      },
-      "credits_at": 1791807029.1020513,
-      "last_checkin": "2026-10-09 23:59:43"
+      "credits_at": 1792912238.4691904,
+      "last_checkin": "2026-10-20 16:19:31"
     },
     "trae_506823": {
       "credits": {
         "total": 0.0,
         "general": 0.0,
         "work": 0.0,
-        "total_limit": 5100.0
+        "total_limit": 0.0
       },
-      "credits_at": 1791807029.1020513,
-      "last_checkin": "2026-10-09 23:59:42"
+      "credits_at": 1792912238.4691904,
+      "last_checkin": "2026-10-20 16:19:32"
+    },
+    "trae_3823443558014875": {
+      "credits": {
+        "total": 0.0,
+        "general": 0.0,
+        "work": 0.0,
+        "total_limit": 0.0
+      },
+      "credits_at": 1792912238.4691904,
+      "last_checkin": "2026-10-20 16:19:32"
     }
   }
 }
