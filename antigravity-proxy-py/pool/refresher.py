@@ -8,8 +8,16 @@ from .account_pool import AccountPool, current_time_ms
 
 GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token'
 
-DEFAULT_OAUTH_CLIENT_ID = '1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com'
-DEFAULT_OAUTH_CLIENT_SECRET = ''
+
+def _oauth_credentials() -> tuple[str, str]:
+    """Google OAuth credentials come from the environment only.
+
+    No compiled-in fallback: a default secret in source is a leaked secret the
+    moment the repository is public, and a fallback also hides a missing
+    deployment variable until token refresh silently fails.
+    """
+    return (os.environ.get('OAUTH_CLIENT_ID', ''),
+            os.environ.get('OAUTH_CLIENT_SECRET', ''))
 
 
 class TokenRefresher:
@@ -68,8 +76,11 @@ class TokenRefresher:
                 await self.refresh_single_account(acc)
 
     async def refresh_single_account(self, acc: Dict[str, Any]) -> bool:
-        client_id = self.config.get('oauthClientId') or DEFAULT_OAUTH_CLIENT_ID
-        client_secret = self.config.get('oauthClientSecret') or DEFAULT_OAUTH_CLIENT_SECRET
+        client_id, client_secret = _oauth_credentials()
+        if not client_id or not client_secret:
+            print('[TokenRefresher] OAUTH_CLIENT_ID / OAUTH_CLIENT_SECRET are not set; '
+                  'skipping token refresh. Export both environment variables and restart.')
+            return False
 
         data = {
             'client_id': client_id,

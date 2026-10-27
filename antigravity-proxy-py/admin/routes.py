@@ -17,7 +17,7 @@ from pool.account_pool import AccountPool
 from pool.refresher import TokenRefresher
 from pool.quota_manager import QuotaManager
 from pool.local_extractor import extract_from_windows_credential
-from config import save_config, DEFAULT_OAUTH_CLIENT_ID, DEFAULT_OAUTH_CLIENT_SECRET
+from config import save_config, oauth_config_from_env
 
 
 def read_email_from_id_token(id_token: Optional[str]) -> str:
@@ -400,8 +400,13 @@ def build_admin_router(
                 'openid'
             ])
             state = str(uuid.uuid4())
-            client_id = config.get('oauthClientId') or DEFAULT_OAUTH_CLIENT_ID
-            client_secret = config.get('oauthClientSecret') or DEFAULT_OAUTH_CLIENT_SECRET
+            creds = oauth_config_from_env()
+            client_id = creds['oauthClientId']
+            client_secret = creds['oauthClientSecret']
+            if not client_id or not client_secret:
+                return JSONResponse(
+                    {'error': 'OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET must be set in the environment'},
+                    status_code=500)
 
             params = {
                 'client_id': client_id,
