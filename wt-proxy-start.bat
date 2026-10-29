@@ -130,10 +130,17 @@ if exist "%HERE%antigravity-proxy\ag-proxy.pid" (
 )
 for /f "tokens=5" %%P in ('netstat -ano ^| findstr ":43810 " ^| findstr "LISTENING"') do taskkill /PID %%P /T /F >nul 2>&1
 
+rem 5. Stop Qoder login server
+if exist "%HERE%qoder\qoder_login.pid" (
+  for /f "usebackq" %%P in ("%HERE%qoder\qoder_login.pid") do taskkill /PID %%P /T /F >nul 2>&1
+  del "%HERE%qoder\qoder_login.pid" >nul 2>&1
+)
+for /f "tokens=5" %%P in ('netstat -ano ^| findstr ":28091 " ^| findstr "LISTENING"') do taskkill /PID %%P /T /F >nul 2>&1
+
 ping -n 2 127.0.0.1 >nul
 if exist "%STOPFILE%" del "%STOPFILE%" >nul 2>&1
 
-echo [OK] Stopped WorkBuddy + Trae and Antigravity proxies.
+echo [OK] Stopped WorkBuddy + Trae, Antigravity, and Qoder proxies.
 goto :eof
 
 :do_status
@@ -197,6 +204,7 @@ echo.
 echo   Combined Dashboard : http://127.0.0.1:%PORT%/
 echo   WorkBuddy API      : http://127.0.0.1:%PORT%/v1
 echo   Antigravity API    : http://127.0.0.1:43810/v1
+echo   Qoder Dashboard    : http://127.0.0.1:%PORT%/qoder/dashboard
 echo.
 echo   Guardian is protecting this service in background.
 echo ===========================================================

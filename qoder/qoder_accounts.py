@@ -419,13 +419,14 @@ def build_account_from_token(device_token: str, refresh_token: str, region: str,
     _, plan_resp = _get_json(ep.plan_endpoint, device_token, proxy)
     plan = (plan_resp or {}).get("plan_tier_name", "")
 
-    uid = str(info.get("userId") or "") + str(info.get("email") or "")
+    uid = str(info.get("id") or info.get("userId") or info.get("username") or info.get("email") or info.get("name") or "")
     account_id = sanitize_id(uid)
+    email = str(info.get("email") or info.get("security_mobile") or "").lower()
     acct = Account(
         id=account_id,
         name=str(info.get("name") or ""),
-        email=str(info.get("email") or "").lower(),
-        user_type=str(info.get("userType") or ""),
+        email=email,
+        user_type=str(info.get("userType") or info.get("user_type") or ""),
         plan=plan,
         region=client.normalize_region(region),
         auth_mode="oauth",

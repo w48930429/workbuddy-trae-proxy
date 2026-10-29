@@ -252,6 +252,10 @@ class Account(object):
             self.restricted_until = 0.0
         # 运行时详情（不落盘），面板悬停时显示上游原文。
         self.restricted_detail = ""
+        # 落盘副本：restrictedUntil 本身是持久的，正文若只在内存里，重启后
+        # 看板就只剩倒计时、看不到上游原话（申诉时要拿它当依据）。
+        # clear_restriction() 会同时清掉两处。
+        self.restricted_detail_saved = str(data.get("restrictedDetail") or "")[:2000]
         # Per-model throttling. Upstream rate limits (code 6004 "usage exceeds
         # frequency limit") apply to ONE model for one account, not to the whole
         # account: other models keep working. Cooldown the offending model only,
@@ -307,6 +311,8 @@ class Account(object):
             "lastError": self.last_error,
             "cooldownUntil": self.cooldown_until,
             "restrictedUntil": self.restricted_until,
+            "restrictedDetail": (self.restricted_detail
+                                 or self.restricted_detail_saved),
             "credits": self.credits,
             "lastCheckin": self.last_checkin,
             "lastDailyChat": self.last_daily_chat,
@@ -353,7 +359,8 @@ class Account(object):
             "restricted": bool(self.restricted_until > now),
             "restrictedFor": (round(self.restricted_until - now)
                               if self.restricted_until > now else None),
-            "restrictedDetail": self.restricted_detail,
+            "restrictedDetail": (self.restricted_detail
+                                 or self.restricted_detail_saved),
             "modelCooldowns": models,
             "addedAt": self.added_at,
             "file": os.path.basename(self.path) if self.path else None,
@@ -1002,6 +1009,8 @@ class Account(object):
         - 落盘到 restrictedUntil：重启 / 刷新 token / 换身分 / 一键测试都不会
           把它放回池子，只有真正成功一次（上游已解除）才清；
         - 反复命中不延长第一次的期限，避免探测把窗口越推越长。
+        - 正文一起落盘（restrictedDetail）：否则重启后看板只剩一枚「风控限制」
+          徽标和倒计时，看不到上游原话与申诉依据，等于把刚查到的信息丢了。
         """
         now = time.time()
         wait = (RESTRICTED_ACCOUNT_COOLDOWN if cooldown is None
@@ -1018,6 +1027,7 @@ class Account(object):
         with self._throttle_lock:
             self.restricted_until = 0.0
             self.restricted_detail = ""
+            self.restricted_detail_saved = ""
 
     def clear_error(self, model=None):
         with self._throttle_lock:

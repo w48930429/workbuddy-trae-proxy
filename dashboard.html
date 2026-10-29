@@ -17,14 +17,43 @@
   --shadow-sm:0 1px 2px 0 rgba(15,23,42,.05);
   --shadow:0 1px 3px 0 rgba(15,23,42,.06),0 1px 2px -1px rgba(15,23,42,.04);
   --shadow-md:0 4px 6px -2px rgba(15,23,42,.06),0 2px 4px -2px rgba(15,23,42,.04);
+  --header-bg:rgba(255,255,255,.94);
+  --tr-hover:rgba(241,245,249,.6);
 }
+:root[data-theme="dark"]{
+  --bg:#07090e; --panel:#0e131f; --panel2:#131b2e; --panel3:#17223b;
+  --line:rgba(255,255,255,.08); --line-hover:rgba(255,255,255,.16);
+  --fg:#f8fafc; --dim:#94a3b8; --dim-light:#64748b;
+  --accent:#6366f1; --accent-hover:#4f46e5; --accent-soft:rgba(99,102,241,.18);
+  --accent2:#10b981; --accent2-soft:rgba(16,185,129,.15);
+  --warn:#f59e0b; --warn-soft:rgba(245,158,11,.15);
+  --think:#c084fc; --think-soft:rgba(192,132,252,.15);
+  --bad:#f43f5e; --bad-soft:rgba(244,63,94,.15);
+  --shadow-sm:0 1px 3px 0 rgba(0,0,0,.4);
+  --shadow:0 4px 12px 0 rgba(0,0,0,.45);
+  --shadow-md:0 8px 24px -4px rgba(0,0,0,.55);
+  --header-bg:rgba(14,19,31,.88);
+  --tr-hover:rgba(255,255,255,.04);
+  color-scheme:dark;
+}
+input, select, textarea{color-scheme:light}
+:root[data-theme="dark"] input,
+:root[data-theme="dark"] select,
+:root[data-theme="dark"] textarea{color-scheme:dark}
+.theme-toggle-btn{display:inline-flex;align-items:center;justify-content:center;
+  width:34px;height:32px;border-radius:8px;border:1px solid var(--line);
+  background:var(--panel);color:var(--dim);box-shadow:var(--shadow-sm);
+  cursor:pointer;font-size:15px;transition:all .15s ease}
+.theme-toggle-btn:hover{color:var(--fg);border-color:var(--line-hover);
+  background:var(--panel2);box-shadow:var(--shadow-md);transform:scale(1.05)}
+
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);
   font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue","PingFang SC","Microsoft YaHei",sans-serif;
   -webkit-font-smoothing:antialiased}
 header{padding:16px 24px;border-bottom:1px solid var(--line);display:flex;
   align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;
-  position:sticky;top:0;background:rgba(255,255,255,.94);backdrop-filter:blur(10px);z-index:10;box-shadow:var(--shadow-sm)}
+  position:sticky;top:0;background:var(--header-bg);backdrop-filter:blur(10px);z-index:10;box-shadow:var(--shadow-sm)}
 h1{margin:0;font-size:17px;font-weight:700;letter-spacing:-.2px;color:var(--fg)}
 h1 span{color:var(--dim);font-weight:400;font-size:13px;margin-left:8px}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--accent2);
@@ -60,7 +89,7 @@ th:first-child{border-top-left-radius:8px;border-bottom-left-radius:8px}
 th:last-child{border-top-right-radius:8px;border-bottom-right-radius:8px}
 th:first-child,td:first-child{text-align:left}
 tbody tr:last-child td{border-bottom:none}
-tbody tr:hover{background:rgba(241,245,249,.6)}
+tbody tr:hover{background:var(--tr-hover)}
 tbody tr.tr-free{background:rgba(34,197,94,.08)}
 tbody tr.tr-free:hover{background:rgba(34,197,94,.14)}
 tbody tr.tr-free td{border-bottom-color:rgba(34,197,94,.18)}
@@ -100,6 +129,22 @@ table.data-cards tr.tr-free{background:rgba(34,197,94,.08)!important;border-colo
   background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 14px}
 .thr-row.warn{border-color:rgba(217,119,6,.35);background:rgba(217,119,6,.06)}
 .thr-row.bad{border-color:rgba(220,38,38,.32);background:rgba(220,38,38,.06)}
+/* 风控限制区（code 11140）：比限流更重，因为它是账号级、按工作日计的，
+   所以用满色红底而不是限流那种 6% 淡底。 */
+.rs-row{display:grid;grid-template-columns:minmax(120px,200px) auto 1fr;align-items:center;gap:12px;
+  background:var(--bad-soft);border:1px solid rgba(220,38,38,.35);border-radius:10px;padding:10px 14px}
+.rs-row + .rs-row{margin-top:8px}
+.rs-name{font-weight:700;font-size:13px;color:var(--fg)}
+.rs-name .mono{color:var(--dim);font-weight:400;font-size:11px;margin-left:6px}
+.rs-left{font-size:12px;font-weight:600;color:#b91c1c;white-space:nowrap;font-variant-numeric:tabular-nums}
+.rs-meta{font-size:11px;color:var(--dim);text-align:left;line-height:1.6}
+.rs-meta b{color:var(--fg)}
+.rs-tip{margin-top:6px;font-size:11px;color:#b91c1c;line-height:1.6}
+/* 账号行里的风控说明：跟 .hint 同一层级（错误标记那行），但常驻可见，
+   不只靠 tooltip。 */
+.rs-acct-note{margin:2px 0 0;font-size:11px;line-height:1.6;color:#b91c1c;
+  background:var(--bad-soft);border:1px solid rgba(220,38,38,.28);
+  border-radius:6px;padding:5px 8px}
 .thr-name{font-weight:700;font-size:13px;color:var(--fg);font-family:ui-monospace,monospace}
 .thr-left{font-size:12px;font-weight:600;color:#b45309;white-space:nowrap;font-variant-numeric:tabular-nums}
 .thr-row.bad .thr-left{color:#b91c1c}
@@ -122,7 +167,7 @@ button{cursor:pointer;font:inherit;font-size:12px;font-weight:500;padding:6px 14
   border:1px solid var(--accent);background:var(--accent);color:#fff;box-shadow:var(--shadow-sm);transition:all .15s ease}
 button:hover{background:var(--accent-hover);border-color:var(--accent-hover)}
 button:disabled{opacity:.45;cursor:not-allowed}
-button.sec{background:#fff;border-color:var(--line);color:var(--fg);box-shadow:var(--shadow-sm)}
+button.sec{background:var(--panel);border-color:var(--line);color:var(--fg);box-shadow:var(--shadow-sm)}
 button.sec:hover{background:var(--panel2);border-color:var(--line-hover)}
 button.danger{border-color:rgba(220,38,38,.3);background:rgba(220,38,38,.06);color:var(--bad)}
 button.danger:hover{background:var(--bad);color:#fff;border-color:var(--bad)}
@@ -144,7 +189,7 @@ button.mini{padding:3px 9px;font-size:11px}
 .modal-mask{display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);
   backdrop-filter:blur(4px);align-items:center;justify-content:center;padding:20px;z-index:100}
 .modal-mask.show{display:flex}
-.modal{background:#fff;border:1px solid var(--line);border-radius:14px;
+.modal{background:var(--panel);border:1px solid var(--line);border-radius:14px;
   width:min(620px,100%);max-height:88vh;overflow:auto;box-shadow:0 20px 25px -5px rgba(0,0,0,.1),0 8px 10px -6px rgba(0,0,0,.05)}
 .modal-hd{display:flex;align-items:center;justify-content:space-between;
   padding:16px 20px;border-bottom:1px solid var(--line)}
@@ -157,7 +202,7 @@ button.mini{padding:3px 9px;font-size:11px}
 .login-link{display:block;word-break:break-all;background:var(--panel2);
   border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:12px 0;
   color:var(--accent);text-decoration:none;font-size:12px}
-.login-link:hover{border-color:var(--accent);background:#fff}
+.login-link:hover{border-color:var(--accent);background:var(--panel)}
 .hint{color:var(--dim);font-size:12px;margin:8px 0}
 .step{display:flex;gap:10px;align-items:flex-start;margin:10px 0}
 .step .n{flex:0 0 20px;height:20px;border-radius:50%;background:var(--panel2);
@@ -174,7 +219,7 @@ a:hover{text-decoration:underline}
 .realm-pill:hover{color:var(--fg)}
 .realm-pill.active{background:var(--accent);color:#fff;font-weight:600;box-shadow:var(--shadow-sm)}
 .key-card{
-  background:#ffffff;border:1px solid var(--line);border-radius:12px;
+  background:var(--panel);border:1px solid var(--line);border-radius:12px;
   padding:16px 20px;margin-bottom:12px;box-shadow:var(--shadow);
   transition:all .15s ease;
 }
@@ -186,7 +231,7 @@ a:hover{text-decoration:underline}
 .key-action-btn{
   display:inline-flex;align-items:center;gap:5px;padding:5px 14px;border-radius:20px;
   font-size:12px;font-weight:500;cursor:pointer;border:1px solid var(--line);
-  background:#ffffff;color:var(--fg);transition:all .15s ease;box-shadow:var(--shadow-sm);
+  background:var(--panel);color:var(--fg);transition:all .15s ease;box-shadow:var(--shadow-sm);
 }
 .key-action-btn:hover{background:var(--panel2);border-color:var(--line-hover)}
 .key-action-btn.danger{
@@ -200,7 +245,7 @@ a:hover{text-decoration:underline}
 .badge-effort{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;line-height:1.4;white-space:nowrap;margin:1px 2px;background:rgba(124,58,237,.12);color:var(--think);border:1px solid rgba(124,58,237,.3);font-weight:600}
 .realm-filter{display:inline-flex;gap:6px;margin-left:8px}
 .realm-filter button{background:var(--panel2);border:1px solid var(--line);color:var(--dim);padding:3px 9px;font-size:11px}
-.realm-filter button.active{border-color:var(--accent);color:var(--accent);background:#fff}
+.realm-filter button.active{border-color:var(--accent);color:var(--accent);background:var(--panel)}
 
 .realm-card{
   background:var(--panel);border:1px solid var(--line);border-radius:12px;
@@ -209,7 +254,7 @@ a:hover{text-decoration:underline}
 }
 .realm-card:hover{border-color:var(--line-hover);transform:translateY(-1px);box-shadow:var(--shadow-md)}
 .realm-card.active{
-  border-color:var(--accent);background:#ffffff;
+  border-color:var(--accent);background:var(--panel);
   box-shadow:0 0 0 1px var(--accent), var(--shadow-md);
 }
 .realm-card.active#tabCn{
@@ -220,21 +265,21 @@ a:hover{text-decoration:underline}
 }
 .realm-card.gateway-ctrl:hover{transform:none;border-color:var(--line);box-shadow:var(--shadow)}
 .toggle-realm-btn{
-  background:#fff;border:1px solid var(--accent);color:var(--accent);
+  background:var(--panel);border:1px solid var(--accent);color:var(--accent);
   padding:8px 18px;font-size:13px;font-weight:600;border-radius:8px;box-shadow:var(--shadow-sm);cursor:pointer;
   transition:all .15s ease;
 }
-.toggle-realm-btn:hover{background:rgba(0,0,0,.04);box-shadow:var(--shadow-md)}
+.toggle-realm-btn:hover{background:var(--panel2);box-shadow:var(--shadow-md)}
 .realm-endpoint-info{font-size:12px;color:var(--dim)}
 
 .main-nav{display:inline-flex;gap:4px;background:var(--panel2);padding:4px;border-radius:10px;border:1px solid var(--line)}
 .main-nav-btn{background:transparent;border:1px solid transparent;color:var(--dim);padding:6px 14px;border-radius:7px;font-size:13px;font-weight:500;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:all .15s ease}
-.main-nav-btn:hover{color:var(--fg);background:#fff}
-.main-nav-btn.active{background:#fff;color:var(--fg);border-color:var(--line);box-shadow:var(--shadow-sm);font-weight:600}
+.main-nav-btn:hover{color:var(--fg);background:var(--panel)}
+.main-nav-btn.active{background:var(--panel);color:var(--fg);border-color:var(--line);box-shadow:var(--shadow-sm);font-weight:600}
 /* 项目仓库入口：与顶部导航同行，但不作为一个 Tab 标签。 */
 .gh-link{display:inline-flex;align-items:center;justify-content:center;
   width:34px;height:32px;border-radius:8px;border:1px solid var(--line);
-  background:#fff;color:var(--dim);box-shadow:var(--shadow-sm);
+  background:var(--panel);color:var(--dim);box-shadow:var(--shadow-sm);
   transition:all .15s ease}
 .gh-link:hover{color:var(--fg);border-color:var(--line-hover);
   background:var(--panel2);text-decoration:none;box-shadow:var(--shadow-md)}
@@ -366,7 +411,12 @@ a:hover{text-decoration:underline}
    first one painted. Kept inline and dependency-free on purpose: an
    external or deferred script would run too late to avoid the flash. */
 (function(){
-  var TABS = ['gateway','analytics','logs','settings'];
+  try {
+    var savedTheme = localStorage.getItem('wb-theme');
+    var theme = savedTheme === 'dark' ? 'dark' : 'light';
+    if(theme === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
+  } catch(e){}
+  var TABS = ['gateway','trae','analytics','logs','settings','qoder','codearts','antigravity'];
   var pick = null;
   try {
     var q = new URLSearchParams(location.search).get('tab');
@@ -381,6 +431,7 @@ a:hover{text-decoration:underline}
       var btn = document.getElementById('btnNav' + t.charAt(0).toUpperCase() + t.slice(1));
       if(btn) btn.classList.toggle('active', t === pick);
     });
+    if(window.initDashboardTheme) window.initDashboardTheme();
   });
 })();
 </script>
@@ -408,6 +459,9 @@ a:hover{text-decoration:underline}
       <button class="main-nav-btn" id="btnNavQoder" onclick="switchMainTab('qoder')">
         Qoder 看板
       </button>
+      <button class="main-nav-btn" id="btnNavCodearts" onclick="switchMainTab('codearts')">
+        CodeArts 看板
+      </button>
       <button class="main-nav-btn" id="btnNavAntigravity" onclick="switchMainTab('antigravity')">
         反重力看板
       </button>
@@ -418,6 +472,10 @@ a:hover{text-decoration:underline}
         <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
       </svg>
     </a>
+    <button class="theme-toggle-btn" id="themeToggleBtn" onclick="toggleDashboardTheme()" title="切换明亮/暗色模式" aria-label="切换明亮/暗色模式">
+      <span class="theme-icon-light" style="display:none">☀️</span>
+      <span class="theme-icon-dark">🌙</span>
+    </button>
   </div>
   <div class="meta" id="meta"></div>
 </header>
@@ -513,6 +571,18 @@ a:hover{text-decoration:underline}
   </div>
 
   <div class="cards" id="cards"></div>
+
+  <!-- 上游账号级风控限制（403 / code 11140）。与模型限流是两回事：
+       code 6004 只封一个模型，11140 封整个账号，且官方口径是 1-3 个工作日。
+       这里把它单独成区，让"现在谁被封了、为什么、该怎么办"一眼可见，
+       而不是藏在一枚需要悬停才看到原文的徽标里。 -->
+  <section id="restrictionSection" style="display:none;margin-bottom:20px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+      <h2 style="margin:0">风控限制 <em id="restrictionCount"></em></h2>
+      <span style="font-size:12px;color:var(--dim)">上游 code 11140「账号存在异常行为，已被限制使用」</span>
+    </div>
+    <div id="restrictionList"></div>
+  </section>
 
   <!-- 模型级限流聚合（429 / code 6004）：账号行里也有药丸，但这里按模型去重，
        让"现在到底哪些模型不可用、还要等多久"一眼可见，不必逐行数账号。 -->
@@ -763,8 +833,8 @@ a:hover{text-decoration:underline}
             <tr>
               <td class="mono" style="color:var(--warn);font-weight:600">claude-* / gpt-*</td>
               <td>WorkBuddy 对应模型</td>
-              <td><span class="badge mini">Failover Fallback</span></td>
-              <td style="color:var(--dim);text-align:left">WorkBuddy 额度耗尽（错误码 14018 / 429）时自动无感切入 Trae 账号池接管</td>
+              <td><span class="badge mini">额度不足改路由</span></td>
+              <td style="color:var(--dim);text-align:left">上游回答额度不足（14018 / 额度不足）时，自动改路由到 <code>deepseek-v4.1-flash</code>（cn 出口 1017，x0.00）重发一次；不跨渠道降级，也不落到 step</td>
             </tr>
           </tbody>
         </table>
@@ -1201,6 +1271,256 @@ a:hover{text-decoration:underline}
     </section>
   </div>
 
+  <div id="pageCodearts" class="main-page" style="margin:0;padding:0">
+    <!-- 顶部状态栏与操作中心 -->
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:12px">
+      <div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <h2 style="margin:0;font-size:18px;font-weight:700;color:var(--fg)">CodeArts 华为云服务中枢</h2>
+          <span class="badge" id="codeartsStateBadge">读取中…</span>
+          <span class="badge ok" style="font-size:11px">ES256 DPoP 签名</span>
+          <span class="badge" style="font-size:11px;background:var(--accent-soft);color:var(--accent);border-color:rgba(99,102,241,.3)">PKCE S256 鉴权</span>
+        </div>
+        <div style="font-size:12px;color:var(--dim);margin-top:4px">
+          原生支持独立网页 OAuth 授权、本机桌面 IDE 凭据只读提取与永久 AK/SK 模式 · 华为云单账号 3 并发守护
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button type="button" class="btn" onclick="startCodeartsOAuth()" style="padding:6px 12px;font-size:12px;background:var(--accent);color:#fff;border:none;border-radius:8px;cursor:pointer;display:inline-flex;align-items:center;gap:5px;box-shadow:var(--shadow-sm)">
+          🌐 网页登录 / OAuth 授权
+        </button>
+        <button type="button" class="btn sec" onclick="refreshCodeartsToken()" style="padding:6px 12px;font-size:12px;display:inline-flex;align-items:center;gap:5px">
+          🔄 刷新 STS 令牌
+        </button>
+        <button type="button" class="btn sec" onclick="loadCodeartsData(true)" style="padding:6px 12px;font-size:12px;display:inline-flex;align-items:center;gap:5px">
+          ↻ 立即刷新 / 同步
+        </button>
+      </div>
+    </div>
+
+    <!-- 凭据与模式指引横幅 -->
+    <div id="codeartsNoticeBanner" style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;box-shadow:var(--shadow-sm)">
+      <div style="font-size:12px;color:var(--dim);line-height:1.7">
+        <span style="font-weight:600;color:var(--fg)">⚡ 凭据链与调用机制：</span>
+        网关优先读取 <b>独立网页 OAuth</b> (<code>accounts/codearts_account.json</code>，支持 DPoP 无感续期)；若无网页授权则回退读取 <b>AK/SK 直填</b> 或 <b>本机桌面端</b> (<code>state.vscdb</code>，只读保护免锁出)。
+        所有模型调用均以 <code style="color:var(--accent);font-weight:600">codearts-</code> 为路由前缀（例如 <code style="color:var(--fg)">codearts-openpangu-2.0-flash</code>）。
+      </div>
+      <div id="caActiveSourceTag" style="white-space:nowrap;font-size:11px;font-weight:600;padding:3px 10px;border-radius:20px;background:var(--panel2);border:1px solid var(--line);color:var(--dim)">
+        检测中…
+      </div>
+    </div>
+
+    <!-- 4 个核心 KPI 指标卡片 (参考 WorkBuddy 看板栅格) -->
+    <div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin-bottom:20px">
+      <!-- KPI 1: 凭据与账号身份 -->
+      <div class="card" style="position:relative">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+          <div class="k" style="margin:0">当前凭据与账号</div>
+          <span id="caKpiSourcePill" class="badge mini" style="font-size:10px">来源检测中</span>
+        </div>
+        <div class="v" id="caKpiAccount" style="font-size:20px;font-weight:700;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">—</div>
+        <div class="s" id="caKpiAkDomain" style="font-size:11px;color:var(--dim);margin-top:6px;word-break:break-all">
+          AK: — · Domain: —
+        </div>
+      </div>
+
+      <!-- KPI 2: STS 令牌倒计时 -->
+      <div class="card" id="caCardCountdown" style="position:relative">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+          <div class="k" style="margin:0">STS 剩余有效期</div>
+          <span id="caKpiExpiryStateBadge" class="badge mini ok" style="font-size:10px">有效</span>
+        </div>
+        <div class="v mono" id="caKpiCountdown" style="font-size:22px;font-weight:700;color:var(--accent2);letter-spacing:1px">--:--:--</div>
+        <div class="s" id="caKpiExpiryDate" style="font-size:11px;color:var(--dim);margin-top:6px">
+          到期时间：计算中…
+        </div>
+      </div>
+
+      <!-- KPI 3: 套餐与剩余点数 -->
+      <div class="card accent" style="position:relative">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+          <div class="k" style="margin:0">套餐点数配额</div>
+          <span id="caKpiPackageBadge" class="badge mini ok" style="font-size:10px">体验版</span>
+        </div>
+        <div class="v" style="font-size:20px;font-weight:700;display:flex;align-items:baseline;gap:4px">
+          <span id="caKpiRemainCredits" style="color:var(--fg)">—</span>
+          <span style="font-size:12px;color:var(--dim);font-weight:400">/ <span id="caKpiTotalCredits">—</span> 点</span>
+        </div>
+        <div style="margin-top:8px">
+          <div style="width:100%;height:6px;background:var(--panel2);border-radius:3px;overflow:hidden">
+            <div id="caCreditProgress" style="height:100%;width:0%;background:linear-gradient(90deg,var(--accent2),var(--accent));border-radius:3px;transition:width .4s ease"></div>
+          </div>
+          <div class="s" id="caKpiCreditUsageText" style="font-size:11px;color:var(--dim);margin-top:4px;display:flex;justify-content:space-between">
+            <span>使用率: —</span>
+            <span id="caPackageValidity">有效至 —</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- KPI 4: 并发插槽控制 -->
+      <div class="card" style="position:relative">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+          <div class="k" style="margin:0">上游并发插槽</div>
+          <span class="badge mini" style="font-size:10px;background:rgba(16,185,129,.1);color:var(--accent2);border-color:rgba(16,185,129,.3)">最大 3 并发</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
+          <div style="display:flex;align-items:center;gap:6px">
+            <div style="width:12px;height:12px;border-radius:50%;background:var(--accent2);box-shadow:0 0 6px rgba(16,185,129,.4)" title="插槽 1 就绪"></div>
+            <span style="font-size:12px;font-weight:600">S1</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <div style="width:12px;height:12px;border-radius:50%;background:var(--accent2);box-shadow:0 0 6px rgba(16,185,129,.4)" title="插槽 2 就绪"></div>
+            <span style="font-size:12px;font-weight:600">S2</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <div style="width:12px;height:12px;border-radius:50%;background:var(--accent2);box-shadow:0 0 6px rgba(16,185,129,.4)" title="插槽 3 就绪"></div>
+            <span style="font-size:12px;font-weight:600">S3</span>
+          </div>
+          <span style="font-size:11px;color:var(--dim);margin-left:auto">x-ot-session-id 隔离</span>
+        </div>
+        <div class="s" style="font-size:11px;color:var(--dim);margin-top:12px">
+          防并发超限规避 · ES256 DPoP 签名保护
+        </div>
+      </div>
+    </div>
+
+    <!-- 实测探针与调试控制台 (Live Test Probe) -->
+    <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:20px;box-shadow:var(--shadow)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:10px">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span style="font-weight:700;font-size:14px;color:var(--fg);display:inline-flex;align-items:center;gap:6px">
+            ⚡ <b>CodeArts 实测探针</b>
+          </span>
+          <span style="font-size:12px;color:var(--dim)">真实上游端到端延迟、流式输出与 Token 计费探针</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <label style="display:inline-flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;color:var(--fg)">
+            <input type="checkbox" id="caProbeStream" checked style="cursor:pointer">
+            <span>SSE 流式传输</span>
+          </label>
+          <button class="sec mini" onclick="clearCodeartsProbe()">清空控制台</button>
+        </div>
+      </div>
+
+      <!-- 探针配置行 -->
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+        <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:240px">
+          <label style="font-size:12px;color:var(--dim);white-space:nowrap">测试模型:</label>
+          <select id="caProbeModelSelect" class="slot-select" style="max-width:none;width:100%;font-weight:600">
+            <option value="codearts-openpangu-2.0-flash">codearts-openpangu-2.0-flash (极速推荐 · 1.0x)</option>
+            <option value="codearts-deepseek-v4.1-flash-1017">codearts-deepseek-v4.1-flash-1017 (许愿编程 · 0.5x 优惠)</option>
+            <option value="codearts-openpangu-2.0-pro">codearts-openpangu-2.0-pro (盘古旗舰 · 2.0x)</option>
+            <option value="codearts-kimi-k3">codearts-kimi-k3 (深度思考 · 1.5x)</option>
+            <option value="codearts-glm-5.3">codearts-glm-5.3 (长程复杂工程 · 1.5x)</option>
+            <option value="codearts-GLM-5.2">codearts-GLM-5.2 (最新旗舰 · 1.0x)</option>
+            <option value="codearts-Qwen3-VL-235B">codearts-Qwen3-VL-235B (多模态 235B · 2.0x)</option>
+            <option value="codearts-kimi-k2.6-vl">codearts-kimi-k2.6-vl (编程与多模态 · 1.0x)</option>
+            <option value="codearts-glm-5.2-sft-harmony">codearts-glm-5.2-sft-harmony (鸿蒙 ArkTS · 1.0x)</option>
+            <option value="codearts-deepseek-v4.1-flash">codearts-deepseek-v4.1-flash (标准闪电 · 1.0x)</option>
+          </select>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;flex:2;min-width:280px">
+          <input type="text" id="caProbePrompt" class="slot-input" placeholder="输入测试 Prompt..." value="你好，请用一句话介绍你自己">
+          <button id="caBtnProbeRun" onclick="runCodeartsProbe(this)" style="padding:6px 16px;white-space:nowrap;display:inline-flex;align-items:center;gap:6px;font-weight:600">
+            <span>⚡ 发送测试</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- 探针输出控制台 -->
+      <div id="caProbeConsole" style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:8px">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;border-bottom:1px solid var(--line);padding-bottom:8px">
+          <div id="caProbeStatusBadges" style="display:flex;align-items:center;gap:8px;font-size:12px">
+            <span class="badge" style="background:var(--panel3);color:var(--dim)">等待测试</span>
+            <span style="font-size:11px;color:var(--dim)">选择模型并点击「发送测试」即可开始</span>
+          </div>
+          <div id="caProbeMetrics" style="display:flex;align-items:center;gap:12px;font-size:11px;color:var(--dim);font-family:ui-monospace,Menlo,Consolas,monospace">
+            <span>TTFT: —</span>
+            <span>总耗时: —</span>
+            <span>速度: —</span>
+          </div>
+        </div>
+        <pre id="caProbeOutput" style="margin:0;padding:8px 4px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.6;color:var(--fg);white-space:pre-wrap;word-break:break-word;max-height:220px;overflow-y:auto;min-height:48px">控制台输出区域就绪。支持实时流式打字与完整响应解析。</pre>
+      </div>
+    </div>
+
+    <!-- 可用模型中心与倍率矩阵 -->
+    <section style="margin-bottom:24px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+        <div>
+          <h2 style="margin:0;font-size:15px;font-weight:700">华为云 CodeArts 支持模型库与倍率矩阵 <em id="caModelCount"></em></h2>
+          <div style="font-size:12px;color:var(--dim);margin-top:4px">
+            展示当前华为云 CodeArts 官方模型、计费倍率、上下文容量与特性能力支持
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <div class="realm-filter" id="caModelFilterBar" style="margin-left:0">
+            <button class="active" onclick="filterCodeartsModels('all', this)">全部</button>
+            <button onclick="filterCodeartsModels('pangu', this)">盘古 2.0</button>
+            <button onclick="filterCodeartsModels('deepseek', this)">DeepSeek</button>
+            <button onclick="filterCodeartsModels('glm', this)">GLM 系列</button>
+            <button onclick="filterCodeartsModels('kimi', this)">Kimi 系列</button>
+            <button onclick="filterCodeartsModels('vision', this)">多模态/视觉</button>
+          </div>
+          <input type="text" id="caModelSearchInput" oninput="searchCodeartsModels(this.value)" placeholder="搜索模型名称/ID..." class="slot-input" style="width:170px;padding:4px 8px;font-size:12px">
+        </div>
+      </div>
+
+      <div style="overflow-x:auto">
+        <table id="caModelsTable" class="data-cards">
+          <thead>
+            <tr>
+              <th style="text-align:center;width:120px">消费倍率</th>
+              <th style="text-align:left;width:260px">模型 ID</th>
+              <th style="text-align:left;width:180px">官方名称</th>
+              <th style="text-align:center;width:160px">模型专长与特性</th>
+              <th style="text-align:center;width:110px">上下文窗口</th>
+              <th style="text-align:center;width:100px">最大输出</th>
+              <th style="text-align:center;width:120px">探针测试</th>
+            </tr>
+          </thead>
+          <tbody id="caModelsTableBody">
+            <tr><td colspan="7" class="empty">正在拉取 CodeArts 华为云模型清单...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 华为云配额明细与官方包状态 (可折叠) -->
+    <section>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;cursor:pointer" onclick="toggleCodeartsQuotaDetail()">
+        <h2 style="margin:0;font-size:14px;font-weight:700;display:inline-flex;align-items:center;gap:6px">
+          <span>华为云点数包明细与底层指标</span>
+          <span id="caQuotaToggleIcon" style="font-size:11px;color:var(--dim)">▼ 点击展开</span>
+        </h2>
+        <span style="font-size:11px;color:var(--dim)">实时同步自华为云 IAM & Doer 接口</span>
+      </div>
+      <div id="caQuotaDetailCard" style="background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;display:none">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:14px">
+          <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:10px 12px">
+            <div style="font-size:11px;color:var(--dim)">基础包剩余 (Basic Package)</div>
+            <div id="caMetricBasic" style="font-size:15px;font-weight:700;margin-top:4px;color:var(--fg)">—</div>
+          </div>
+          <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:10px 12px">
+            <div style="font-size:11px;color:var(--dim)">赠送包剩余 (Bonus Package)</div>
+            <div id="caMetricBonus" style="font-size:15px;font-weight:700;margin-top:4px;color:var(--fg)">—</div>
+          </div>
+          <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:10px 12px">
+            <div style="font-size:11px;color:var(--dim)">累计消耗 Tokens (Token Used)</div>
+            <div id="caMetricTokens" style="font-size:15px;font-weight:700;margin-top:4px;color:var(--fg)">—</div>
+          </div>
+          <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:10px 12px">
+            <div style="font-size:11px;color:var(--dim)">套餐规格代码 (Spec Code)</div>
+            <div id="caMetricSpec" style="font-size:13px;font-weight:600;margin-top:4px;color:var(--fg);font-family:ui-monospace,Menlo,monospace">—</div>
+          </div>
+        </div>
+        <div id="caBackendModelTags" style="font-size:12px;color:var(--dim);line-height:1.8">
+          官方启用的后端服务模型: 读取中…
+        </div>
+      </div>
+    </section>
+  </div>
+
   <div id="pageAntigravity" class="main-page" style="margin:0;padding:0">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:12px">
       <div style="display:flex;align-items:center;gap:10px">
@@ -1509,6 +1829,10 @@ function updateUI(){
   if(elCnCred) elCnCred.textContent = hasCnCred ? fmt(cnCred) : "—";
   const elCnAcct = document.getElementById("tabCnAccts");
   if(elCnAcct) elCnAcct.textContent = cnAccts.length;
+
+  // 风控限制区跟视图走：只在当前视图有账号被限制时出现，切到国内版
+  // 不该看到国际版的限制（那是另一批账号的事）。
+  if(typeof renderRestrictions === 'function') renderRestrictions();
 };
 
 async function switchViewRealm(r){
@@ -2313,6 +2637,85 @@ function accountThrottleList(a){
 }
 const coolPills = accountThrottleList;
 
+// 上游账号级风控限制（403 / code 11140）聚合视图。
+// 与 collectModelCooldowns 分开：code 6004 是模型级、分钟级；11140 是账号级、
+// 小时到工作日级，处置也不同（等官方解封 / 申诉），所以两处不能混成一张表。
+// 数据全部来自 /accounts 已返回的 restrictedUntil / restrictedDetail，
+// 不额外发请求——页面 5 秒轮询已经在刷新账号了。
+function collectRestrictions(){
+  const now = Date.now() / 1000;
+  const rows = [];
+  for(const a of (typeof ACCOUNTS !== 'undefined' && Array.isArray(ACCOUNTS) ? ACCOUNTS : [])){
+    const until = Number(a.restrictedUntil || 0);
+    if(!until || until <= now) continue;
+    rows.push({
+      uid: a.uid || '',
+      nickname: a.nickname || String(a.uid || '').slice(0, 8),
+      realm: a.realm || '',
+      enabled: a.enabled !== false,
+      until: until,
+      detail: String(a.restrictedDetail || '').trim()
+    });
+  }
+  // 最早恢复的排前面：它决定「还有多久能少一个号」，比昵称顺序更有用。
+  rows.sort((x, y) => x.until - y.until);
+  return rows;
+}
+
+// 上游原文里摘一句人话。restrictedDetail 存的是完整 JSON 正文，
+// 直接甩给用户等于没提示；取 code / msg / 中文 displayMsg 拼成一句。
+function restrictionSummary(detail){
+  if(!detail) return '账号存在异常行为，已被限制使用';
+  let code = '', msg = '', zh = '';
+  try {
+    const m = detail.match(/"code"\s*:\s*"?(\d{4,6})"?/);
+    if(m) code = m[1];
+    const mm = detail.match(/"msg"\s*:\s*"([^"]{1,120})"/);
+    if(mm) msg = mm[1];
+    const mz = detail.match(/"zh"\s*:\s*"([^"]{1,160})"/);
+    if(mz) zh = mz[1];
+  } catch(e){ /* 正文不是 JSON：退回默认文案，不能因此整块不渲染 */ }
+  const parts = [];
+  if(code) parts.push('code ' + code);
+  parts.push(zh || msg || 'request illegal');
+  return parts.join(' · ');
+}
+
+function renderRestrictions(){
+  const section = document.getElementById('restrictionSection');
+  const listBox = document.getElementById('restrictionList');
+  const countEm = document.getElementById('restrictionCount');
+  if(!section || !listBox) return;
+  const rows = collectRestrictions();
+  if(countEm) countEm.textContent = rows.length ? '（' + rows.length + ' 个账号）' : '';
+  if(!rows.length){
+    section.style.display = 'none';
+    return;
+  }
+  section.style.display = '';
+  listBox.innerHTML = rows.map(r => {
+    const left = coolRemain(r.until);
+    const at = fmtCoolAt(r.until);
+    if(!left || !at) return '';
+    // 网关的 RESTRICTED_ACCOUNT_COOLDOWN 是 2 小时，只是「到期再试一次」的探测
+    // 档，不是解封时间。官方口径是 1-3 个工作日，所以这里必须写清楚：
+    // 到点会自动重试，而不是自动恢复，避免看着倒计时归零就以为号回来了。
+    const realmName = r.realm === 'cn' ? '国内版' : '国际版';
+    return '<div class="rs-row">'
+      + '<span class="rs-name">' + esc(r.nickname)
+      +   '<span class="mono">' + esc(String(r.uid).slice(0, 8)) + ' · ' + realmName + '</span></span>'
+      + '<span class="rs-left">⏱ 下次探测剩 ' + left + '</span>'
+      + '<span class="rs-meta">原因：<b>' + esc(restrictionSummary(r.detail)) + '</b>'
+      +   '<br>下次自动探测 ' + at + '（本地时间）'
+      +   (r.enabled ? '' : ' · <b>已停用</b>')
+      +   '<div class="rs-tip">这是账号级风控，换号 / 换身分 / 刷新 token 都无效，'
+      +   '高频重试会让同设备其它账号一起被封。请通过 WorkBuddy 官方渠道反馈申诉，'
+      +   '官方口径 1-3 个工作日解除。</div>'
+      + '</span>'
+      + '</div>';
+  }).filter(Boolean).join('');
+}
+
 function renderModelThrottles(){
   const section = document.getElementById('modelThrottleSection');
   const listBox = document.getElementById('modelThrottleList');
@@ -2368,6 +2771,8 @@ function startThrottleTicker(){
     // 账号表的药丸与状态徽标同样带倒计时，到期后必须回到「可用」，
     // 否则会一直挂着过期的「部分模型限流」。重渲染整表即可，数据是内存里的。
     if(typeof renderAccounts === 'function' && window.ACCOUNTS) renderAccounts();
+    // 风控限制区同样带倒计时；数据在内存里，重渲染即可，不重新拉 /accounts。
+    if(typeof renderRestrictions === 'function') renderRestrictions();
     const rows = collectModelCooldowns();
     const box = document.getElementById('cards');
     const first = box && box.querySelector('.card');
@@ -2403,6 +2808,17 @@ function accountRow(a){
   const restricted = restrictedUntil > Date.now() / 1000;
   const restrictedLeft = restricted ? coolRemain(restrictedUntil) : '';
   const restrictedTitle = esc(String(a.restrictedDetail || '账号存在异常行为，已被限制使用').slice(0, 400));
+  // 账号行风控徽标。徽标本身带倒计时（倒计时刷新走 startThrottleTicker 的整表重渲染），
+  // 下面是常驻的说明行：悬停 tooltip 在触屏上等于没有，而这条信息
+  // （不能换号、要官方申诉）恰恰是不能只藏在 tooltip 里的。
+  let restrictRow = '';
+  if(restricted){
+    const at = fmtCoolAt(restrictedUntil);
+    restrictRow = '<div class="rs-acct-note" title="上游风控限制（403 / code 11140）：' + restrictedTitle + '">'
+      + '⛔ 账号被上游风控限制，' + (at ? ('预计 ' + at + ' 后自动探测') : '将自动探测')
+      + ' · 换号 / 换身分 / 刷新 token 均无效，频繁重试会连带封禁同设备其它账号'
+      + ' · 请走 WorkBuddy 官方渠道申诉（通常 1-3 个工作日解除）</div>';
+  }
   const state = restricted ? '<span class="badge bad" title="上游风控限制（403 / code 11140）：' + restrictedTitle + '">风控限制 ' + restrictedLeft + '</span>'
               : !a.enabled ? '<span class="badge off">已停用</span>'
               : a.reserveBlocked ? '<span class="badge warn">保留积分</span>'
@@ -2427,7 +2843,7 @@ function accountRow(a){
     +   '<div style="font-weight:600;font-size:13px;color:var(--fg)">' + esc(a.nickname) + '</div>'
     + '<div class="mono" style="color:var(--dim);font-size:11px">' + esc(a.uid.slice(0,8)) + ' · ' + esc(a.source) + ' · 到期 ' + esc(a.expiresIn || '?') + '</div>'
     + (a.machineId ? ('<div class="mono" style="color:var(--dim);font-size:10px;margin-top:2px" title="由账号UID稳定派生的专属设备码，防多号关联风控">设备码: ' + esc(a.machineId.slice(0,14)) + '...</div>') : '')
-    + err + accountThrottleList(a) + '</td>'
+    + err + accountThrottleList(a) + restrictRow + '</td>'
     + '<td style="text-align:center" data-label="状态">' + state + '</td>'
     + '<td style="text-align:center" data-label="出口">' + slotSelectHtml(a) + '</td>'
     + '<td style="text-align:left;white-space:nowrap" data-label="积分">' + credText + '</td>'
@@ -2503,6 +2919,7 @@ async function loadAccounts(){
     (byAcct.accounts || []).forEach(a => { USAGE_BY_ACCOUNT[a.account] = a; });
     await loadProxySlots();
     renderAccounts();
+    renderRestrictions();
     updateUI();
     // Auto-fetch credits once if not present
     if(window.ACCOUNTS.length && window.ACCOUNTS.some(a => !a.credits)){
@@ -3007,14 +3424,29 @@ async function refreshInner(){
     ? card('模型限流中', String(throttled.length), throttleSub, 'warn')
     : card('模型限流', '0', '全部模型可用', 'accent2');
 
+  // 风控限制卡：账号级、按工作日计，比模型限流重一档，所以跟在限流卡之后、
+  // 账号池之前——它解释的是"池子里为什么少了号"。视图维度与上面的限流卡一致，
+  // 都是当前 realm（refreshInner 的 /usage 用的就是 window.VIEW_REALM）。
+  const restrictedRows = (window.ACCOUNTS || []).filter(a => {
+    const until = Number(a.restrictedUntil || 0);
+    return until > Date.now() / 1000 && (a.realm || 'intl') === (window.VIEW_REALM || 'intl');
+  });
+  const restrictionCard = restrictedRows.length
+    ? card('账号风控中', String(restrictedRows.length),
+           restrictedRows.map(a => (a.nickname || String(a.uid||'').slice(0,8)) + ' 剩 ' + (coolRemain(a.restrictedUntil) || '?')).join(' · '),
+           'err')
+    : '';
+
   document.getElementById('cards').innerHTML =
     throttleCard +
+    restrictionCard +
     card('可用账号池', activeAccts + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">/ ' + totalAccts + ' 正常</span>', poolSub, 'accent') +
     card('积分余额', hasCreds ? (fmt(totRemain) + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">积分</span>') : '正常可用', subCredit, 'accent2') +
     card('网关调用量', fmt(t.requests) + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">次</span>', '本出口累计消耗 ' + fmt(t.total_tokens) + ' Token · ' + Number(t.credit || 0).toFixed(2) + ' 积分', '') +
     card('请求成功率', succStr, errSub, perf.errors ? 'warn' : 'accent2');
 
   renderModelThrottles();
+  renderRestrictions();
 
   const total = recent.total || 0;
   RECENT_PAGE = recent.page || 1;
@@ -4010,6 +4442,7 @@ function switchMainTab(tab){
   const btnLogs = document.getElementById('btnNavLogs');
   const btnSettings = document.getElementById('btnNavSettings');
   const btnQoder = document.getElementById('btnNavQoder');
+  const btnCodearts = document.getElementById('btnNavCodearts');
   const btnAntigravity = document.getElementById('btnNavAntigravity');
   const pageGateway = document.getElementById('pageGateway');
   const pageTrae = document.getElementById('pageTrae');
@@ -4017,6 +4450,7 @@ function switchMainTab(tab){
   const pageLogs = document.getElementById('pageLogs');
   const pageSettings = document.getElementById('pageSettings');
   const pageQoder = document.getElementById('pageQoder');
+  const pageCodearts = document.getElementById('pageCodearts');
   const pageAntigravity = document.getElementById('pageAntigravity');
   const tabs = [
     ['gateway', btnGateway, pageGateway],
@@ -4025,6 +4459,7 @@ function switchMainTab(tab){
     ['logs', btnLogs, pageLogs],
     ['settings', btnSettings, pageSettings],
     ['qoder', btnQoder, pageQoder],
+    ['codearts', btnCodearts, pageCodearts],
     ['antigravity', btnAntigravity, pageAntigravity]
   ];
   tabs.forEach(([name, btn, page]) => {
@@ -4037,6 +4472,7 @@ function switchMainTab(tab){
   if(tab === 'analytics'){ loadAnalytics(); loadAnalyticsMatrix(); }
   if(tab === 'settings'){ loadSettings(); loadProxySlots(); }
   if(tab === 'qoder'){ loadQoderData(); }
+  if(tab === 'codearts'){ loadCodeartsData(); }
   if(tab === 'logs'){
     startLogPolling();
     fetchNewLogs(true);
@@ -4052,6 +4488,573 @@ let qoderAccountsCache = [];
 let qoderPoolCache = {};
 let qoderQuotaCache = {};
 let qoderModelsCache = [];
+
+let _codeartsPollTimer = null;
+async function startCodeartsOAuth(){
+  try{
+    const res = await postJSON('/codearts/oauth/start', {});
+    if(!res || !res.login_url){
+      toast('获取华为云授权链接失败', 'warn');
+      return;
+    }
+    window.open(res.login_url, '_blank');
+    toast('已打开华为云授权页，请在浏览器中完成登录…', 'ok');
+    if(_codeartsPollTimer) clearInterval(_codeartsPollTimer);
+    _codeartsPollTimer = setInterval(async () => {
+      try{
+        const poll = await getJSON('/codearts/oauth/poll');
+        if(poll && poll.result && poll.result.status === 'success'){
+          clearInterval(_codeartsPollTimer);
+          _codeartsPollTimer = null;
+          toast('CodeArts 授权成功！已绑定会话', 'ok');
+          loadCodeartsData();
+        } else if(poll && poll.result && poll.result.status === 'failed'){
+          clearInterval(_codeartsPollTimer);
+          _codeartsPollTimer = null;
+          toast('登录失败: ' + (poll.result.error || '未知错误'), 'warn');
+        }
+      }catch(e){
+        // ignore network jitter during poll
+      }
+    }, 2000);
+  }catch(e){
+    toast('发起授权异常: ' + e.message, 'warn');
+  }
+}
+
+async function refreshCodeartsToken(){
+  try{
+    toast('正在通过 DPoP 刷新 STS 令牌…', 'ok');
+    const res = await postJSON('/codearts/oauth/refresh', {});
+    if(res && res.ok){
+      toast('STS 令牌续期成功！', 'ok');
+      loadCodeartsData();
+    }else{
+      toast('续期失败: ' + (res.error || '未知原因'), 'warn');
+    }
+  }catch(e){
+    toast('续期异常: ' + e.message, 'warn');
+  }
+}
+
+/* ---- CodeArts 华为云与暗色主题模块 ---- */
+let _codeartsCountdownInterval = null;
+let _codeartsCachedModels = [];
+let _codeartsCurrentFilter = 'all';
+let _codeartsSearchQuery = '';
+
+function initDashboardTheme(){
+  try {
+    var saved = localStorage.getItem('wb-theme');
+    var theme = saved === 'dark' ? 'dark' : 'light';
+    applyDashboardTheme(theme, false);
+  } catch(e){}
+}
+
+function applyDashboardTheme(theme, saveStorage){
+  if(theme === 'dark'){
+    document.documentElement.setAttribute('data-theme', 'dark');
+  } else {
+    document.documentElement.removeAttribute('data-theme');
+  }
+  if(saveStorage){
+    try { localStorage.setItem('wb-theme', theme); } catch(e){}
+  }
+  var btn = document.getElementById('themeToggleBtn');
+  if(btn){
+    var isDark = theme === 'dark';
+    var iconL = btn.querySelector('.theme-icon-light');
+    var iconD = btn.querySelector('.theme-icon-dark');
+    if(iconL && iconD){
+      iconL.style.display = isDark ? 'inline' : 'none';
+      iconD.style.display = isDark ? 'none' : 'inline';
+    }
+  }
+}
+
+function toggleDashboardTheme(){
+  var cur = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+  var next = cur === 'dark' ? 'light' : 'dark';
+  applyDashboardTheme(next, true);
+}
+
+async function copyCodeartsModelId(text, btn){
+  try {
+    await writeClipboard(text);
+    if(btn){
+      const old = btn.textContent;
+      btn.textContent = '已复制';
+      setTimeout(() => { btn.textContent = old; }, 1500);
+    }
+    toast(`已复制模型 ID: ${text}`, 'ok');
+  } catch(e){
+    toast('复制失败', 'warn');
+  }
+}
+
+async function loadCodeartsData(force){
+  const badge = document.getElementById('codeartsStateBadge');
+  const sourceTag = document.getElementById('caActiveSourceTag');
+  const kpiSourcePill = document.getElementById('caKpiSourcePill');
+  const kpiAccount = document.getElementById('caKpiAccount');
+  const kpiAkDomain = document.getElementById('caKpiAkDomain');
+
+  try{
+    const [status, models, credits] = await Promise.all([
+      getJSON('/codearts/status'),
+      getJSON('/codearts/models').catch(() => ({data: []})),
+      getJSON('/codearts/credits').catch(() => null),
+    ]);
+
+    const state = status.state || 'unknown';
+    if(badge){
+      badge.textContent = state === 'ready' ? '就绪'
+                        : state === 'expired' ? 'STS 已过期'
+                        : '不可用';
+      badge.className = 'badge ' + (state === 'ready' ? 'ok' : 'warn');
+    }
+
+    const sourceLabel = status.source === 'web_oauth' ? '独立网页 OAuth (支持自动续期)'
+                      : status.source === 'desktop' ? '本机桌面 IDE (只读)'
+                      : status.source === 'config_ak_sk' ? '永久 AK/SK 配置'
+                      : (status.source || '未知来源');
+    const sourceShort = status.source === 'web_oauth' ? '网页 OAuth'
+                      : status.source === 'desktop' ? '桌面端提取'
+                      : status.source === 'config_ak_sk' ? '永久 AK/SK'
+                      : '未知';
+
+    if(sourceTag){
+      sourceTag.textContent = '当前生效：' + sourceLabel;
+      sourceTag.style.color = status.source === 'web_oauth' ? 'var(--accent2)'
+                            : status.source === 'config_ak_sk' ? 'var(--think)'
+                            : 'var(--accent)';
+    }
+
+    if(kpiSourcePill){
+      kpiSourcePill.textContent = sourceShort;
+      kpiSourcePill.className = 'badge mini ' + (status.source === 'web_oauth' ? 'ok' : '');
+    }
+    if(kpiAccount){
+      kpiAccount.textContent = status.account || '未登录';
+      kpiAccount.title = status.account || '';
+    }
+    if(kpiAkDomain){
+      kpiAkDomain.innerHTML = `<span>AK: <b>${esc(status.accessKey || '—')}</b></span> · <span>Domain: <b>${esc(status.domainId || '—')}</b></span>`;
+    }
+
+    startCodeartsCountdown(status.expiresAt);
+    updateCodeartsCreditsKpi(credits);
+
+    _codeartsCachedModels = models.data || [];
+    renderCodeartsModelsTable();
+    updateCodeartsProbeSelect(_codeartsCachedModels);
+    updateCodeartsQuotaDetails(credits);
+
+    if(force) toast('CodeArts 华为云状态与配额已同步', 'ok');
+  }catch(e){
+    if(badge){ badge.textContent = '读取失败'; badge.className = 'badge warn'; }
+    if(kpiAccount) kpiAccount.textContent = '连接失败';
+    console.error('loadCodeartsData error:', e);
+    toast('CodeArts 数据加载异常: ' + (e && e.message || e), 'warn');
+  }
+}
+
+function startCodeartsCountdown(expiresAtStr){
+  if(_codeartsCountdownInterval) clearInterval(_codeartsCountdownInterval);
+  const cdEl = document.getElementById('caKpiCountdown');
+  const badgeEl = document.getElementById('caKpiExpiryStateBadge');
+  const dateEl = document.getElementById('caKpiExpiryDate');
+  if(!cdEl) return;
+  if(!expiresAtStr){
+    cdEl.textContent = '长期有效';
+    if(badgeEl){ badgeEl.textContent = '有效'; badgeEl.className = 'badge mini ok'; }
+    return;
+  }
+  const expiryDate = new Date(expiresAtStr);
+  if(dateEl){
+    dateEl.textContent = '到期时间: ' + expiryDate.toLocaleString('zh-CN', {hour12:false});
+  }
+  const tick = () => {
+    const diff = expiryDate.getTime() - Date.now();
+    if(diff <= 0){
+      cdEl.textContent = '00:00:00';
+      cdEl.style.color = 'var(--bad)';
+      if(badgeEl){ badgeEl.textContent = '已过期'; badgeEl.className = 'badge mini warn'; }
+      return;
+    }
+    const totalSec = Math.floor(diff / 1000);
+    const hours = Math.floor(totalSec / 3600);
+    const mins = Math.floor((totalSec % 3600) / 60);
+    const secs = totalSec % 60;
+    const pad = n => String(n).padStart(2, '0');
+    if(hours >= 24){
+      const days = Math.floor(hours / 24);
+      const remH = hours % 24;
+      cdEl.textContent = `${days}天 ${pad(remH)}:${pad(mins)}:${pad(secs)}`;
+    } else {
+      cdEl.textContent = `${pad(hours)}:${pad(mins)}:${pad(secs)}`;
+    }
+    if(diff < 3600000){
+      cdEl.style.color = 'var(--warn)';
+      if(badgeEl){ badgeEl.textContent = '即将过期'; badgeEl.className = 'badge mini warn'; }
+    } else {
+      cdEl.style.color = 'var(--accent2)';
+      if(badgeEl){ badgeEl.textContent = '有效'; badgeEl.className = 'badge mini ok'; }
+    }
+  };
+  tick();
+  _codeartsCountdownInterval = setInterval(tick, 1000);
+}
+
+function updateCodeartsCreditsKpi(credits){
+  const remainEl = document.getElementById('caKpiRemainCredits');
+  const totalEl = document.getElementById('caKpiTotalCredits');
+  const progressEl = document.getElementById('caCreditProgress');
+  const usageTextEl = document.getElementById('caKpiCreditUsageText');
+  const packageBadge = document.getElementById('caKpiPackageBadge');
+
+  if(!credits || !credits.metrics){
+    if(remainEl) remainEl.textContent = '—';
+    if(totalEl) totalEl.textContent = '—';
+    return;
+  }
+
+  const totalMetric = (credits.metrics || []).find(m => m.name === 'usageTotalPackageCredit') || {};
+  const remain = totalMetric.package_credit_remain !== undefined ? totalMetric.package_credit_remain : 0;
+  const total = totalMetric.package_credit_amount !== undefined ? totalMetric.package_credit_amount : 0;
+  const used = totalMetric.package_credit_used !== undefined ? totalMetric.package_credit_used : 0;
+  const percent = total > 0 ? Math.min(100, Math.max(0, Math.round((used / total) * 100))) : 0;
+
+  if(remainEl) remainEl.textContent = Number(remain).toLocaleString('en-US', {maximumFractionDigits:1});
+  if(totalEl) totalEl.textContent = Number(total).toLocaleString('en-US', {maximumFractionDigits:0});
+  if(progressEl){
+    progressEl.style.width = percent + '%';
+    progressEl.style.background = percent > 85 ? 'var(--bad)' : percent > 60 ? 'var(--warn)' : 'linear-gradient(90deg,var(--accent2),var(--accent))';
+  }
+
+  const pkg = credits.package || {};
+  if(packageBadge){
+    packageBadge.textContent = pkg.package_name_cn || '体验版';
+  }
+  const endD = pkg.end_date || credits.end_date || '';
+  if(usageTextEl){
+    usageTextEl.innerHTML = `<span>已消耗: <b>${percent}%</b> (${Number(used).toLocaleString('en-US', {maximumFractionDigits:1})}点)</span> <span>${endD ? '有效期至 ' + endD : ''}</span>`;
+  }
+}
+
+function updateCodeartsQuotaDetails(credits){
+  if(!credits) return;
+  const basicEl = document.getElementById('caMetricBasic');
+  const bonusEl = document.getElementById('caMetricBonus');
+  const tokensEl = document.getElementById('caMetricTokens');
+  const specEl = document.getElementById('caMetricSpec');
+  const modelsEl = document.getElementById('caBackendModelTags');
+
+  const metrics = credits.metrics || [];
+  const basicM = metrics.find(m => m.name === 'usageBasicPackageCredit') || {};
+  const bonusM = metrics.find(m => m.name === 'usageBonusPackageCredit') || {};
+  const tokenM = metrics.find(m => m.name === 'usageTokenChatMessages') || {};
+
+  if(basicEl) basicEl.textContent = basicM.package_credit_remain !== undefined ? `${basicM.package_credit_remain} / ${basicM.package_credit_amount || 0} 点` : '—';
+  if(bonusEl) bonusEl.textContent = bonusM.package_credit_remain !== undefined ? `${bonusM.package_credit_remain} / ${bonusM.package_credit_amount || 0} 点` : '—';
+  if(tokensEl) tokensEl.textContent = tokenM.usage_token_num ? Number(tokenM.usage_token_num).toLocaleString('en-US') + ' tokens' : '0 tokens';
+  if(specEl) specEl.textContent = (credits.package && credits.package.spec_code) || 'codearts.agent.individual.trial';
+
+  if(modelsEl && credits.model_metrics){
+    modelsEl.innerHTML = '<span style="font-weight:600;color:var(--fg)">官方启用的后端服务模型:</span> ' +
+      credits.model_metrics.map(mm => `<span class="badge mini" style="margin:2px 4px;background:var(--panel2);border-color:var(--line);color:var(--fg)">${esc(mm.model_name || mm.model_id)}</span>`).join('');
+  }
+}
+
+function updateCodeartsProbeSelect(models){
+  const sel = document.getElementById('caProbeModelSelect');
+  if(!sel || !models || !models.length) return;
+  const current = sel.value;
+  sel.innerHTML = models.map(m => {
+    const id = m.id || '';
+    const idLower = id.toLowerCase();
+    let note = '';
+    if(idLower.includes('deepseek-v4.1-flash-1017')) note = ' (许愿编程 · 0.5x 优惠)';
+    else if(idLower.includes('openpangu-2.0-flash')) note = ' (极速推荐 · 1.0x)';
+    else if(idLower.includes('openpangu-2.0-pro')) note = ' (盘古旗舰 · 2.0x)';
+    else if(idLower.includes('kimi-k3')) note = ' (深度思考 · 1.5x)';
+    else if(idLower.includes('glm-5.3')) note = ' (长程编程 · 1.5x)';
+    else if(idLower.includes('qwen3-vl-235b')) note = ' (多模态 235B · 2.0x)';
+    else note = ` (${m.name || id})`;
+    return `<option value="${esc(id)}">${esc(id)}${esc(note)}</option>`;
+  }).join('');
+  if(current && models.some(m => m.id === current)){
+    sel.value = current;
+  }
+}
+
+function toggleCodeartsQuotaDetail(){
+  const card = document.getElementById('caQuotaDetailCard');
+  const icon = document.getElementById('caQuotaToggleIcon');
+  if(!card) return;
+  const isHidden = card.style.display === 'none';
+  card.style.display = isHidden ? 'block' : 'none';
+  if(icon) icon.textContent = isHidden ? '▲ 点击收起' : '▼ 点击展开';
+}
+
+function filterCodeartsModels(category, btn){
+  _codeartsCurrentFilter = category || 'all';
+  const bar = document.getElementById('caModelFilterBar');
+  if(bar && btn){
+    Array.from(bar.querySelectorAll('button')).forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  }
+  renderCodeartsModelsTable();
+}
+
+function searchCodeartsModels(query){
+  _codeartsSearchQuery = (query || '').toLowerCase().trim();
+  renderCodeartsModelsTable();
+}
+
+function renderCodeartsModelsTable(){
+  const tbody = document.getElementById('caModelsTableBody');
+  const countEl = document.getElementById('caModelCount');
+  if(!tbody) return;
+  let items = _codeartsCachedModels || [];
+
+  if(_codeartsCurrentFilter && _codeartsCurrentFilter !== 'all'){
+    items = items.filter(m => {
+      const id = (m.id || '').toLowerCase();
+      const name = (m.name || '').toLowerCase();
+      if(_codeartsCurrentFilter === 'pangu') return id.includes('pangu');
+      if(_codeartsCurrentFilter === 'deepseek') return id.includes('deepseek');
+      if(_codeartsCurrentFilter === 'glm') return id.includes('glm');
+      if(_codeartsCurrentFilter === 'kimi') return id.includes('kimi');
+      if(_codeartsCurrentFilter === 'vision') return m.supports_images;
+      return true;
+    });
+  }
+
+  if(_codeartsSearchQuery){
+    items = items.filter(m => {
+      const id = (m.id || '').toLowerCase();
+      const name = (m.name || '').toLowerCase();
+      return id.includes(_codeartsSearchQuery) || name.includes(_codeartsSearchQuery);
+    });
+  }
+
+  if(countEl) countEl.textContent = `(${items.length} 个可用)`;
+
+  if(!items.length){
+    tbody.innerHTML = `<tr><td colspan="7" class="empty">没有匹配的 CodeArts 模型</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = items.map(m => {
+    const id = m.id || '';
+    const idLower = id.toLowerCase();
+    let multBadge = '<span class="badge" style="background:rgba(59,130,246,.12);color:var(--accent);border-color:rgba(59,130,246,.3)">1.0x 标准</span>';
+    if(idLower.includes('deepseek-v4.1-flash-1017')){
+      multBadge = '<span class="badge ok" style="background:rgba(2,132,199,.12);color:#0284c7;border-color:rgba(2,132,199,.3);font-weight:600">0.5x 优惠</span>';
+    } else if(idLower.includes('openpangu-2.0-pro') || idLower.includes('qwen3-vl-235b')){
+      multBadge = '<span class="badge" style="background:rgba(245,158,11,.12);color:var(--warn);border-color:rgba(245,158,11,.3);font-weight:600">2.0x 旗舰</span>';
+    } else if(idLower.includes('kimi-k3') || idLower.includes('glm-5.3') || idLower.includes('thought')){
+      multBadge = '<span class="badge" style="background:rgba(192,132,252,.12);color:var(--think);border-color:rgba(192,132,252,.3);font-weight:600">1.5x 推理</span>';
+    } else if(idLower.includes('openpangu-2.0-flash')){
+      multBadge = '<span class="badge ok" style="background:rgba(16,185,129,.12);color:var(--accent2);border-color:rgba(16,185,129,.3);font-weight:600">1.0x 极速</span>';
+    }
+
+    const pills = [];
+    if(m.supports_images) pills.push('<span class="badge mini" style="background:rgba(14,165,233,.12);color:#0284c7;border-color:rgba(14,165,233,.3)">🖼️ 多模态</span>');
+    if(idLower.includes('thought') || idLower.includes('kimi-k3') || idLower.includes('pro')) {
+      pills.push('<span class="badge mini" style="background:rgba(192,132,252,.12);color:var(--think);border-color:rgba(192,132,252,.3)">🧠 CoT思考</span>');
+    }
+    if(idLower.includes('code') || idLower.includes('glm-5.3') || idLower.includes('harmony') || idLower.includes('1017')) {
+      pills.push('<span class="badge mini" style="background:rgba(16,185,129,.12);color:var(--accent2);border-color:rgba(16,185,129,.3)">💻 代码专精</span>');
+    }
+    if(idLower.includes('flash')) {
+      pills.push('<span class="badge mini" style="background:rgba(245,158,11,.12);color:var(--warn);border-color:rgba(245,158,11,.3)">⚡ 极速</span>');
+    }
+    if(!pills.length) pills.push('<span class="badge mini" style="color:var(--dim)">通用对话</span>');
+
+    const ctx = m.context_window ? (m.context_window >= 1048576 ? Math.round(m.context_window/1048576)+'M' : Math.round(m.context_window/1024)+'K') : '64K';
+    const out = m.max_output_tokens ? (m.max_output_tokens >= 1048576 ? Math.round(m.max_output_tokens/1048576)+'M' : Math.round(m.max_output_tokens/1024)+'K') : '64K';
+
+    return `<tr>
+      <td style="text-align:center">${multBadge}</td>
+      <td style="text-align:left">
+        <div style="display:flex;align-items:center;gap:6px">
+          <code style="font-weight:600;color:var(--fg)">${esc(id)}</code>
+          <button class="sec mini" style="padding:1px 6px;font-size:10px" onclick="copyCodeartsModelId('${esc(id)}', this)" title="复制模型ID">复制</button>
+        </div>
+      </td>
+      <td style="text-align:left">
+        <span style="font-weight:500;color:var(--fg)">${esc(m.name || id)}</span>
+      </td>
+      <td style="text-align:center">
+        <div style="display:flex;justify-content:center;gap:4px;flex-wrap:wrap">
+          ${pills.join(' ')}
+        </div>
+      </td>
+      <td style="text-align:center;font-family:ui-monospace,Menlo,monospace;font-size:12px">${ctx}</td>
+      <td style="text-align:center;font-family:ui-monospace,Menlo,monospace;font-size:12px">${out}</td>
+      <td style="text-align:center">
+        <button class="primary mini" onclick="selectCodeartsModelForProbe('${esc(id)}')" style="padding:3px 10px;font-size:11px">
+          ⚡ 实测
+        </button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+function selectCodeartsModelForProbe(modelId){
+  const sel = document.getElementById('caProbeModelSelect');
+  if(sel){
+    let exists = false;
+    for(let i=0; i<sel.options.length; i++){
+      if(sel.options[i].value === modelId){
+        sel.selectedIndex = i;
+        exists = true;
+        break;
+      }
+    }
+    if(!exists){
+      const opt = document.createElement('option');
+      opt.value = modelId;
+      opt.textContent = modelId;
+      sel.appendChild(opt);
+      sel.value = modelId;
+    }
+  }
+  const promptEl = document.getElementById('caProbePrompt');
+  if(promptEl) promptEl.focus();
+  const consoleEl = document.getElementById('caProbeConsole');
+  if(consoleEl) consoleEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  toast(`已选择模型 ${modelId}，点击「发送测试」即可实测`, 'ok');
+}
+
+function clearCodeartsProbe(){
+  const outEl = document.getElementById('caProbeOutput');
+  const statusEl = document.getElementById('caProbeStatusBadges');
+  const metricsEl = document.getElementById('caProbeMetrics');
+  if(outEl) outEl.textContent = '控制台已清空。';
+  if(statusEl) statusEl.innerHTML = `<span class="badge" style="background:var(--panel3);color:var(--dim)">等待测试</span>`;
+  if(metricsEl) metricsEl.innerHTML = `<span>TTFT: —</span> <span>总耗时: —</span> <span>速度: —</span>`;
+}
+
+async function runCodeartsProbe(btn){
+  const modelEl = document.getElementById('caProbeModelSelect');
+  const promptEl = document.getElementById('caProbePrompt');
+  const streamEl = document.getElementById('caProbeStream');
+  const outEl = document.getElementById('caProbeOutput');
+  const statusEl = document.getElementById('caProbeStatusBadges');
+  const metricsEl = document.getElementById('caProbeMetrics');
+  if(!modelEl || !outEl) return;
+
+  const modelId = modelEl.value;
+  const prompt = (promptEl && promptEl.value.trim()) || '你好，请用一句话介绍你自己';
+  const isStream = streamEl ? streamEl.checked : true;
+
+  if(btn) btn.disabled = true;
+  if(statusEl){
+    statusEl.innerHTML = `<span class="badge warn mini" style="display:inline-flex;align-items:center;gap:4px"><span class="spin">⟳</span> 正在请求 ${esc(modelId)}...</span>`;
+  }
+  if(metricsEl){
+    metricsEl.innerHTML = `<span>TTFT: 测算中…</span> <span>总耗时: 测算中…</span> <span>速度: —</span>`;
+  }
+  outEl.textContent = '正在连接 CodeArts 华为云上游…\n';
+
+  const startTime = performance.now();
+  let firstTokenTime = null;
+  let replyText = '';
+  let completionTokens = 0;
+
+  try {
+    const resp = await fetch('/v1/chat/completions', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({
+        model: modelId,
+        messages: [{ role: 'user', content: prompt }],
+        stream: isStream,
+        max_tokens: 256
+      })
+    });
+
+    if(!resp.ok){
+      const errText = await resp.text();
+      let msg = 'HTTP ' + resp.status;
+      try {
+        const j = JSON.parse(errText);
+        if(j.error && j.error.message) msg = j.error.message;
+      } catch(_) {}
+      throw new Error(msg);
+    }
+
+    if(isStream){
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+
+      while(true){
+        const { done, value } = await reader.read();
+        if(done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+
+        for(const line of lines){
+          const trimmed = line.trim();
+          if(!trimmed || !trimmed.startsWith('data:')) continue;
+          const payload = trimmed.replace(/^data:\s*/, '');
+          if(payload === '[DONE]') break;
+          try {
+            const data = JSON.parse(payload);
+            const delta = data.choices && data.choices[0] && data.choices[0].delta;
+            if(delta){
+              if(delta.content){
+                if(!firstTokenTime){
+                  firstTokenTime = performance.now();
+                  outEl.textContent = '';
+                }
+                replyText += delta.content;
+                completionTokens++;
+                outEl.textContent = replyText;
+              } else if(delta.reasoning_content){
+                if(!firstTokenTime) firstTokenTime = performance.now();
+                replyText += delta.reasoning_content;
+                outEl.textContent = '[思考] ' + replyText;
+              }
+            }
+          } catch(e){}
+        }
+      }
+    } else {
+      const data = await resp.json();
+      const choice = data.choices && data.choices[0];
+      replyText = (choice && choice.message && choice.message.content) || JSON.stringify(data, null, 2);
+      if(choice && choice.message && choice.message.reasoning_content){
+        replyText = '[思考] ' + choice.message.reasoning_content + '\n\n' + replyText;
+      }
+      outEl.textContent = replyText;
+      if(data.usage) completionTokens = data.usage.completion_tokens || 0;
+    }
+
+    const totalTime = Math.round(performance.now() - startTime);
+    const ttft = firstTokenTime ? Math.round(firstTokenTime - startTime) : totalTime;
+    const tps = totalTime > 0 && completionTokens > 0 ? (completionTokens / (totalTime / 1000)).toFixed(1) : '—';
+
+    if(statusEl){
+      statusEl.innerHTML = `<span class="badge ok mini">HTTP 200 成功</span> <span style="font-size:11px;color:var(--dim)">响应完成</span>`;
+    }
+    if(metricsEl){
+      metricsEl.innerHTML = `<span>TTFT: <b>${ttft}ms</b></span> <span>总耗时: <b>${totalTime}ms</b></span> <span>速度: <b>${tps} t/s</b></span>`;
+    }
+  } catch(err){
+    if(statusEl){
+      statusEl.innerHTML = `<span class="badge warn mini">请求失败</span> <span style="font-size:11px;color:var(--bad)">${esc(err.message)}</span>`;
+    }
+    outEl.textContent = '❌ 测试遇到异常: ' + err.message + '\n\n提示：\n1. 请检查 STS 令牌是否已过期；\n2. 若为桌面 IDE 凭据，请在 CodeArts Agent 中发起任意对话刷新会话。';
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
 
 async function loadQoderData(force){
   try{
@@ -5472,7 +6475,7 @@ function renderTraeAccount(){
       + '<div style="font-size:15px;margin-bottom:8px">还没有 Trae 账号</div>'
       + '<div style="color:var(--dim);font-size:13px;margin-bottom:18px">'
       +   '点击「+ 添加账号 (OAuth)」登录，或「导入账号」批量导入；'
-      +   '登录后自动参与 failover 调度（WorkBuddy 额度耗尽时接管）'
+      +   '登录后由 trae- 前缀模型直通调度（WorkBuddy 侧不再自动降级到 Trae）'
       + '</div></div>';
     if(count) count.textContent = '';
     return;
@@ -6262,7 +7265,12 @@ async function benchmarkAllAntigravityModels(btn){
   toast('反重力常用模型测速完成 (测试了 ' + results.length + ' 个模型)', 'ok');
 }
 
-window.addEventListener('load', () => { loadTraeToken(); loadTraeModels(); });
+window.addEventListener('load', () => {
+  initDashboardTheme();
+  loadTraeToken();
+  loadTraeModels();
+  if(window.__MAIN_TAB__ === 'codearts') loadCodeartsData();
+});
 </script>
 </body>
 </html>

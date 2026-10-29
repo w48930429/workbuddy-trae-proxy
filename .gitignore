@@ -53,3 +53,7 @@ antigravity-proxy-py/data/*.bak*
 !antigravity-proxy-py/data/accounts.example.json
 antigravity-proxy-py/*.log
 antigravity-proxy-py/*.pid
+
+# 临时备份与探针脚本
+_backup*/
+_probe*.py

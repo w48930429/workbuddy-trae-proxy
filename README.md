@@ -70,7 +70,7 @@ graph TD
     AG_Proxy --> Up_Google
 ```
 
-### 2. 四大融合开源项目来源
+### 2. 五大融合开源项目来源
 
 | 序号 | 融合模块 | 原始 GitHub 仓库 | 原始技术栈 | 本项目集成与增强定位 |
 | :---: | :--- | :--- | :--- | :--- |
@@ -78,6 +78,43 @@ graph TD
 | **2** | **Trae 多账号与协议代理** | [**smart-open/TraeWorkAssistant**](https://github.com/smart-open/TraeWorkAssistant)<br>*(同步派生: [w48930429/workbuddy-trae-proxy](https://github.com/w48930429/workbuddy-trae-proxy))* | Rust / Tauri | **Trae 子系统**：位于 `trae/` 目录，移植 Trae SOLO 网关协议转换、OAuth 免密刷新、多账号指纹伪装、积分监控看板与自动 Failover 切换。 |
 | **3** | **Antigravity 反重力代理** | [**nnnextyear/antigravity-proxy**](https://github.com/nnnextyear/antigravity-proxy) | TypeScript<br>(Node.js Fastify) | **Google Cloud Code 代理**：位于 `antigravity-proxy/`，常驻 `43810` 端口。提供 Gemini/Claude 多账号池、OAuth 自动保活、Breaker 状态机熔断、Thought Signature 恢复及 Google Proto Schema 兼容清洗。 |
 | **4** | **Qoder 协议转换与账号池** | [**Zhengyuuuui/qoder2api**](https://github.com/Zhengyuuuui/qoder2api) | Go | **纯 Python 移植**：位于 `qoder/` 目录，将原 Go 语言的 Cosy 指纹脱敏、多账号池治理、每日签到与 Client 桥接完整移植为纯 Python 模块，作为备用降级上游。 |
+| **5** | **华为 CodeArts (Snap) 上游** | [**2951461586/CodeArts2API**](https://github.com/2951461586/CodeArts2API) | Go | **纯 Python 复刻**：位于 `codearts/` 目录，只取其 `docs/UPSTREAM.md` 与 `internal/codearts/` 记录的协议事实，重写签名器、本机凭据读取、客户端与路由。模型名带 `codearts-` 前缀。 |
+
+### 3. 华为 CodeArts (Snap) 上游（已集成为第五上游）
+
+2026-10-29 在 GitHub 上检索了把华为云 **CodeArts**（CodeArts Snap / CodeArts Agent「码道」）转成 OpenAI 兼容接口的开源项目，并在同日把 CodeArts 接成本仓库的第五个上游。**实现是纯 Python 复刻**（与 `qoder/` 把 Go qoder2api 翻成纯 Python 是同一套做法），上面那些项目只作协议事实来源，不 vendor 源码、不调用外部二进制。
+
+| 项目 | 栈 / 许可 | 形态 | 关键能力 | 可用性判断 |
+| --- | --- | --- | --- | --- |
+| [**Johnsheng1/codearts2api**](https://github.com/Johnsheng1/codearts2api) ⭐44 | Python / MIT | 单文件 `server.py`，AK/SK 走 `.env` | `/v1/chat/completions` + `/v1/models`，`SDK-HMAC-SHA256` 签名；声称可绕过高峰期排队 | **社区最活跃**（LinuxDO 推广、0 open issue）。缺点：AK/SK 是华为云账号最高权限密钥，只绑 `127.0.0.1`；免费 benefit 通道 2026-10 已下线，签到脚本可能失效 |
+| [**HITZY2002/codearts2api**](https://github.com/HITZY2002/codearts2api) ⭐72 (28 forks) | Go / MIT | 多账号池 + WebUI + `login.sh` OAuth2 PKCE | 多账号轮转、token 自动续期看门狗、每日签到与新用户积分、模型可用性探测（30 分钟缓存）、`/v1/models` 只列真实可用模型、限时福利 `benefit_auto_claim` | **功能最完整**，与 workbuddy2api / traework2api 同系列架构。2026-10 仍在更新；需 `CA2A_API_KEY` 强制鉴权 |
+| [**2951461586/CodeArts2API**](https://github.com/2951461586/CodeArts2API) ⭐10 | Go / Apache-2.0 | 复用**本机已登录桌面端凭据**（DPAPI 解密 `state.vscdb`） | `/v1/chat/completions` + `/v1/messages`（Anthropic），纯标准库零依赖；内嵌 Web 控制台、每日活动福利领取、积分通道计费 | **文档与工程质量最高**（`docs/UPSTREAM.md` 活文档、金标准签名测试）。缺点：仅 Windows 能自动读凭据（DPAPI），非 Windows 要手工导入 session JSON；10 星，维护风险偏高 |
+| [**qingshanglei/codearts2api-pro**](https://github.com/qingshanglei/codearts2api-pro) | Go / MIT | HITZY2002 的 fork | 增加 per-account 并发计数器与并发超限软冷却 | 0 star、2026-08 后停更，仅作上游实现参考 |
+| [**qingtiandamowang/codearts2api**](https://github.com/qingtiandamowang/codearts2api) | Python / MIT | Johnsheng1 的镜像 | 补 Docker 支持与 `linux/amd64` GHCR 自动构建 | 便于容器部署，功能同上游 |
+| [**RobbsLuo/Coding2API**](https://github.com/RobbsLuo/Coding2API) ⭐较高 | Python 3.12 + uv / — | **多上游聚合网关**（8 家） | 把 CodeBuddy(CN+Intl)、TRAE SOLO、OpenCode Zen、Kilo、Qoder、**CodeArts**、OfficeAce 统一成 OpenAI/Responses/Messages 三协议，公共凭证池、按健康度选号、到期额度优先、SQLite 三角色权限、月度账单、CSV/JSONL 导出、按渠道出站代理 | **与本仓库定位最接近的同类产品**（架构参考价值 > 直接使用）。CodeArts 侧细节：STS AK/SK + DPoP 一次性 refresh、每账号并发 3、`SDK-HMAC-SHA256` 签名、流式 `text` 为累计全文需还原增量 |
+| [**liu-zhengdong/magpie-codearts**](https://github.com/liu-zhengdong/magpie-codearts) | npm 插件 / MIT | [magpie](https://github.com/yetone/magpie) 插件 | OAuth PKCE + DPoP 登录、模型列表、`{inferhub}/api/v2/chat/completions` 转发 | 若已用 magpie 则最省事；否则是单点方案 |
+| [**aimod-cc/Agent2API**](https://github.com/aimod-cc/agent2api) | Rust + Tauri / MIT+附加声明 | 桌面端常驻网关（17 家提供商） | CodeArts 与 OfficeAce 均支持，凭证自动续期、多账号轮转、按账号出口代理、报表与定时任务 | 成品度最高的「全家桶」；如需快速落地 CodeArts 而不自己写适配，这是最省事的选项（Docker 镜像 `aimodcc/agent2api`） |
+
+**本仓库的接入实现**（`codearts/`，纯 Python，2026-10-29）：
+
+| 文件 | 职责 |
+| --- | --- |
+| `codearts_signer.py` | `SDK-HMAC-SHA256` 签名器，逐字对齐 JS signer 语义 |
+| `codearts_signer_vectors.py` | 金标准向量：4 组完整 `Authorization` + URI/查询/编码用例 |
+| `codearts_session.py` | 只读读取本机 IDE 登录态（DPAPI → OSCrypt/AES-GCM） |
+| `codearts_client.py` | 身份头、稳定 session id、`error_code` 归一化、仅流式模型适配 |
+| `codearts_route.py` | OpenAI 兼容封装、`codearts-` 前缀映射、模型底座清单 |
+
+网关接入点：`wb_proxy.py` 的 `_route_to_codearts` / `_handle_codearts`（`/codearts/status`、`/codearts/models`、`/codearts/credits`），`/v1/models` 追加 10 个 `codearts-` 前缀条目，看板新增「CodeArts 看板」页签。
+
+四条与上游对齐的硬性行为：
+
+1. **签名三处怪癖**：CanonicalURI 每段编码后补尾斜杠、CanonicalHeaders 每行自带 `\n` 又补一个、URL 编码只保留 `A-Za-z0-9-._~`。漏一处一律 `APIG.0301`。签名正确性由**金标准向量**保证，不能靠在线探测——APIG 先校验 token 是否过期再校验签名，过期凭据下即使故意写错 `secretKey` 也回同一个 `APIG.0602`。
+2. **凭据只读**：复用本机桌面端登录态，**不续期、不回写** `state.vscdb`。`refresh_token` 单次轮转且 DPoP 绑定（JWT 的 `cnf.jkt`），被网关用掉会让 IDE 登录当场失效（`STS5.1806`）。过期时重新打开一次 CodeArts Agent 即可，面板会显示「登录已过期」。
+3. **模型必须带 `codearts-` 前缀**：CodeArts 也有 `deepseek-v4.1-flash`，而那是本网关额度不足时的降级目标，同名不加前缀会把请求打到错误的上游。
+4. **错误码归一化**：业务错误常以 HTTP 200 + `error_code` 返回，真实状态从复合码末段取（`InferHub.002002009.404` → 404），取不到兜底 400；凭据类（`APIG.0301/0303/0602`、`STS5.1804/1806`、`invalid_grant`）统一转 401，让客户端重新认证而不是无限重试。
+
+其余上游约束（已实现）：每账号固定派生 `x-ot-session-id`（上限 3 并发，超出 `TM.00001041`）；`glm-5.3` 仅支持流式（`stream=false` 回 400 空 body，客户端自动强制流式后本地聚合）；2026-10 起 benefit 通道下线，**不发送 `maas_type`**；`model` 必须与 `model-id`/`model-name` 两个头完全一致，否则 `InferHub.001001011.406`。
 ---
 
 ## 一、快速启动
@@ -289,6 +326,30 @@ export OPENAI_API_KEY="你在看板设置中添加并绑定的API_Key"
 ---
 
 ## 六、版本更新记录 (Changelog)
+
+### 2026-10-29 接入 CodeArts 为第五上游（纯 Python 复刻）
+
+- **新增 `codearts/` 模块**，把华为云 CodeArts (Snap) 接成第五个上游。做法与 `qoder/` 一致：Go 项目只当协议事实来源，实现是纯 Python，不 vendor、不调外部二进制、不起子进程。
+  - `codearts_signer.py`：`SDK-HMAC-SHA256` 签名器，逐字复刻三处与官方文档不同的怪癖（CanonicalURI 补尾斜杠、CanonicalHeaders 自带尾 `\n`、URL 编码只保留 `A-Za-z0-9-._~`）。漏一处一律 `APIG.0301`。
+  - `codearts_session.py`：只读读取本机 IDE 登录态（`Local State` DPAPI → `state.vscdb` OSCrypt/AES-GCM）。
+  - `codearts_client.py`：身份头、稳定 `x-ot-session-id`、`error_code` 归一化、`glm-5.3` 仅流式的客户端适配。
+  - `codearts_route.py`：OpenAI 兼容封装与 `codearts-` 前缀映射。
+- **模型名一律带 `codearts-` 前缀**：CodeArts 也有 `deepseek-v4.1-flash`，而那是本网关额度不足时的降级目标；不加前缀会把请求打到错误的上游。`/v1/models` 追加 10 个条目，`owned_by: codearts`。
+- **凭据只读，不续期**：`refresh_token` 单次轮转且 DPoP 绑定（JWT 的 `cnf.jkt`），被网关用掉会让 IDE 登录当场失效（`STS5.1806`）。过期时面板显示「登录已过期」，重新打开一次 CodeArts Agent 即可。
+- **签名正确性靠金标准向量，不靠在线探测**：APIG 先校验 token 是否过期再校验签名，过期凭据下故意写错 `secretKey` 也回同一个 `APIG.0602`，因此在线探测无法判断签名对错。`codearts_signer_vectors.py` 的期望值由上游 JS signer 语义独立复刻算出。
+- **错误码归一化**：业务错误常以 HTTP 200 + `error_code` 返回，真实状态取复合码末段（`InferHub.002002009.404` → 404），取不到兜底 400；凭据类（`APIG.0301/0303/0602`、`STS5.1804/1806`、`invalid_grant`）统一转 401。
+- **看板新增「CodeArts 看板」页签**，含登录态（脱敏）、STS 到期时间、可用模型清单；新增 `/codearts/status`、`/codearts/models`、`/codearts/credits` 三个端点。
+- 新增 4 个测试套件（签名 9 项、会话 17 项、客户端 19 项、路由 17 项），全套 37 个套件通过。
+
+### 2026-10-29 额度不足改路由到 deepseek-v4.1-flash（1017）
+
+- **默认路由与额度不足降级目标统一为 `workbuddy-cn` 的 `deepseek-v4.1-flash`**（上游 DeepSeek-V4.1-Flash-1017 版本，cn 出口 `x0.00` 免费档）。此前 `trae_first` 关闭后额度耗尽只会回一句中文报错，客户端仍按自己的模型表（`step-5-preview` 排在最前）继续打 step 家族。现在：
+  - 客户端没带 `model` 时，`/v1/chat/completions` 与 `/v1/responses` 默认就用 `deepseek-v4.1-flash`（原来分别是 `hy4-preview` 与硬编码同名，口径不一致）。
+  - 上游明确回答「额度不足」时，同一账号、同一会话、同样采样参数下把模型改写成 `deepseek-v4.1-flash` 重发一次；重试也失败才把上游原话返回给客户端。**不再**跨渠道降级到 Trae / Qoder，**也不再**落到 `step` / `step-5-preview`。
+  - 只认「额度不足」：`code 14018`、`insufficient credits`、中文「额度不足 / 积分不足 / 额度已用完 / 额度耗尽」都算；参数越界、上下文超限、风控 403 一律原样透传，换模型会把这些问题伪装成一次成功的降级。
+  - `credit_exhausted()` 现在接受 bytes 与 `\uXXXX` 转义的 JSON——上游把中文 `ensure_ascii` 转义时，旧实现静默失配，改路由一次都没触发过。
+  - 已在该模型上时不改写（没有可改的对象），避免自触发循环；整个请求最多改路由一次。
+- 新增 `tests/_test_exhausted_route.py`（7 项：识别口径、只改模型不改其它字段、已在目标上不改、14018 真的改路由、参数 400 不改路由、中文措辞也改路由、默认模型常量）。
 
 ### 2026-10-27 上游风控限制 403（code 11140）
 

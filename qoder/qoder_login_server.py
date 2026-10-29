@@ -132,10 +132,11 @@ def main():
     url = f"http://{HOST}:{PORT}"
     print(f"Qoder 账号管理已启动：{url}")
     print(f"数据目录：{accounts.data_root()}")
-    try:
-        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
-    except Exception:  # noqa: BLE001
-        pass
+    if os.environ.get("QODER_NO_BROWSER") != "1":
+        try:
+            threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+        except Exception:  # noqa: BLE001
+            pass
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

@@ -132,6 +132,32 @@ def qoder_usage_snapshot() -> dict:
             "by_model": by_model, "by_account": by_account}
 
 DEFAULT_MODEL_MAPPING = {
+    # ── Qoder 官方模型与别名映射 ──
+    "auto": "auto",
+    "qwen3.8-max": "qmodel_38max",
+    "qwen-max": "qmodel_38max",
+    "qwen3.8-flash": "qfmodel",
+    "qwen-flash": "qfmodel",
+    "qwen": "qfmodel",
+    "deepseek-v4-pro": "dmodel",
+    "deepseek-r1": "dmodel",
+    "deepseek-flash": "dfmodel",
+    "deepseek-chat": "dmodel",
+    "deepseek-v3": "dmodel",
+    "deepseek": "dmodel",
+    "glm-5.3-flash": "gfmodel",
+    "glm-flash": "gfmodel",
+    "glm-5.3": "gmodel",
+    "glm": "gmodel",
+    "kimi-k3.1-pro": "kmodel_latest",
+    "kimi-pro": "kmodel_latest",
+    "kimi-latest": "kmodel_latest",
+    "kimi-k2.8-preview": "kmodel",
+    "kimi": "kmodel",
+    "minimax-m3.1-flash": "mmodel",
+    "minimax-flash": "mmodel",
+    "minimax": "mmodel",
+    # ── 第三方通用别名映射 ──
     "opus": "qmodel_38max",
     "sonnet": "gmodel",
     "haiku": "qfmodel",
@@ -144,21 +170,28 @@ _pool: Optional[pool.Pool] = None
 
 NO_ACCOUNT_MESSAGE = (
     "没有可用的 Qoder 账号（额度耗尽 / 冷却中 / token 失效）。"
-    "请访问 http://127.0.0.1:28091/ 扫码登录新账号，登录后会自动恢复。"
+    "请访问控制台 http://127.0.0.1:28087/（点击【Qoder 看板】）扫码登录新账号，登录后会自动恢复。"
 )
 
 
 def _lookup_mapping(model: str, table: dict) -> str:
-    """在单张映射表内执行：精确匹配 → 长度倒序 + 双向 substring 模糊匹配。"""
+    """在单张映射表内执行：精确匹配（忽略大小写）→ 包含匹配（长词优先）。"""
     if not table:
         return ""
-    if model in table and table[model]:
-        return table[model]
+    m_low = model.lower()
+    # 1. 精确匹配（忽略大小写）
+    for k, v in table.items():
+        if k and v and k.lower() == m_low:
+            return v
+    # 2. 表中 key 是输入子串（长词优先）
     pairs = [(k, v) for k, v in table.items() if k and v]
     pairs.sort(key=lambda kv: len(kv[0]), reverse=True)
-    m_low = model.lower()
     for src, dst in pairs:
-        if src.lower() in m_low or m_low in src.lower():
+        if src.lower() in m_low:
+            return dst
+    # 3. 输入是表中 key 的子串兜底
+    for src, dst in pairs:
+        if m_low in src.lower():
             return dst
     return ""
 
@@ -879,14 +912,24 @@ def call_qoder(payload: dict, on_delta=None, proxy: str = "") -> tuple[int, str]
         last_err = pool.NoAccountError()
 
     status = pool.error_status(last_err)
-    msg, etype = _friendly_error(last_err)
+    msg, etype = _friendly_error(last_err, p)
     record_qoder_usage(model, "", on_delta is not None, "failed",
                        int((time.time() - _t0) * 1000), 0, 0, 0, str(last_err))
     return status, json.dumps({"error": {"type": etype, "message": msg}})
 
 
-def _friendly_error(err: Exception) -> tuple[str, str]:
+def _friendly_error(err: Exception, p: Optional[pool.Pool] = None) -> tuple[str, str]:
     if isinstance(err, pool.NoAccountError):
+        if p and p.size() > 0:
+            slots = p.snapshot()
+            cool_times = [s.cooling_remaining_ms for s in slots if s.cooling_remaining_ms > 0]
+            if cool_times and len(cool_times) == len(slots):
+                min_s = int(min(cool_times) / 1000)
+                return (
+                    f"所有 Qoder 账号当前处于冷却中（预计最快将在 {min_s} 秒后自动恢复）。"
+                    "如需立即使用，请访问控制台 http://127.0.0.1:28087/（点击【Qoder 看板】）扫码登录新账号；或者稍候等待冷却结束。",
+                    "no_available_account",
+                )
         return NO_ACCOUNT_MESSAGE, "no_available_account"
     if isinstance(err, (pool.UpstreamError, client.UpstreamError)):
         msg = getattr(err, "message", None) or str(err)

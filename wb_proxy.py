@@ -14,6 +14,7 @@ Launchers: start-wb-proxy.bat / start-wb-proxy-lan.bat on Windows,
 start-wb-proxy.command (or ./start-wb-proxy.sh) on macOS/Linux.
 """
 import argparse
+import contextlib
 import hashlib
 from collections import deque
 import re
@@ -47,8 +48,14 @@ if _TRAE_DIR not in sys.path:
 _QODER_DIR = os.path.join(_HERE, "qoder")
 if _QODER_DIR not in sys.path:
     sys.path.insert(0, _QODER_DIR)
+_CODEARTS_DIR = os.path.join(_HERE, "codearts")
+if _CODEARTS_DIR not in sys.path:
+    sys.path.insert(0, _CODEARTS_DIR)
 import trae_route
 import qoder_route
+import codearts_route
+import codearts_oauth
+import codearts_accounts
 
 # Failover state
 _FAILOVER_ENABLED = False
@@ -244,6 +251,11 @@ def detect_model_realm(model_id):
     if not model_id:
         return CURRENT_REALM
     m = str(model_id).lower()
+    # CodeArts models live on their own upstream and have no realm split;
+    # assigning one here would make the gateway look for them on a WorkBuddy
+    # exit that does not serve them.
+    if m.startswith("codearts-"):
+        return ""
     if m in DUAL_REALM_MODELS:
         return CURRENT_REALM
     intl_only = {
@@ -333,6 +345,30 @@ UPSTREAM = "https://www.workbuddy.ai"
 CHAT_PATH = "/v2/chat/completions"
 MODELS_PATH = "/v2/enterprises/personal/models"
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
+# ---------------------------------------------------------------------------
+# 默认路由与额度不足降级目标
+#
+# 用户口径（2026-10-29）：本网关的默认路由是 workbuddy-cn 的
+# deepseek-v4.1-flash（即上游 DeepSeek-V4.1-Flash-1017 版本，cn 出口 x0.00
+# 免费档）。任何其他账号/模型在额度不足或不可用时，改路由到这个模型，
+# 而不是 step / step-5-preview。
+#
+# 两处职责分开：
+#   DEFAULT_ROUTE_MODEL —— 客户端没带 model 时的默认值；
+#   EXHAUSTED_ROUTE_MODEL —— 上游明确回答「额度不足」后的同账号重试目标。
+# 只在「账号确实不可用」时改写，别的失败（参数错、上下文超限、风控 403）
+# 一律原样透传，不偷偷换模型。
+# ---------------------------------------------------------------------------
+DEFAULT_ROUTE_MODEL = "deepseek-v4.1-flash"
+EXHAUSTED_ROUTE_MODEL = "deepseek-v4.1-flash"
+# 上游表达「额度不足」的措辞。码 14018 之外，中文侧的「额度不足」也算——
+# 早期只认英文 "insufficient credits"，国内版中文报文被静默忽略，
+# 于是重试目标永远没生效。
+CREDIT_EXHAUSTED_MARKERS = (
+    "insufficient credits", "credits exhausted", "credit exhausted",
+    "insufficient balance", "balance is insufficient",
+    "额度不足", "积分不足", "额度已用完", "额度耗尽",
+)
 # The WorkBuddy AI desktop app caches its account product config here on every
 # launch. That file carries the real model catalog the app shows in its picker
 # (21 models, incl. deepseek-v4.1-flash / gpt-6-astra) - the CLI-facing
@@ -697,8 +733,28 @@ CREDIT_EXHAUSTED_HINT = (
 _CREDIT_CODE_RE = re.compile(r"(?<!\d)14018(?!\d)")
 
 def credit_exhausted(text):
+    """True when an upstream body says the account is out of credit.
+
+    code 14018 is the WorkBuddy wording; the Chinese exit phrases the same
+    state as 「额度不足」/「积分不足」, so both families must count or the
+    exhausted-route rewrite below silently never fires.
+
+    `text` may be raw bytes (urllib hands the body back undecoded) or a JSON
+    string whose CJK was escaped to \\uXXXX by ensure_ascii, so decode and
+    unescape before matching: an escaped 「额度不足」 is the same state and
+    missing it means the reroute never fires on the domestic exit.
+    """
+    if isinstance(text, (bytes, bytearray)):
+        text = text.decode("utf-8", "replace")
     low = str(text or "").lower()
-    return bool(_CREDIT_CODE_RE.search(low)) or "credits exhausted" in low
+    if _CREDIT_CODE_RE.search(low):
+        return True
+    if "\\u" in low:
+        try:
+            low = json.loads('"%s"' % low.strip('"').replace('"', '\\"')).lower()
+        except Exception:
+            pass
+    return any(marker in low for marker in CREDIT_EXHAUSTED_MARKERS)
 
 def upstream_error_message(code, detail):
     """Passthrough error text, with the Chinese hint appended when credits are gone."""
@@ -706,6 +762,7 @@ def upstream_error_message(code, detail):
     if credit_exhausted(detail):
         msg += "  " + CREDIT_EXHAUSTED_HINT
     return msg
+
 
     row = {
         "at": time.time(),
@@ -1353,6 +1410,13 @@ def recent_usage(limit=100, realm=None, page=1):
         "rows": page_rows
     }
 POOL = None
+CODEARTS_POOL = None
+
+def get_codearts_pool():
+    global CODEARTS_POOL
+    if CODEARTS_POOL is None:
+        CODEARTS_POOL = codearts_accounts.CodeArtsAccountPool(ACCOUNTS_DIR)
+    return CODEARTS_POOL
 SCHEDULER = None
 ACCOUNTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'accounts')
 def realm_state_file():
@@ -1468,6 +1532,12 @@ def proxy_slots_view():
     counts = {}
     if POOL:
         for account in POOL.accounts:
+            slot_id = account.proxy_slot
+            if slot_id and account.enabled:
+                counts[slot_id] = counts.get(slot_id, 0) + 1
+    cp = get_codearts_pool()
+    if cp:
+        for account in cp.accounts:
             slot_id = account.proxy_slot
             if slot_id and account.enabled:
                 counts[slot_id] = counts.get(slot_id, 0) + 1
@@ -2076,6 +2146,8 @@ def fetch_models(realm=None):
         with _lock:
             _models_cache[r] = {"at": time.time(), "data": entries}
         return entries
+
+
 def model_entry(mid, meta):
     """Build a rich /v1/models entry from the desktop app catalog metadata.
     The OpenAI spec only names id/object/created/owned_by, so capability data is
@@ -3359,10 +3431,14 @@ def inject_prompt_cache_key(body, uid, conversation):
     out["prompt_cache_key"] = "wb2a-%s-%s" % (uid8, digest)
     return out
 class ContentRejected(Exception):
-    """Upstream content review rejected this request (403 / code 11140).
+    """A 403 passed through to the client instead of rotating the pool.
 
-    Not an account problem: another credential gets the same 403 for the same
-    content, so it is passed straight through instead of cooling the pool.
+    Two distinct upstream causes share this path:
+    - Content review 403: not an account problem — another credential gets the
+      same 403 for the same content, so it is passed through without cooling.
+    - Account restriction 403 (code 11140): the ACCOUNT was flagged. The
+      offending account is cooled and persisted first, then this is raised so
+      the client sees the upstream wording (see open_upstream).
     """
 
     def __init__(self, http_error=None, detail=""):
@@ -3686,6 +3762,18 @@ def open_upstream(payload, session_key=None, target_realm=None):
         if session_key and AFFINITY_DEBUG:
             log("affinity: derived %s for %d msgs"
                 % (session_key, len(upstream_body.get("messages") or [])))
+    # PATCHED-BY-OPS: 额度不足改路由。上游说这个账号/模型没额度（14018 或
+    # 中文「额度不足」）时，把请求改到指定的 deepseek-v4.1-flash（cn 出口
+    # DeepSeek-V4.1-Flash-1017，x0.00）重发一次，而不是 Trae/Qoder，更不是
+    # step。目标先算好，等上游真的回「没额度」再用；已经在目标模型上时保持
+    # None（没有可改的对象）。换的只有模型名，账号、会话、采样参数都不动；
+    # 参数类 400 原样抛出。
+    exhausted_payload = None
+    if str(payload.get("model") or "").strip().lower() != EXHAUSTED_ROUTE_MODEL:
+        exhausted_payload = dict(payload, model=EXHAUSTED_ROUTE_MODEL)
+        exhausted_payload.pop("reasoning_effort", None)
+        exhausted_payload.pop("reasoningEffort", None)
+    exhausted_tried = False
     total = max(1, POOL.count_ready(realm, model=model)) if POOL else 1
     tried = set()
     last_error = None
@@ -3797,6 +3885,29 @@ def open_upstream(payload, session_key=None, target_realm=None):
                 last_error = exc
                 last_403_detail = detail
                 break
+            if exc.code == 400:
+                try:
+                    detail = exc.read(600)
+                    detail = detail.decode("utf-8", "replace") if isinstance(detail, bytes) else str(detail)
+                except Exception:
+                    detail = ""
+                # 只有「额度不足」才改路由：参数越界/上下文超限必须原样抛出，
+                # 换模型会把它伪装成一次成功的降级，客户端永远看不到真实原因。
+                if exhausted_tried or not exhausted_payload or not credit_exhausted(detail):
+                    raise
+                exhausted_tried = True
+                log("account %s out of credit on '%s', rerouting to %s"
+                    % (account.uid[:8], model, EXHAUSTED_ROUTE_MODEL))
+                if session_key and POOL:
+                    POOL.affinity.unbind(session_key)
+                try:
+                    return open_upstream(exhausted_payload,
+                                         session_key=session_key,
+                                         target_realm=realm)
+                except Exception as reroute_exc:
+                    log("exhausted-route reroute failed: %s" % reroute_exc)
+                    last_error = reroute_exc
+                    continue
             if exc.code == 401:
                 log("account %s rejected (HTTP 401), rotating" % account.uid[:8])
                 if session_key and POOL:
@@ -5369,6 +5480,42 @@ def humanize_wait(seconds):
     return "%.1f 天" % (s / 86400.0)
 
 
+def _is_qoder_deepseek(model: str) -> bool:
+    m = (model or "").strip().lower()
+    return "deepseek" in m or m in ("dfmodel", "dmodel")
+
+
+def _is_qoder_qwen_flash(model: str) -> bool:
+    m = (model or "").strip().lower().replace("-", "").replace("_", "")
+    if "max" in m:
+        return False
+    return "qwen" in m or m == "qfmodel"
+
+
+def _is_qoder_exhausted(status: int, body: str) -> bool:
+    if status in (429, 503):
+        return True
+    b_low = (body or "").lower()
+    if "no_available_account" in b_low:
+        return True
+    if credit_exhausted(body):
+        return True
+    if status in (402, 403):
+        if any(w in b_low for w in ("restricted", "limit", "quota", "cooling", "冷却", "额度")):
+            return True
+        try:
+            from qoder import qoder_pool
+            if qoder_pool.is_account_exhausted_detail(body):
+                return True
+            if any(marker in b_low for marker in qoder_pool.BAN_MARKERS):
+                return True
+            if any(marker in b_low for marker in qoder_pool.AGENT_LIMIT_MARKERS):
+                return True
+        except Exception:
+            pass
+    return False
+
+
 # ---------------------------------------------------------------------------
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -5845,6 +5992,8 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
+        if path == "/oauth/callback":
+            return self._handle_oauth_callback(query)
         if self._is_panel_route(path) and not self._panel_ok():
             return self._error(401, "panel password required", "invalid_request_error")
         if path in ("/", "/dashboard", "/ui"):
@@ -5909,6 +6058,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._route_qoder_oauth_poll(login_id)
         if path.startswith("/qoder/") and (self._authorized() or self._panel_ok()):
             return self._handle_qoder(path, query)
+        if path.startswith("/codearts/") and (self._authorized() or self._panel_ok()):
+            return self._handle_codearts(path, query)
         if (path.startswith("/ag/") or path.startswith("/antigravity/")) and (self._authorized() or self._panel_ok()):
             return self._proxy_to_antigravity("GET")
         return self._error(404, "not found", "invalid_request_error")
@@ -5965,6 +6116,24 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             return self._error(502, str(exc))
         data = [model_entry(mid, meta) for mid, meta in entries]
+        # CodeArts models come from a different upstream and have their own
+        # `codearts-` prefix, so they are appended here rather than merged into
+        # the realm catalogue - exactly how the Qoder entries below are added.
+        known = set(item.get("id") for item in data)
+        for item in codearts_route.catalog_models():
+            mid = item.get("id")
+            if not mid or mid in known:
+                continue
+            entry = model_entry(mid, {
+                "name": item.get("name") or mid,
+                "vendor": "CodeArts",
+                "supportsImages": bool(item.get("supports_images")),
+                "supportsToolCall": bool(item.get("supports_tool_calls")),
+                "maxInputTokens": item.get("context_window"),
+                "maxOutputTokens": item.get("max_output_tokens"),
+            })
+            entry["owned_by"] = "codearts"
+            data.append(entry)
         # Append Qoder models if enabled
         if _qoder_enabled():
             try:
@@ -6444,6 +6613,14 @@ class Handler(BaseHTTPRequestHandler):
                 if dropped:
                     log("proxy slots: unbound %d account(s) from removed slots"
                         % dropped)
+            cp = get_codearts_pool()
+            if cp:
+                dropped_cp = wb_settings.drop_missing_bindings(cp, saved)
+                cp.apply_proxy_slots(saved)
+                if dropped_cp:
+                    cp.save()
+                    log("proxy slots: unbound %d codearts account(s) from removed slots"
+                        % dropped_cp)
             log("proxy slots saved: %d slot(s)" % len(saved))
             return self._json(200, {"slots": proxy_slots_view()})
         if path == "/proxy/slots/test":
@@ -6642,6 +6819,127 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def _handle_codearts(self, path, query_or_payload):
+        """CodeArts management endpoints.
+
+        Deliberately small: CodeArts has no account pool to manage. The only
+        writable state is which local IDE profile to read, and even that is
+        read-only - the gateway never renews the IDE's login because the
+        refresh token is single-use and DPoP-bound, so renewing here would
+        lock the IDE out.
+        """
+        if path == "/codearts/status":
+            if self.command == "GET":
+                return self._route_codearts_status()
+        if path == "/codearts/models":
+            if self.command == "GET":
+                return self._json(200, {"data": codearts_route.catalog_models()})
+        if path == "/codearts/credits":
+            if self.command == "GET":
+                return self._route_codearts_credits()
+        if path == "/codearts/oauth/start":
+            port = getattr(getattr(self, "server", None), "server_port", 28999)
+            info = codearts_oauth.start_oauth_login(port)
+            return self._json(200, {"ok": True, **info})
+        if path == "/codearts/oauth/poll":
+            res = codearts_oauth.get_oauth_poll_result()
+            return self._json(200, {"ok": True, "result": res})
+        if path == "/codearts/oauth/refresh":
+            try:
+                updated = codearts_oauth.refresh_sts_token()
+                return self._json(200, {"ok": True, "account": updated.get("account", {}).get("label")})
+            except Exception as exc:
+                return self._error(500, "Refresh failed: %s" % exc, "oauth_error")
+        if path == "/codearts/accounts":
+            if self.command == "GET":
+                cp = get_codearts_pool()
+                return self._json(200, {"ok": True, "accounts": cp.public_view() if cp else []})
+        if path == "/codearts/accounts/set":
+            if self.command == "POST":
+                cp = get_codearts_pool()
+                if not cp:
+                    return self._error(500, "CodeArts pool unavailable")
+                account_id = str(query_or_payload.get("id") or query_or_payload.get("account_id") or "").strip()
+                if not account_id:
+                    return self._error(400, "account id required")
+                if "enabled" in query_or_payload:
+                    cp.set_enabled(account_id, bool(query_or_payload["enabled"]))
+                if "proxySlot" in query_or_payload or "proxy_slot" in query_or_payload:
+                    slot_id = query_or_payload.get("proxySlot") or query_or_payload.get("proxy_slot") or ""
+                    cp.set_proxy_slot(account_id, slot_id)
+                return self._json(200, {"ok": True, "id": account_id})
+        if path == "/codearts/accounts/delete":
+            if self.command == "POST":
+                cp = get_codearts_pool()
+                if not cp:
+                    return self._error(500, "CodeArts pool unavailable")
+                account_id = str(query_or_payload.get("id") or query_or_payload.get("account_id") or "").strip()
+                if not account_id:
+                    return self._error(400, "account id required")
+                ok = cp.remove(account_id)
+                return self._json(200, {"ok": ok, "id": account_id})
+        if path == "/codearts/accounts/refresh":
+            if self.command == "POST":
+                cp = get_codearts_pool()
+                if not cp:
+                    return self._error(500, "CodeArts pool unavailable")
+                account_id = str(query_or_payload.get("id") or query_or_payload.get("account_id") or "").strip()
+                acct = cp.get(account_id) if account_id else (cp.accounts[0] if cp.accounts else None)
+                if not acct:
+                    return self._error(404, "account not found")
+                try:
+                    codearts_oauth.refresh_sts_token_for_account(acct, proxy=acct.proxy)
+                    cp.save()
+                    return self._json(200, {"ok": True, "account": acct.masked()})
+                except Exception as exc:
+                    return self._error(500, "Refresh failed: %s" % exc, "oauth_error")
+        return self._error(404, "not found", "invalid_request_error")
+
+    def _handle_oauth_callback(self, query):
+        port = getattr(getattr(self, "server", None), "server_port", 28999)
+        ok, html, result = codearts_oauth.handle_oauth_callback(query, project_port=port)
+        body = html.encode("utf-8")
+        status = 200 if ok else 400
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _route_codearts_status(self):
+        try:
+            session = codearts_route.load_session()
+        except Exception as exc:
+            return self._json(200, {
+                "ok": False,
+                "state": "unavailable",
+                "message": str(exc),
+                "hint": "Open CodeArts Agent, sign in, then reload.",
+            })
+        expired = codearts_route.is_expired(session)
+        payload = session.masked()
+        payload.update({
+            "ok": not expired,
+            "state": "expired" if expired else "ready",
+            "message": ("STS expired - reopen CodeArts Agent to renew"
+                        if expired else "credentials ready"),
+        })
+        return self._json(200, payload)
+
+    def _route_codearts_credits(self):
+        try:
+            session = codearts_route.load_session()
+        except Exception as exc:
+            return self._error(502, "CodeArts login unavailable: %s" % exc,
+                               "credentials_error")
+        try:
+            data = codearts_route.fetch_credits(session)
+        except Exception as exc:
+            status, body = codearts_route.error_payload(exc)
+            return self._json(status, body)
+        return self._json(200, data or {})
 
     def _handle_qoder(self, path, query_or_payload):
         """Qoder management endpoints."""
@@ -7612,7 +7910,7 @@ class Handler(BaseHTTPRequestHandler):
             "tool_choice": payload.get("tool_choice", "auto"),
             "parallel_tool_calls": payload.get("parallel_tool_calls", True),
         }
-        model = payload.get("model") or "deepseek-v4.1-flash"
+        model = payload.get("model") or DEFAULT_ROUTE_MODEL
         want_stream = bool(payload.get("stream"))
         t_start = time.time()
         fp = prompt_fingerprint(chat_req.get("messages"))
@@ -7677,6 +7975,9 @@ class Handler(BaseHTTPRequestHandler):
             #         # Add Chinese hint
             #         detail = "【额度已用完】上游 CodeBuddy 账号的 credit 已耗尽（错误码 14018）。"
             # --- 原 Trae/Qoder 自动降级逻辑注释结束 ---
+            # 额度不足的改路由在 open_upstream() 内部完成（PATCHED-BY-OPS，
+            # 见该函数 400 分支）：改模型、保账号、保会话，失败才把上游原话
+            # 抛到这里。这里只补中文提示，不再做第二次改写。
             if exc.code == 400 and "14018" in detail:
                 detail = "【额度已用完】上游 CodeBuddy/WorkBuddy 账号的 credit 已耗尽（错误码 14018）。"
             return self._error(exc.code, upstream_error_message(exc.code, detail))
@@ -7939,6 +8240,7 @@ class Handler(BaseHTTPRequestHandler):
             or path.startswith("/logs")
             or path.startswith("/trae/")
             or path.startswith("/qoder/")
+            or path.startswith("/codearts/")
         )
         if not is_account_route and path not in ("/v1/chat/completions", "/chat/completions",
                                                 "/v1/completions", "/completions",
@@ -7956,6 +8258,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._handle_trae(path, payload)
             if path.startswith("/qoder/"):
                 return self._handle_qoder(path, payload)
+            if path.startswith("/codearts/"):
+                return self._handle_codearts(path, payload)
             return self._handle_accounts(path, payload)
         # Both OpenAI-shaped routes below can hold a thread for up to 600s.
         # Take a slot for the duration; release it in finally so every early
@@ -7993,6 +8297,11 @@ class Handler(BaseHTTPRequestHandler):
         model_name = payload.get("model") or ""
         if _qoder_enabled() and qoder_forced:
             return self._route_to_qoder(payload)
+        # CodeArts 路由：codearts- 前缀直通 CodeArts (Snap) 上游。
+        # 必须带前缀：CodeArts 也有 deepseek-v4.1-flash，而那是本网关额度
+        # 不足时的降级目标，同名不加前缀会把请求打到错误的上游。
+        if codearts_route.is_codearts_model(model_name):
+            return self._route_to_codearts(payload)
         # Trae 路由：trae- 前缀的模型直接直通 Trae 账号池
         if model_name.startswith("trae-"):
             raw_model = model_name[5:]
@@ -8037,7 +8346,7 @@ class Handler(BaseHTTPRequestHandler):
         session_key = extract_session_key(self.headers, payload)
         fp = prompt_fingerprint(forwarded.get("messages"))
         want_stream = bool(payload.get("stream"))
-        model = payload.get("model") or "hy4-preview"
+        model = payload.get("model") or DEFAULT_ROUTE_MODEL
         t_start = time.time()
         try:
             req_realm = self._request_realm() or CURRENT_REALM
@@ -8174,6 +8483,10 @@ class Handler(BaseHTTPRequestHandler):
             #         # Add Chinese hint
             #         detail = "【额度已用完】上游 CodeBuddy 账号的 credit 已耗尽（错误码 14018）。"
             # --- 原 Trae/Qoder 自动降级逻辑注释结束 ---
+            # 额度不足的改路由在 open_upstream() 内部完成（PATCHED-BY-OPS，
+            # 见该函数 400 分支）：它看得到账号、会话与真实 body，能在同一账号
+            # 上改发 deepseek-v4.1-flash（cn 出口 1017）。这里只负责把上游
+            # 原话加上中文提示返回，不再做第二次改写。
             if exc.code == 400 and "14018" in detail:
                 detail = "【额度已用完】上游 CodeBuddy/WorkBuddy 账号的 credit 已耗尽（错误码 14018）。"
             return self._error(exc.code, upstream_error_message(exc.code, detail))
@@ -8300,79 +8613,266 @@ class Handler(BaseHTTPRequestHandler):
             log("qoder-codex: non-stream error: %s" % exc)
             return self._error(502, "qoder upstream error: %s" % exc)
 
+    def _fallback_to_workbuddy_cn(self, payload, want_stream, t_start, wb_model="deepseek-v4.1-flash"):
+        """Fallback to WorkBuddy CN upstream when all Qoder candidate models are exhausted."""
+        wb_payload = dict(payload, model=wb_model)
+        wb_payload.pop("reasoning_effort", None)
+        wb_payload.pop("reasoningEffort", None)
+        session_key = extract_session_key(self.headers, payload)
+        fp = prompt_fingerprint(wb_payload.get("messages"))
+        try:
+            upstream, account = open_upstream(wb_payload, session_key=session_key, target_realm="cn")
+        except RateLimited as exc:
+            return self._rate_limited(exc)
+        except ContentRejected as exc:
+            return self._error(403, "upstream 403: %s" % (exc.detail or "content rejected"), "invalid_request_error")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read(600).decode("utf-8", "replace") if hasattr(exc, "read") else str(exc)
+            return self._error(exc.code, upstream_error_message(exc.code, detail))
+        except Exception as exc:
+            return self._error(502, f"WorkBuddy CN upstream error after fallback: {exc}")
+
+        try:
+            if want_stream:
+                return self._chat_stream_response(upstream, wb_model, fp, account, t_start)
+            return self._chat_nonstream_response(upstream, wb_model, fp, account, t_start)
+        finally:
+            if hasattr(upstream, "close"):
+                try:
+                    upstream.close()
+                except Exception:
+                    pass
+
     def _route_to_qoder(self, payload):
-        """Route request to Qoder upstream (streaming + non-streaming)."""
+        """Route request to Qoder upstream (streaming + non-streaming) with
+
+        two-way fallback between DeepSeek and Qwen3.8-Flash on quota exhaustion,
+        and cross-upstream failover to WorkBuddy CN deepseek-v4.1-flash when both
+        models are exhausted across all Qoder accounts.
+        """
         want_stream = bool(payload.get("stream"))
-        model = payload.get("model") or "sonnet"
+        orig_model = payload.get("model") or "DeepSeek-Flash"
         t_start = time.time()
-        log("qoder: routing model=%s stream=%s" % (model, want_stream))
+        log("qoder: routing model=%s stream=%s" % (orig_model, want_stream))
+
+        is_ds = _is_qoder_deepseek(orig_model)
+        is_qwen = _is_qoder_qwen_flash(orig_model)
+        if is_ds:
+            qoder_candidates = [orig_model, "Qwen3.8-Flash"]
+            wb_fallback_model = "deepseek-v4.1-flash"
+        elif is_qwen:
+            qoder_candidates = [orig_model, "DeepSeek-Flash"]
+            wb_fallback_model = "deepseek-v4.1-flash"
+        else:
+            qoder_candidates = [orig_model]
+            wb_fallback_model = None
 
         if want_stream:
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "close")
-            if cors_origin_allowed(self.path):
-                self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-
+            headers_sent = False
             chunks_written = []
+
             def on_delta(chunk):
+                nonlocal headers_sent
+                if not headers_sent:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Connection", "close")
+                    if cors_origin_allowed(self.path):
+                        self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    headers_sent = True
                 line = "data: " + json.dumps(chunk) + "\n\n"
                 self.wfile.write(line.encode("utf-8"))
                 self.wfile.flush()
                 chunks_written.append(chunk)
 
-            try:
-                status, body = qoder_route.call_qoder(payload, on_delta=on_delta)
-                if status != 200:
-                    # 把上游真正的原因带进流里：客户端拿到 finish_reason:"error"
-                    # 时至少能看到是排队/额度/审核，而不是一个空 error。
-                    err_detail = body
-                    try:
-                        err_detail = (json.loads(body).get("error", {})
-                                      or {}).get("message", body)
-                    except ValueError:
-                        pass
-                    err_chunk = {
-                        "id": "chatcmpl-err",
-                        "object": "chat.completion.chunk",
-                        "created": int(time.time()),
-                        "model": model,
-                        "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
-                        "error": {"message": err_detail[:500],
-                                  "type": "upstream_error"},
-                    }
-                    self.wfile.write(("data: " + json.dumps(err_chunk) + "\n\n").encode("utf-8"))
-                self.wfile.write(b"data: [DONE]\n\n")
-                self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-                log("qoder: client disconnected during stream")
-                return
-            except Exception as exc:
-                log("qoder: stream error: %s" % exc)
+            for idx, cand_model in enumerate(qoder_candidates):
+                cur_payload = dict(payload, model=cand_model)
                 try:
+                    status, body = qoder_route.call_qoder(cur_payload, on_delta=on_delta)
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    log("qoder: client disconnected during stream")
+                    return
+                except Exception as exc:
+                    log("qoder: stream error on model=%s: %s" % (cand_model, exc))
+                    status, body = 502, str(exc)
+
+                if headers_sent:
+                    if status != 200:
+                        err_detail = body
+                        try:
+                            err_detail = (json.loads(body).get("error", {})
+                                          or {}).get("message", body)
+                        except ValueError:
+                            pass
+                        err_chunk = {
+                            "id": "chatcmpl-err",
+                            "object": "chat.completion.chunk",
+                            "created": int(time.time()),
+                            "model": cand_model,
+                            "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+                            "error": {"message": str(err_detail)[:500],
+                                      "type": "upstream_error"},
+                        }
+                        self.wfile.write(("data: " + json.dumps(err_chunk) + "\n\n").encode("utf-8"))
                     self.wfile.write(b"data: [DONE]\n\n")
                     self.wfile.flush()
-                except Exception:
-                    pass
-                return
-            wall = int((time.time() - t_start) * 1000)
-            log("qoder: stream done, %d chunks, %dms" % (len(chunks_written), wall))
-            return
+                    wall = int((time.time() - t_start) * 1000)
+                    log("qoder: stream done, %d chunks, %dms" % (len(chunks_written), wall))
+                    return
+
+                # No headers sent yet: candidate failed before emitting any chunks
+                if _is_qoder_exhausted(status, body):
+                    if idx + 1 < len(qoder_candidates):
+                        next_cand = qoder_candidates[idx + 1]
+                        log("qoder: model '%s' quota/accounts exhausted (status=%s), falling back to alternative Qoder model '%s'"
+                            % (cand_model, status, next_cand))
+                        continue
+                    if wb_fallback_model:
+                        log("qoder: all Qoder models exhausted (%s), falling back to WorkBuddy CN '%s'"
+                            % (qoder_candidates, wb_fallback_model))
+                        return self._fallback_to_workbuddy_cn(payload, want_stream=True, t_start=t_start, wb_model=wb_fallback_model)
+
+                # Not an exhaustion error or no fallback: return HTTP error
+                return self._error(status if status else 500, upstream_error_message(status, body))
 
         # Non-streaming
-        try:
-            status, body = qoder_route.call_qoder(payload, on_delta=None)
-            self.send_response(status)
+        for idx, cand_model in enumerate(qoder_candidates):
+            cur_payload = dict(payload, model=cand_model)
+            try:
+                status, body = qoder_route.call_qoder(cur_payload, on_delta=None)
+            except Exception as exc:
+                log("qoder: non-stream error on model=%s: %s" % (cand_model, exc))
+                status, body = 502, "qoder upstream error: %s" % exc
+
+            if status == 200:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                if cors_origin_allowed(self.path):
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body.encode("utf-8"))
+                wall = int((time.time() - t_start) * 1000)
+                log("qoder: non-stream done, model=%s, %dms" % (cand_model, wall))
+                return
+
+            if _is_qoder_exhausted(status, body):
+                if idx + 1 < len(qoder_candidates):
+                    next_cand = qoder_candidates[idx + 1]
+                    log("qoder: model '%s' quota/accounts exhausted (status=%s), falling back to alternative Qoder model '%s'"
+                        % (cand_model, status, next_cand))
+                    continue
+                if wb_fallback_model:
+                    log("qoder: all Qoder models exhausted (%s), falling back to WorkBuddy CN '%s'"
+                        % (qoder_candidates, wb_fallback_model))
+                    return self._fallback_to_workbuddy_cn(payload, want_stream=False, t_start=t_start, wb_model=wb_fallback_model)
+
+            # Not an exhaustion error or no fallback: return HTTP error
+            self.send_response(status if status else 500)
             self.send_header("Content-Type", "application/json")
             if cors_origin_allowed(self.path):
                 self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
-            self.wfile.write(body.encode("utf-8"))
-        except Exception as exc:
-            log("qoder: non-stream error: %s" % exc)
-            return self._error(502, "qoder upstream error: %s" % exc)
+            self.wfile.write((body or "").encode("utf-8"))
+            return
+    def _route_to_codearts(self, payload):
+        """Route a codearts-* request straight to the CodeArts (Snap) upstream.
+
+        CodeArts is the fifth upstream. Supports multi-account pool with proxy_slot
+        egress isolation, with automatic fallback to single-session hierarchy.
+        """
+        model = payload.get("model") or ""
+        want_stream = bool(payload.get("stream"))
+        t_start = time.time()
+        log("codearts: model=%s stream=%s" % (model, want_stream))
+
+        cp = get_codearts_pool()
+        account, session = None, None
+        if cp and cp.accounts:
+            account, session = cp.pick_account()
+
+        if session is None:
+            # Fall back to single-session hierarchy (codearts_account.json -> config.json -> desktop IDE)
+            try:
+                session = codearts_route.load_session()
+            except Exception as exc:
+                log("codearts: no usable login: %s" % exc)
+                return self._error(
+                    502, "CodeArts login unavailable: %s - open CodeArts Agent and "
+                         "sign in, then retry (the gateway reads its session, it "
+                         "never renews it)" % exc, "credentials_error")
+
+        proxy = account.proxy if account else ""
+        account_slot = account.slot() if account else contextlib.nullcontext()
+
+        with account_slot:
+            if want_stream:
+                try:
+                    upstream = codearts_route.stream(payload, session=session, proxy=proxy)
+                except codearts_route.CodeArtsError as exc:
+                    status, body = codearts_route.error_payload(exc)
+                    if account and cp:
+                        if status == 429:
+                            cp.mark_cooldown(account.id, 60.0)
+                        elif status == 403:
+                            cp.mark_restricted(account.id, 7200.0, str(exc))
+                    log("codearts: stream setup failed: %s" % exc)
+                    return self._json(status, body)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "close")
+                if cors_origin_allowed(self.path):
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                try:
+                    for raw in upstream:
+                        line = raw.decode("utf-8", "replace")
+                        if not line.strip():
+                            continue
+                        self.wfile.write(
+                            line.encode("utf-8"))
+                        self.wfile.flush()
+                    self.wfile.write(b"\n")
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    log("codearts: client disconnected during stream")
+                    return
+                except Exception as exc:
+                    log("codearts: stream aborted: %s" % exc)
+                    try:
+                        err = json.dumps({"error": {"message": str(exc),
+                                                    "type": "upstream_error"}})
+                        self.wfile.write(("data: %s\n\n" % err).encode("utf-8"))
+                        self.wfile.write(b"data: [DONE]\n\n")
+                        self.wfile.flush()
+                    except Exception:
+                        pass
+                    return
+                finally:
+                    try:
+                        upstream.close()
+                    except Exception:
+                        pass
+                log("codearts: stream done, %dms" % int((time.time() - t_start) * 1000))
+                return
+
+            try:
+                result = codearts_route.complete(payload, session=session, proxy=proxy)
+            except codearts_route.CodeArtsError as exc:
+                status, body = codearts_route.error_payload(exc)
+                if account and cp:
+                    if status == 429:
+                        cp.mark_cooldown(account.id, 60.0)
+                    elif status == 403:
+                        cp.mark_restricted(account.id, 7200.0, str(exc))
+                log("codearts: upstream error %s: %s" % (status, exc))
+                return self._json(status, body)
+            except Exception as exc:
+                log("codearts: unexpected error: %s" % exc)
+                return self._error(502, "CodeArts upstream error: %s" % exc)
+            return self._json(200, result)
 
     def _proxy_to_antigravity(self, method="GET", payload=None):
         """Forward requests to Antigravity proxy service on 127.0.0.1:43810."""
@@ -8636,7 +9136,7 @@ def _probe_running_instance(args):
     return False
 
 def _bootstrap_runtime(args):
-    global POOL, ACCOUNTS_DIR, API_KEY, SYSTEM_PROMPT
+    global POOL, CODEARTS_POOL, ACCOUNTS_DIR, API_KEY, SYSTEM_PROMPT
     global API_KEY_FILE_SET, SCHEDULER
     api_key_generated = False
     API_KEY = args.api_key
@@ -8665,6 +9165,7 @@ def _bootstrap_runtime(args):
     POOL.load()
     POOL.apply_proxy_slots()
     POOL.apply_reserve_credits()
+    CODEARTS_POOL = codearts_accounts.CodeArtsAccountPool(ACCOUNTS_DIR)
     apply_daily_token_limit()
     load_persisted_realm()
     global SCHEDULER
