@@ -599,6 +599,13 @@ function loadAccounts() {
       var isEnabled = (a.enabled !== false);
       if (!isEnabled) badges += '<span class="badge" style="background:var(--bad-soft);color:var(--bad)">已停用</span>';
       else badges += '<span class="badge" style="background:var(--ok-soft);color:var(--ok)">已启用</span>';
+      if (a.cooling_remaining_ms > 0) {
+        var sec = Math.ceil(a.cooling_remaining_ms / 1000);
+        badges += '<span class="badge" style="background:#fee2e2;color:#991b1b;border:1px solid #fecaca;" title="' + (a.last_error || '冷却中') + '">冷却 (' + sec + 's)</span>';
+      }
+      if (a.flash_free_exhausted) {
+        badges += '<span class="badge" style="background:#fef3c7;color:#92400e;border:1px solid #fde68a;" title="千问3.8 Flash 今日免费额度已用尽，将于次日 00:00 (UTC+8) 自动刷新恢复">⚡ Flash免费额度耗尽</span>';
+      }
       var toggleText = isEnabled ? '停用' : '启用';
       card.innerHTML =
         '<div class="account-info">' +

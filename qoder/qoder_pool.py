@@ -17,14 +17,13 @@
 """
 
 from __future__ import annotations
-
 import json
 import os
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from typing import Optional
-
 import qoder_accounts as accounts
 import qoder_client as client
 import qoder_cosy as cosy
@@ -103,6 +102,22 @@ AGENT_LIMIT_MARKERS = ["code=115", '"code":"115"', '"code": "115"',
 AGENT_LIMIT_DEFAULT_COOLDOWN = 10 * 60
 AUTH_EXPIRED_COOLDOWN = 24 * 3600
 
+
+# 千问3.8-Flash 限时免费活动额度用尽标记（每日按 UTC+8 00:00 自动刷新）
+# 官方说明: https://docs.qoder.com/zh/events/flashoffer
+# 常见报错文案: "千问3.8 flash当天的免费额度使用完毕" / "今日当前模型免费使用次数已用尽"
+FLASH_FREE_EXHAUSTED_MARKERS = [
+    "千问3.8 flash当天的免费额度使用完毕",
+    "今日当前模型免费使用次数已用尽",
+    "当前模型免费使用次数已用尽",
+    "免费使用次数已达上限",
+    "免费额度使用完毕",
+    "免费额度已用尽",
+    "当日免费额度已用尽",
+    "当天免费额度已用完",
+    "免费额度已达上限",
+    "免费次数已用完",
+]
 
 class UpstreamError(client.UpstreamError):
     """上游错误，携带 HTTP 状态 + 详情 + 分类。"""
@@ -216,6 +231,25 @@ def agent_limit_reset_at(err: Exception) -> Optional[float]:
     ms = int(digits)
     return (ms / 1000.0) if ms > 0 else None
 
+def get_next_utc8_midnight() -> float:
+    """计算下一次北京/新加坡时间 (UTC+8) 00:00:00 的 Unix 时间戳（秒）。"""
+    tz_utc8 = timezone(timedelta(hours=8))
+    now_dt = datetime.now(tz_utc8)
+    tomorrow_dt = (now_dt + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return tomorrow_dt.timestamp()
+
+
+def is_flash_free_exhausted(err: Exception) -> bool:
+    """判断是否为千问3.8 Flash 每日免费额度用尽报错。"""
+    if err is None:
+        return False
+    detail = getattr(err, "detail", "") or ""
+    msg = getattr(err, "message", "") or ""
+    raw = f"{detail} {msg} {err}".lower()
+    return any(m.lower() in raw for m in FLASH_FREE_EXHAUSTED_MARKERS)
+
 
 def retry_after_seconds(err: Exception) -> Optional[int]:
     """错误详情里上游要求的等待秒数；无则 None。"""
@@ -233,6 +267,9 @@ def should_failover(err: Exception) -> bool:
             return False
         # 登录过期（105）与 agent 额度用尽（115）都是账号级状态：换号有意义。
         if is_auth_expired_error(err) or is_agent_limit_error(err):
+            return True
+        # 千问3.8 Flash 免费额度耗尽：换号有意义
+        if is_flash_free_exhausted(err):
             return True
         if err.status in (401, 403, 429):
             return True
@@ -252,6 +289,8 @@ def cooldown_for(err: Exception) -> int:
             return COOLDOWN_BANNED
         if is_auth_expired_error(err):
             return AUTH_EXPIRED_COOLDOWN
+        if is_flash_free_exhausted(err):
+            return max(60, int(get_next_utc8_midnight() - time.time()))
         if is_agent_limit_error(err):
             reset_at = agent_limit_reset_at(err)
             if reset_at:
@@ -344,6 +383,7 @@ class Slot:
     _catalog_at: float = 0.0
     _credential: str = ""
     _refresh_tried: bool = False
+    _flash_free_reset_at: float = 0.0
 
     def available(self, now: float = 0) -> bool:
         if not self.enabled:
@@ -397,6 +437,31 @@ class Slot:
                 return True
             return model_key in self._catalog
 
+    @property
+    def flash_free_exhausted(self) -> bool:
+        with self._lock:
+            if self._flash_free_reset_at <= 0:
+                return False
+            if time.time() >= self._flash_free_reset_at:
+                self._flash_free_reset_at = 0.0
+                return False
+            return True
+
+    @property
+    def flash_free_reset_at(self) -> float:
+        with self._lock:
+            if self._flash_free_reset_at > 0 and time.time() >= self._flash_free_reset_at:
+                self._flash_free_reset_at = 0.0
+            return self._flash_free_reset_at
+
+    def mark_flash_free_exhausted(self, reset_at: float = 0.0):
+        with self._lock:
+            self._flash_free_reset_at = reset_at or get_next_utc8_midnight()
+
+    def clear_flash_free_exhausted(self):
+        with self._lock:
+            self._flash_free_reset_at = 0.0
+
     def status(self) -> dict:
         return {
             "id": self.id,
@@ -405,6 +470,8 @@ class Slot:
             "enabled": self.enabled,
             "cooling_remaining_ms": self.cooling_remaining_ms,
             "last_error": self.last_error,
+            "flash_free_exhausted": self.flash_free_exhausted,
+            "flash_free_reset_at": self.flash_free_reset_at,
         }
 
 
@@ -530,6 +597,24 @@ class Pool:
                 s.note_success()
                 self._save()
                 return
+    def mark_flash_free_exhausted(self, slot_id: str, reason: str = "",
+                                  reset_at: float = 0.0):
+        for s in self.snapshot():
+            if s.id == slot_id:
+                s.mark_flash_free_exhausted(reset_at)
+                if reason:
+                    with s._lock:
+                        s._last_err = reason
+                self._save()
+                return
+
+    def clear_flash_free_exhausted(self, slot_id: str):
+        for s in self.snapshot():
+            if s.id == slot_id:
+                s.clear_flash_free_exhausted()
+                self._save()
+                return
+
 
     def status(self) -> list[dict]:
         return [s.status() for s in self.snapshot()]
@@ -556,6 +641,9 @@ class Pool:
                     s._cooldown_until = until
                     restored += 1
                 s._last_err = e.get("last_error", "")
+                ff_reset = e.get("flash_free_reset_at", 0.0)
+                if ff_reset > now:
+                    s._flash_free_reset_at = ff_reset
         if restored > 0:
             print(f"[pool] restored {restored} cooling account(s) from {self._state_path}")
 
@@ -567,10 +655,12 @@ class Pool:
             with s._lock:
                 until = s._cooldown_until
                 last_err = s._last_err
-            if until > 0 or last_err:
+                ff_reset = s._flash_free_reset_at
+            if until > 0 or last_err or ff_reset > 0:
                 st["slots"][s.id] = {
                     "cooldown_until": until,
                     "last_error": last_err,
+                    "flash_free_reset_at": ff_reset,
                 }
         tmp = self._state_path + ".tmp"
         try:
@@ -692,4 +782,48 @@ if __name__ == "__main__":
     os.unlink(tmp_path)
     print("Test 8 PASS: Pool persistence")
 
-    print("\n=== All 8 tests PASSED ===")
+    # Test 9: Flash free quota exhaustion & midnight reset
+    err_flash1 = UpstreamError(0, "千问3.8 flash当天的免费额度使用完毕")
+    err_flash2 = UpstreamError(400, "今日当前模型免费使用次数已用尽")
+    err_flash3 = UpstreamError(429, "当前模型免费使用次数已用尽，请明日再试")
+    assert is_flash_free_exhausted(err_flash1)
+    assert is_flash_free_exhausted(err_flash2)
+    assert is_flash_free_exhausted(err_flash3)
+    assert should_failover(err_flash1)
+    assert cooldown_for(err_flash1) >= 60
+
+    # Midnight timestamp in future
+    mid = get_next_utc8_midnight()
+    assert mid > time.time()
+    assert mid - time.time() <= 86400
+
+    # Slot flash free tracking
+    sf = Slot(id="f1", name="acct-f1", region="cn")
+    assert not sf.flash_free_exhausted
+    sf.mark_flash_free_exhausted()
+    assert sf.flash_free_exhausted
+    st = sf.status()
+    assert st["flash_free_exhausted"] is True
+    assert st["flash_free_reset_at"] > time.time()
+
+    # Expired reset clears status
+    sf.mark_flash_free_exhausted(reset_at=time.time() - 10)
+    assert not sf.flash_free_exhausted
+    assert sf.flash_free_reset_at == 0.0
+
+    # Pool persistence for flash_free_reset_at
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as tf:
+        tmp_path2 = tf.name
+    os.unlink(tmp_path2)
+    p_flash = Pool([sf], state_path=tmp_path2)
+    p_flash.mark_flash_free_exhausted("f1", "flash quota reached")
+    assert sf.flash_free_exhausted
+
+    # Reload in new pool instance
+    sf_reloaded = Slot(id="f1", name="acct-f1", region="cn")
+    p_flash2 = Pool([sf_reloaded], state_path=tmp_path2)
+    assert sf_reloaded.flash_free_exhausted
+    os.unlink(tmp_path2)
+    print("Test 9 PASS: Flash free quota exhaustion & midnight reset")
+
+    print("\n=== All 9 tests PASSED ===")

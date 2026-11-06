@@ -5165,6 +5165,10 @@ function renderQoderAccounts(usage){
     }else{
       stateBadge = '<span class="badge ok">可用</span>';
     }
+    const isFlashExhausted = Boolean((slot && slot.flash_free_exhausted) || a.flash_free_exhausted);
+    if(isFlashExhausted){
+      stateBadge += ' <span class="badge" style="background:#fef3c7;color:#92400e;border:1px solid #fde68a;" title="千问3.8 Flash 今日免费额度已用尽，将于次日 00:00 (UTC+8) 自动刷新恢复">⚡ Flash耗尽</span>';
+    }
     const idAttr = esc(String(a.id || '').replace(/[^\w.@-]/g, ''));
     const nameAttr = esc(a.name || a.email || a.id);
     html += '<tr>'

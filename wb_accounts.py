@@ -865,6 +865,10 @@ class Account(object):
     def checkin(self):
         if self.realm != "cn":
             return {"ok": False, "error": "checkin is only available for CN realm accounts"}
+        # 预先检查 Token 剩余寿命，避免 401 报错
+        exp = self.expires_at or (jwt_exp(self.access_token) if self.access_token else None)
+        if exp and (exp - time.time()) <= 120:
+            self.refresh()
         cfg = get_realm_config("cn")
         url = cfg["billing_upstream"] + CHECKIN_PATH
         headers = self.headers(purpose="billing")
@@ -878,18 +882,32 @@ class Account(object):
                 self.save(os.path.dirname(self.path))
             result = {"ok": (code == 0 or code == 10001), "code": code, "msg": msg, "data": payload.get("data")}
         except urllib.error.HTTPError as exc:
-            try:
-                body = json.loads(exc.read().decode("utf-8") or "{}")
-                code = body.get("code", -1)
-                msg = body.get("msg") or ("HTTP %d" % exc.code)
-                is_already = (code == 10001) or ("已签到" in msg)
-                result = {"ok": is_already, "code": code, "msg": msg, "data": body.get("data")}
-                if is_already:
+            if exc.code == 401 and self.refresh():
+                try:
+                    headers = self.headers(purpose="billing")
+                    payload = http_json(url, data=b"{}", method="POST", headers=headers, timeout=15,
+                                        proxy=self.proxy)
+                    code = payload.get("code", -1)
+                    msg = payload.get("msg") or "ok"
                     self.last_checkin = time.strftime("%Y-%m-%d %H:%M:%S")
                     if self.path and os.path.exists(os.path.dirname(self.path)):
                         self.save(os.path.dirname(self.path))
-            except Exception:
-                result = {"ok": False, "error": "HTTP %d" % exc.code}
+                    result = {"ok": (code == 0 or code == 10001), "code": code, "msg": msg, "data": payload.get("data")}
+                except Exception as retry_exc:
+                    result = {"ok": False, "error": str(retry_exc)}
+            else:
+                try:
+                    body = json.loads(exc.read().decode("utf-8") or "{}")
+                    code = body.get("code", -1)
+                    msg = body.get("msg") or ("HTTP %d" % exc.code)
+                    is_already = (code == 10001) or ("已签到" in msg)
+                    result = {"ok": is_already, "code": code, "msg": msg, "data": body.get("data")}
+                    if is_already:
+                        self.last_checkin = time.strftime("%Y-%m-%d %H:%M:%S")
+                        if self.path and os.path.exists(os.path.dirname(self.path)):
+                            self.save(os.path.dirname(self.path))
+                except Exception:
+                    result = {"ok": False, "error": "HTTP %d" % exc.code}
         except Exception as exc:
             result = {"ok": False, "error": str(exc)}
 
@@ -915,10 +933,13 @@ class Account(object):
             result["msg"] = base_msg + reward_note
             result["extra_rewards"] = extra_rewards
             result["ok"] = True
-            try:
-                self.fetch_credits()
-            except Exception:
-                pass
+
+        # 无论是否有额外奖励，签到完成后均主动向计费端同步最新积分与额度包
+        try:
+            self.fetch_credits()
+            result["credits"] = self.credits
+        except Exception:
+            pass
         return result
 
     def fetch_credits(self):

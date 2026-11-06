@@ -665,18 +665,31 @@ def ensure_catalog(slot: pool.Slot):
         slot.set_catalog(set())
 
 
+def is_flash_promo_model(model_key: str) -> bool:
+    """判断是否为参与限时免费活动的千问 3.8 Flash 模型。"""
+    mk = (model_key or "").lower()
+    return mk in ("qfmodel", "qmodel_38flash", "qwen3.8-flash", "qwen-flash", "qwen") or ("qwen" in mk and "flash" in mk)
+
+
 def pick_slot_for_model(p: pool.Pool, model_key: str,
                          exclude: set = None) -> tuple[Optional[pool.Slot], bool]:
-    """按模型选号：优先选目录里有该模型的账号；都没有则退回任意可用账号。"""
+    """按模型选号：优先选目录里有该模型的账号；都没有则退回任意可用账号。
+    若为千问 3.8 Flash 免费活动模型，则跳过当日免费额度已用尽的账号。"""
+    is_promo = is_flash_promo_model(model_key)
+
     def filter_fn(s: pool.Slot) -> bool:
+        if is_promo and s.flash_free_exhausted:
+            return False
         ensure_catalog(s)
         return s.supports_model(model_key)
 
     slot, ok = p.pick(exclude, filter_fn=filter_fn)
     if ok:
         return slot, True
+    if is_promo:
+        # Flash 模型不回退到 flash_free_exhausted 的账号
+        return p.pick(exclude, filter_fn=lambda s: not s.flash_free_exhausted)
     return p.pick(exclude)
-
 
 # ── 信封重试闸门 (streamWithSlot) ──────────────────────────────────────────
 
@@ -903,7 +916,17 @@ def call_qoder(payload: dict, on_delta=None, proxy: str = "") -> tuple[int, str]
             })
 
         last_err = err
-        if emitted_any or not pool.should_failover(err):
+        if emitted_any:
+            break
+
+        # 千问3.8 Flash 每日免费额度用尽：标记该账号 Flash 额度耗尽，记录日志，并换号重试
+        if pool.is_flash_free_exhausted(err):
+            p.mark_flash_free_exhausted(slot.id, str(err))
+            log("qoder: slot '%s' flash free promo quota exhausted for today, marked and failover" % slot.id)
+            tried.add(slot.id)
+            continue
+
+        if not pool.should_failover(err):
             break
         p.cool(slot.id, pool.cooldown_for(err), str(err))
         tried.add(slot.id)
@@ -912,16 +935,43 @@ def call_qoder(payload: dict, on_delta=None, proxy: str = "") -> tuple[int, str]
         last_err = pool.NoAccountError()
 
     status = pool.error_status(last_err)
-    msg, etype = _friendly_error(last_err, p)
+    msg, etype = _friendly_error(last_err, p, mapped)
+    if pool.is_flash_free_exhausted(last_err) or etype == "flash_free_quota_exhausted":
+        status = 429
     record_qoder_usage(model, "", on_delta is not None, "failed",
                        int((time.time() - _t0) * 1000), 0, 0, 0, str(last_err))
     return status, json.dumps({"error": {"type": etype, "message": msg}})
 
 
-def _friendly_error(err: Exception, p: Optional[pool.Pool] = None) -> tuple[str, str]:
+def _friendly_error(err: Exception, p: Optional[pool.Pool] = None,
+                    model_key: str = "") -> tuple[str, str]:
+    if pool.is_flash_free_exhausted(err):
+        rem_s = int(max(0, pool.get_next_utc8_midnight() - time.time()))
+        hrs = rem_s // 3600
+        mins = (rem_s % 3600) // 60
+        time_str = f"{hrs}小时{mins}分" if hrs > 0 else f"{mins}分钟"
+        return (
+            f"当前 Qoder 账号千问3.8 Flash 当日免费额度已用尽（上游提示：{getattr(err, 'detail', '') or str(err)}）。"
+            f"免费活动额度将于次日 00:00 (UTC+8) 自动刷新恢复（约剩余 {time_str}）。"
+            "如需继续使用，请在控制台添加新账号或切换至其他模型。",
+            "flash_free_quota_exhausted",
+        )
     if isinstance(err, pool.NoAccountError):
         if p and p.size() > 0:
             slots = p.snapshot()
+            if is_flash_promo_model(model_key):
+                all_flash_exhausted = all(s.flash_free_exhausted for s in slots if s.enabled)
+                if all_flash_exhausted:
+                    rem_s = int(max(0, pool.get_next_utc8_midnight() - time.time()))
+                    hrs = rem_s // 3600
+                    mins = (rem_s % 3600) // 60
+                    time_str = f"{hrs}小时{mins}分" if hrs > 0 else f"{mins}分钟"
+                    return (
+                        f"所有可用 Qoder 账号今日千问3.8 Flash (Qwen3.8-Flash) 免费额度均已耗尽。"
+                        f"该活动额度将于次日 00:00 (UTC+8) 自动刷新恢复（约剩余 {time_str}）。"
+                        "如需立即使用，请访问控制台 http://127.0.0.1:28087/（点击【Qoder 看板】）添加新账号，或切换至其他模型。",
+                        "flash_free_quota_exhausted",
+                    )
             cool_times = [s.cooling_remaining_ms for s in slots if s.cooling_remaining_ms > 0]
             if cool_times and len(cool_times) == len(slots):
                 min_s = int(min(cool_times) / 1000)
@@ -1064,4 +1114,38 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Test 10 SKIP: qoder_models (no network/accounts): {e}")
 
-    print("\n=== All 9 core tests PASSED ===")
+    # Test 11: Flash free promo routing & friendly error
+    assert is_flash_promo_model("qfmodel")
+    assert is_flash_promo_model("qwen3.8-flash")
+    assert is_flash_promo_model("qmodel_38flash")
+    assert not is_flash_promo_model("gmodel")
+    assert not is_flash_promo_model("dmodel")
+
+    s_normal = pool.Slot(id="normal", name="Normal", region="cn")
+    s_flash_out = pool.Slot(id="flash_out", name="FlashOut", region="cn")
+    s_flash_out.mark_flash_free_exhausted()
+    p_test = pool.Pool([s_flash_out, s_normal])
+
+    # For flash promo model, should skip s_flash_out and pick s_normal
+    picked_s, ok = pick_slot_for_model(p_test, "qfmodel")
+    assert ok and picked_s.id == "normal"
+
+    # For general model (e.g. gmodel), s_flash_out is still selectable!
+    picked_gen, ok_gen = pick_slot_for_model(p_test, "gmodel", exclude={"normal"})
+    assert ok_gen and picked_gen.id == "flash_out"
+
+    # When all flash slots exhausted
+    s_normal.mark_flash_free_exhausted()
+    picked_none, ok_none = pick_slot_for_model(p_test, "qfmodel")
+    assert not ok_none and picked_none is None
+
+    msg_flash, etype_flash = _friendly_error(pool.NoAccountError(), p_test, model_key="qfmodel")
+    assert etype_flash == "flash_free_quota_exhausted"
+    assert "免费额度均已耗尽" in msg_flash
+
+    err_exhaust = pool.UpstreamError(0, "今日当前模型免费使用次数已用尽")
+    msg_err, etype_err = _friendly_error(err_exhaust, p_test, model_key="qfmodel")
+    assert etype_err == "flash_free_quota_exhausted"
+    print("Test 11 PASS: Flash free promo routing & friendly error")
+
+    print("\n=== All 10 core tests PASSED ===")

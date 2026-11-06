@@ -7002,8 +7002,25 @@ class Handler(BaseHTTPRequestHandler):
     def _route_qoder_accounts_list(self):
         try:
             import qoder_accounts
+            import qoder_route
             from dataclasses import asdict
-            accts = [asdict(a) for a in qoder_accounts.list_accounts()]
+            p = qoder_route.get_pool()
+            slots_by_id = {s.id: s for s in p.snapshot()}
+            accts = []
+            for a in qoder_accounts.list_accounts():
+                d = asdict(a)
+                s = slots_by_id.get(a.id)
+                if s:
+                    d["cooling_remaining_ms"] = s.cooling_remaining_ms
+                    d["last_error"] = s.last_error
+                    d["flash_free_exhausted"] = s.flash_free_exhausted
+                    d["flash_free_reset_at"] = s.flash_free_reset_at
+                else:
+                    d["cooling_remaining_ms"] = 0
+                    d["last_error"] = ""
+                    d["flash_free_exhausted"] = False
+                    d["flash_free_reset_at"] = 0.0
+                accts.append(d)
             return self._json(200, {"ok": True, "accounts": accts})
         except Exception as e:
             return self._error(500, "qoder accounts list failed: %s" % e)
@@ -7102,10 +7119,14 @@ class Handler(BaseHTTPRequestHandler):
             for s in p.snapshot():
                 slots.append({
                     "id": s.id,
+                    "name": getattr(s, "name", s.id),
                     "region": s.region,
+                    "enabled": s.enabled,
                     "available": s.available(),
                     "cooling_remaining_ms": s.cooling_remaining_ms if hasattr(s, 'cooling_remaining_ms') else 0,
                     "last_error": s.last_error if hasattr(s, 'last_error') else "",
+                    "flash_free_exhausted": getattr(s, "flash_free_exhausted", False),
+                    "flash_free_reset_at": getattr(s, "flash_free_reset_at", 0.0),
                 })
             return self._json(200, {"ok": True, "slots": slots})
         except Exception as e:
