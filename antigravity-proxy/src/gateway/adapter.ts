@@ -207,6 +207,8 @@ export function convertOpenAIToCloudCode(req: OpenAIChatCompletionRequest): {
   const payload: GoogleCloudCodePayload = {
     project: 'aicode-consumers',
     model: modelDef.upstreamModel,
+    clientModel: req.model,
+    effort,
     request: innerRequest
   };
 

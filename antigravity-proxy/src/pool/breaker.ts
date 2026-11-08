@@ -5,6 +5,87 @@ import { TokenRefresher } from './refresher.js';
 
 import { classifyUpstreamError } from './error-policy.js';
 import { QuotaManager } from './quota-manager.js';
+import { pickUpstreamModelForAccount, ThinkingEffort } from '../gateway/models.js';
+
+/**
+ * 上游把"模型已下线/无权调用"包装在 HTTP 200 的正文里返回：
+ *   Claude Opus 4.6 is no longer available. Please switch to Claude Opus 5.5.
+ *   {"error_code":"TM.000010051","error_msg":"您当前无权调用该模型..."}
+ * 这类响应必须在开始向客户端转发前识别出来，否则会被当成正常回答。
+ */
+const RETIRED_MODEL_NOTICE_PATTERNS: RegExp[] = [
+  /no longer available/i,
+  /please switch to/i,
+  /TM\.000010051/i,
+  /当前无权调用该模型/,
+  /模型已下线/
+];
+
+function isRetiredModelNotice(text: string): boolean {
+  return RETIRED_MODEL_NOTICE_PATTERNS.some(pattern => pattern.test(text));
+}
+
+/** 剥离仅用于本地调度的字段，避免上游因未知字段返回 400。 */
+function serializeUpstreamPayload(payload: GoogleCloudCodePayload): string {
+  const body: Record<string, unknown> = { ...payload };
+  delete body.clientModel;
+  delete body.effort;
+  return JSON.stringify(body);
+}
+
+/**
+ * 读取上游响应的开头若干块用于识别"软失败"，再原样回放下游。
+ * 超时（默认 8 秒）时不再等待，直接把已读内容与仍在 pending 的下一块交给调用方，
+ * 避免长思考模型的首包延迟拖垮下游心跳。
+ */
+async function peekForRetiredModel(
+  body: any,
+  timeoutMs = 8000
+): Promise<{ stream: any; notice: boolean; text: string }> {
+  const iterator = body[Symbol.asyncIterator]();
+  const buffered: Buffer[] = [];
+  let text = '';
+  let pending: Promise<any> | null = iterator.next();
+  const deadline = Date.now() + timeoutMs;
+
+  while (pending && buffered.length < 4 && Date.now() < deadline) {
+    const remaining = Math.max(0, deadline - Date.now());
+    const winner = await Promise.race([
+      pending.then(result => ({ kind: 'chunk' as const, result })),
+      new Promise<{ kind: 'timeout' }>(resolve => setTimeout(() => resolve({ kind: 'timeout' }), remaining))
+    ]);
+    if (winner.kind === 'timeout') break;
+    const result = winner.result;
+    if (result.done) {
+      pending = null;
+      break;
+    }
+    const chunk = Buffer.isBuffer(result.value) ? result.value : Buffer.from(result.value);
+    buffered.push(chunk);
+    text += chunk.toString('utf-8');
+    if (text.includes('\n') || text.length >= 8192) break;
+    pending = iterator.next();
+  }
+
+  if (isRetiredModelNotice(text)) {
+    try { await iterator.return?.(); } catch { /* ignore */ }
+    return { stream: null, notice: true, text };
+  }
+
+  async function* replay() {
+    for (const chunk of buffered) yield chunk;
+    let next = pending;
+    while (next) {
+      const result = await next;
+      next = null;
+      if (result.done) return;
+      yield result.value;
+      next = iterator.next();
+    }
+  }
+
+  return { stream: replay(), notice: false, text };
+}
 
 export interface UpstreamExecutionResult {
   statusCode: number;
@@ -118,7 +199,7 @@ export class RequestExecutor {
         // exact generation payload first, then the bare request envelope as a
         // compatibility fallback. Returning the larger successful result avoids
         // silently under-counting wrappers/tools that one endpoint ignores.
-        const requestBodies = [JSON.stringify(payload), JSON.stringify({ request: payload.request })];
+        const requestBodies = [serializeUpstreamPayload(payload), JSON.stringify({ request: payload.request })];
         let countedTokens: number | undefined;
         let lastFailure = '';
         for (const requestBody of requestBodies) {
@@ -189,9 +270,12 @@ export class RequestExecutor {
     const family: 'claude' | 'gemini' = (model.includes('claude') || model.includes('opus') || model.includes('sonnet') || model.includes('gpt') || model.includes('oss'))
       ? 'claude'
       : 'gemini';
+    // 客户端原始模型名 + 思考档位：每次换号都按目标账号的可用模型清单重新落到上游模型。
+    const requestedModel = payload.clientModel || payload.model || '';
+    const effort = (payload.effort || 'high') as ThinkingEffort;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      const account = this.pool.acquireAccount(triedAccountIds, family, sessionKey);
+      const account = this.pool.acquireAccount(triedAccountIds, family, sessionKey, requestedModel, effort);
 
       if (!account) {
         // 跨家族自动切换：请求的模型家族已全灭，但另一个家族还有额度时，
@@ -228,7 +312,7 @@ export class RequestExecutor {
                   'User-Agent': 'antigravity/2.14.0',
                   'x-goog-api-client': 'gl-node/22.7.0 grpc-web/1.0.0'
                 },
-                body: JSON.stringify(payload),
+                body: serializeUpstreamPayload(payload),
                 headersTimeout: 600000,
                 bodyTimeout: 600000,
                 dispatcher
@@ -287,6 +371,14 @@ export class RequestExecutor {
 
       triedAccountIds.add(account.id);
 
+      // 按账号模型池重新解析上游模型：新池 → Opus/Sonnet 5.5，旧池 → 4.6 / 4-6。
+      // 清单未知时回退 legacy，保持历史行为。
+      const accountModel = pickUpstreamModelForAccount(requestedModel, effort, account.availableModels);
+      if (payload.model !== accountModel) {
+        console.log(`[Executor] ${account.email} 模型池适配: ${requestedModel} -> ${accountModel}`);
+      }
+      payload.model = accountModel;
+
       // 检查 Token 是否需要刷新
       if (!account.accessToken || Date.now() >= account.accessTokenExpiresAt) {
         const ok = await this.refresher.refreshSingleAccount(account);
@@ -314,18 +406,25 @@ export class RequestExecutor {
         const res = await request(this.config.upstreamUrl, {
           method: 'POST',
           headers: upstreamHeaders,
-          body: JSON.stringify(payload),
+          body: serializeUpstreamPayload(payload),
           headersTimeout: 600000,
           bodyTimeout: 600000,
           dispatcher
         });
 
-        // 成功状态
+        // 成功状态（先嗅探开头，识别"HTTP 200 + 模型已下线"的软失败）
         if (res.statusCode >= 200 && res.statusCode < 300) {
+          const peeked = await peekForRetiredModel(res.body);
+          if (peeked.notice) {
+            this.pool.markModelUnsupported(account.id, accountModel);
+            console.warn(`[Executor] Account ${account.email} 不支持模型 ${accountModel}（200 软提示），自动换号重试: ${peeked.text.slice(0, 160)}`);
+            this.pool.releaseAccount(account.id, { code: 200, message: peeked.text.slice(0, 300) });
+            continue;
+          }
           return {
             statusCode: res.statusCode,
             headers: res.headers,
-            bodyStream: res.body,
+            bodyStream: peeked.stream,
             accountUsed: account
           };
         }
@@ -370,6 +469,16 @@ export class RequestExecutor {
             console.error(`[Executor] Account ${account.email} hit 403 Forbidden:`, errBody);
           }
           this.pool.releaseAccount(account.id, { code: 403, message: errBody });
+          continue;
+        }
+
+        // 处理 404 模型不存在：不同账号模型池不同（旧池无 5.5，新池无 4.6），
+        // 必须换号重试，不能把 404 直接甩给客户端。
+        if (res.statusCode === 404) {
+          const errBody = await res.body.text();
+          this.pool.markModelUnsupported(account.id, accountModel);
+          this.pool.releaseAccount(account.id, { code: 404, message: errBody });
+          console.warn(`[Executor] Account ${account.email} 不支持模型 ${accountModel}（404），自动换号重试: ${errBody.slice(0, 120)}`);
           continue;
         }
 

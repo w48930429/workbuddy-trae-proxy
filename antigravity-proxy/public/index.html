@@ -296,6 +296,7 @@
         </div>
       </section>
 
+
       <!-- 账号矩阵工具条 (搜索、状态过滤与卡片/列表视图切换) -->
       <section class="section-toolbar">
         <div class="toolbar-left">
@@ -328,6 +329,29 @@
           <div class="loading-spinner"></div>
           <p>正在读取账号池状态...</p>
         </div>
+      </section>
+
+      <!-- 模型实测台：每个模型一行，带独立测速按钮。
+           测速走本机网关 /v1/chat/completions 的真实 SSE 流式请求，量到的是
+           「账号池选号 + 出口代理 + 上游」的端到端 TTFT 与生成速度。 -->
+      <section class="bench-panel" id="bench-panel">
+        <div class="bench-head">
+          <div class="bench-head-left">
+            <span class="bench-title">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+              <b>模型实测速度</b>
+            </span>
+            <span class="bench-sub" id="bench-sub">正在读取模型清单...</span>
+          </div>
+          <div class="bench-head-right">
+            <button type="button" class="btn btn-secondary bench-action" id="btn-bench-all">⚡ 全部测速</button>
+            <button type="button" class="btn btn-secondary bench-action" id="btn-bench-clear" title="清空浏览器本地缓存的测速结果">清空</button>
+            <button type="button" class="btn btn-secondary bench-action" id="btn-bench-reload" title="重新从 /v1/models 拉取模型清单">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v6h-6"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="bench-list" id="bench-list"></div>
       </section>
     </main>
 
@@ -512,6 +536,9 @@
     </div>
   </div>
 
-  <script src="/admin/app.js?v=4.6"></script>
+  <!-- 悬停提示: 账号异常失效的具体原因 -->
+  <div id="status-reason-tooltip" class="status-reason-tooltip" role="tooltip" aria-hidden="true"></div>
+
+  <script src="/admin/app.js?v=4.8"></script>
 </body>
 </html>

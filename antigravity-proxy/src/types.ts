@@ -40,6 +40,14 @@ export interface Account {
   // 因 loadCodeAssist 明确判定为 free 而自动停用的标记：
   // 额度刷新成功会清空 lastError，无法再靠错误文案识别自动停用，故单独留痕供复检自愈。
   autoDisabledForFree?: boolean;
+  // 上游实际可用模型清单（v1internal:fetchAvailableModels 返回值）。
+  // 账号按模型池灰度分化：新池含 claude-opus-5-5-*，旧池只有 claude-opus-4-6-thinking。
+  availableModels?: string[];
+  availableModelsAt?: number;
+  modelPool?: 'legacy' | 'new';
+  // 临时不支持模型黑名单：upstreamModel -> 过期时间戳(ms)。
+  // 上游 404 或 200 软提示"模型已下线"时写入，避免反复撞同一个账号。
+  unsupportedModels?: Record<string, number>;
 }
 
 export interface AppConfig {
@@ -132,6 +140,10 @@ export interface GoogleContent {
 export interface GoogleCloudCodePayload {
   project?: string;
   model?: string;
+  // 客户端请求的原始模型名（如 opus / sonnet / claude-opus-4-6）。
+  // model 是按静态规则映射出的上游名；执行器会结合账号可用模型清单重新解析。
+  clientModel?: string;
+  effort?: 'low' | 'medium' | 'high' | 'none';
   request: {
     contents: GoogleContent[];
     systemInstruction?: {

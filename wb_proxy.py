@@ -5722,6 +5722,11 @@ def _is_qoder_qwen_flash(model: str) -> bool:
     return "qwen" in m or m == "qfmodel"
 
 
+def _is_qoder_qoduck(model: str) -> bool:
+    m = (model or "").strip().lower()
+    return "qoduck" in m or m in ("lmodel", "duck", "qduck")
+
+
 def _is_qoder_exhausted(status: int, body: str) -> bool:
     if status in (429, 503):
         return True
@@ -7203,7 +7208,10 @@ class Handler(BaseHTTPRequestHandler):
                 test_model = str(query_or_payload.get("model") or "codearts-openpangu-2.0-flash").strip()
                 t0 = time.time()
                 try:
-                    from codearts import codearts_route
+                    # 旧逻辑：模块顶部已 import codearts_route，这里再次局部导入会让
+                    # codearts_route 变成局部变量，导致本函数前面的 /codearts/models 等
+                    # 分支触发 UnboundLocalError: cannot access local variable 'codearts_route'。
+                    # from codearts import codearts_route
                     sess = acct.to_session()
                     reply = codearts_route.complete(
                         payload={
@@ -8777,7 +8785,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_responses(payload)
         # Qoder 路由：/qoder/v1/... 路径直接走 Qoder 上游
         model_name = payload.get("model") or ""
-        if _qoder_enabled() and qoder_forced:
+        if _qoder_enabled() and (qoder_forced or _is_qoder_qoduck(model_name)):
             return self._route_to_qoder(payload)
         # CodeArts 路由：codearts- 前缀直通 CodeArts (Snap) 上游。
         # 必须带前缀：CodeArts 也有 deepseek-v4.1-flash，而那是本网关额度
@@ -9100,6 +9108,7 @@ class Handler(BaseHTTPRequestHandler):
         wb_payload = dict(payload, model=wb_model)
         wb_payload.pop("reasoning_effort", None)
         wb_payload.pop("reasoningEffort", None)
+        wb_payload.pop("realm", None)
         session_key = extract_session_key(self.headers, payload)
         fp = prompt_fingerprint(wb_payload.get("messages"))
         try:
@@ -9129,27 +9138,38 @@ class Handler(BaseHTTPRequestHandler):
                     pass
 
     def _route_to_qoder(self, payload):
-        """Route request to Qoder upstream (streaming + non-streaming) with
-
-        two-way fallback between DeepSeek and Qwen3.8-Flash on quota exhaustion,
-        and cross-upstream failover to WorkBuddy CN deepseek-v4.1-flash when both
-        models are exhausted across all Qoder accounts.
+        """Route request to Qoder upstream (streaming + non-streaming) with:
+        - Two-way realm failover for QoDuck (local-qoder <-> local-qoder-cn),
+        - Two-way model fallback between DeepSeek and Qwen3.8-Flash on quota exhaustion,
+        - Cross-upstream failover to WorkBuddy CN deepseek-v4.1-flash when all candidates are exhausted.
         """
         want_stream = bool(payload.get("stream"))
         orig_model = payload.get("model") or "DeepSeek-Flash"
-        realm = self._request_realm(payload.get("realm")) or ""
+        start_realm = self._request_realm(payload.get("realm")) or ""
         t_start = time.time()
-        log("qoder: routing model=%s stream=%s realm=%s" % (orig_model, want_stream, realm or "default"))
+        log("qoder: routing model=%s stream=%s realm=%s" % (orig_model, want_stream, start_realm or "default"))
+
+        from qoder import qoder_pool
+        norm_start_realm = qoder_pool.normalize_realm(start_realm)
+
+        is_qoduck = _is_qoder_qoduck(orig_model)
         is_ds = _is_qoder_deepseek(orig_model)
         is_qwen = _is_qoder_qwen_flash(orig_model)
-        if is_ds:
-            qoder_candidates = [orig_model, "Qwen3.8-Flash"]
+
+        if is_qoduck:
+            if norm_start_realm == "cn":
+                attempts = [(orig_model, "cn"), (orig_model, "global")]
+            else:
+                attempts = [(orig_model, "global"), (orig_model, "cn")]
+            wb_fallback_model = "deepseek-v4.1-flash"
+        elif is_ds:
+            attempts = [(orig_model, start_realm), ("Qwen3.8-Flash", start_realm)]
             wb_fallback_model = "deepseek-v4.1-flash"
         elif is_qwen:
-            qoder_candidates = [orig_model, "DeepSeek-Flash"]
+            attempts = [(orig_model, start_realm), ("DeepSeek-Flash", start_realm)]
             wb_fallback_model = "deepseek-v4.1-flash"
         else:
-            qoder_candidates = [orig_model]
+            attempts = [(orig_model, start_realm)]
             wb_fallback_model = None
 
         if want_stream:
@@ -9172,15 +9192,17 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
                 chunks_written.append(chunk)
 
-            for idx, cand_model in enumerate(qoder_candidates):
+            for idx, (cand_model, cand_realm) in enumerate(attempts):
                 cur_payload = dict(payload, model=cand_model)
+                if cand_realm:
+                    cur_payload["realm"] = cand_realm
                 try:
-                    status, body = qoder_route.call_qoder(cur_payload, on_delta=on_delta, realm=realm)
+                    status, body = qoder_route.call_qoder(cur_payload, on_delta=on_delta, realm=cand_realm)
                 except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                     log("qoder: client disconnected during stream")
                     return
                 except Exception as exc:
-                    log("qoder: stream error on model=%s: %s" % (cand_model, exc))
+                    log("qoder: stream error on model=%s realm=%s: %s" % (cand_model, cand_realm, exc))
                     status, body = 502, str(exc)
 
                 if headers_sent:
@@ -9188,7 +9210,7 @@ class Handler(BaseHTTPRequestHandler):
                         err_detail = body
                         try:
                             err_detail = (json.loads(body).get("error", {})
-                                          or {}).get("message", body)
+                                       or {}).get("message", body)
                         except ValueError:
                             pass
                         err_chunk = {
@@ -9208,27 +9230,45 @@ class Handler(BaseHTTPRequestHandler):
                     return
 
                 # No headers sent yet: candidate failed before emitting any chunks
-                if _is_qoder_exhausted(status, body):
-                    if idx + 1 < len(qoder_candidates):
-                        next_cand = qoder_candidates[idx + 1]
-                        log("qoder: model '%s' quota/accounts exhausted (status=%s), falling back to alternative Qoder model '%s'"
-                            % (cand_model, status, next_cand))
+                if status == 200:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Connection", "close")
+                    if cors_origin_allowed(self.path):
+                        self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(b"data: [DONE]\n\n")
+                    self.wfile.flush()
+                    return
+
+                b_low = (body or "").lower()
+                is_content_violation = (status == 400 and ("content rejected" in b_low or "sensitive" in b_low))
+                can_failover = not is_content_violation and (_is_qoder_exhausted(status, body) or status in (402, 403, 408, 429, 500, 502, 503, 504))
+
+                if can_failover:
+                    if idx + 1 < len(attempts):
+                        next_model, next_realm = attempts[idx + 1]
+                        log("qoder: attempt %d (model=%s, realm=%s) failed (status=%s), failing over to (model=%s, realm=%s)"
+                            % (idx, cand_model, cand_realm, status, next_model, next_realm))
                         continue
                     if wb_fallback_model:
-                        log("qoder: all Qoder models exhausted (%s), falling back to WorkBuddy CN '%s'"
-                            % (qoder_candidates, wb_fallback_model))
+                        log("qoder: all Qoder attempts failed (%s), falling back to WorkBuddy CN '%s'"
+                            % (attempts, wb_fallback_model))
                         return self._fallback_to_workbuddy_cn(payload, want_stream=True, t_start=t_start, wb_model=wb_fallback_model)
 
-                # Not an exhaustion error or no fallback: return HTTP error
+                # Not failover eligible or no fallback: return HTTP error
                 return self._error(status if status else 500, upstream_error_message(status, body))
 
         # Non-streaming
-        for idx, cand_model in enumerate(qoder_candidates):
+        for idx, (cand_model, cand_realm) in enumerate(attempts):
             cur_payload = dict(payload, model=cand_model)
+            if cand_realm:
+                cur_payload["realm"] = cand_realm
             try:
-                status, body = qoder_route.call_qoder(cur_payload, on_delta=None, realm=realm)
+                status, body = qoder_route.call_qoder(cur_payload, on_delta=None, realm=cand_realm)
             except Exception as exc:
-                log("qoder: non-stream error on model=%s: %s" % (cand_model, exc))
+                log("qoder: non-stream error on model=%s realm=%s: %s" % (cand_model, cand_realm, exc))
                 status, body = 502, "qoder upstream error: %s" % exc
 
             if status == 200:
@@ -9239,21 +9279,25 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body.encode("utf-8"))
                 wall = int((time.time() - t_start) * 1000)
-                log("qoder: non-stream done, model=%s, %dms" % (cand_model, wall))
+                log("qoder: non-stream done, model=%s realm=%s, %dms" % (cand_model, cand_realm, wall))
                 return
 
-            if _is_qoder_exhausted(status, body):
-                if idx + 1 < len(qoder_candidates):
-                    next_cand = qoder_candidates[idx + 1]
-                    log("qoder: model '%s' quota/accounts exhausted (status=%s), falling back to alternative Qoder model '%s'"
-                        % (cand_model, status, next_cand))
+            b_low = (body or "").lower()
+            is_content_violation = (status == 400 and ("content rejected" in b_low or "sensitive" in b_low))
+            can_failover = not is_content_violation and (_is_qoder_exhausted(status, body) or status in (402, 403, 408, 429, 500, 502, 503, 504))
+
+            if can_failover:
+                if idx + 1 < len(attempts):
+                    next_model, next_realm = attempts[idx + 1]
+                    log("qoder: attempt %d (model=%s, realm=%s) failed (status=%s), failing over to (model=%s, realm=%s)"
+                        % (idx, cand_model, cand_realm, status, next_model, next_realm))
                     continue
                 if wb_fallback_model:
-                    log("qoder: all Qoder models exhausted (%s), falling back to WorkBuddy CN '%s'"
-                        % (qoder_candidates, wb_fallback_model))
+                    log("qoder: all Qoder attempts failed (%s), falling back to WorkBuddy CN '%s'"
+                        % (attempts, wb_fallback_model))
                     return self._fallback_to_workbuddy_cn(payload, want_stream=False, t_start=t_start, wb_model=wb_fallback_model)
 
-            # Not an exhaustion error or no fallback: return HTTP error
+            # Not failover eligible or no fallback: return HTTP error
             err_msg = body or ""
             try:
                 parsed = json.loads(body)
@@ -9319,8 +9363,19 @@ class Handler(BaseHTTPRequestHandler):
                         line = raw.decode("utf-8", "replace")
                         if not line.strip():
                             continue
-                        self.wfile.write(
-                            line.encode("utf-8"))
+                        # 旧逻辑：原样透传上游行。
+                        # 上游 SSE 事件之间只有单个 \n，且 "data:" 后没有空格；
+                        # 标准 SSE 客户端会把连续的 data 行合并成一个事件，再整体 JSON.parse
+                        # 失败，报错形如 "JSON Parse error: Unable to parse JSON string"。
+                        # self.wfile.write(line.encode("utf-8"))
+                        # self.wfile.flush()
+                        # 新逻辑：规范化为标准 SSE 事件（data: 后补空格、事件之间空行分隔）。
+                        text = line.rstrip("\r\n")
+                        if text.startswith("data:"):
+                            frame = "data: %s\n\n" % text[5:].lstrip()
+                        else:
+                            frame = text + "\n\n"
+                        self.wfile.write(frame.encode("utf-8"))
                         self.wfile.flush()
                     self.wfile.write(b"\n")
                     self.wfile.flush()

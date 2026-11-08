@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { Account, PoolStats, AccountStatus, AccountTier, RoutingStrategy } from '../types.js';
+import { accountSupportsModelFamily, ThinkingEffort } from '../gateway/models.js';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const ACCOUNTS_FILE = path.resolve(DATA_DIR, 'accounts.json');
@@ -86,6 +87,14 @@ export class AccountPool {
           // 新逻辑：未知等级保持 undefined，等 loadCodeAssist 明确返回后再落库。
           if (acc.tier && !['free', 'pro', 'ultra'].includes(acc.tier)) {
             delete (acc as any).tier;
+          }
+          // 清理已过期的"账号不支持模型"临时黑名单，避免持久化文件越积越大
+          if (acc.unsupportedModels) {
+            const now = Date.now();
+            for (const [model, until] of Object.entries(acc.unsupportedModels)) {
+              if (!until || until <= now) delete acc.unsupportedModels[model];
+            }
+            if (Object.keys(acc.unsupportedModels).length === 0) delete acc.unsupportedModels;
           }
           this.accounts.set(acc.id, acc);
         }
@@ -221,7 +230,9 @@ export class AccountPool {
   public acquireAccount(
     excludeIds: Set<string> = new Set(),
     requiredFamily?: 'claude' | 'gemini',
-    sessionKey?: string
+    sessionKey?: string,
+    inputModel?: string,
+    effort: ThinkingEffort = 'high'
   ): Account | null {
     const now = Date.now();
     const candidates: Account[] = [];
@@ -238,6 +249,11 @@ export class AccountPool {
 
       // 筛选健康且未满并发的账号
       if (acc.status === 'active' && acc.activeConcurrency < acc.maxConcurrency) {
+        // 模型池能力过滤：账号清单已知且完全不支持该模型族时跳过。
+        // 清单未知（新导入/尚未探测）一律放行，避免误锁账号。
+        if (inputModel && !accountSupportsModelFamily(inputModel, effort, acc.availableModels)) {
+          continue;
+        }
         // 如果账号具备额度监控信息，检查对应模型组的额度是否已耗尽
         if (acc.quota && requiredFamily) {
           if (requiredFamily === 'claude') {
@@ -450,6 +466,27 @@ export class AccountPool {
   /**
    * 释放借出的账号，并处理错误与状态更新
    */
+  /** 记录某账号对某上游模型的临时不支持状态（404 或 200 下线提示）。 */
+  public markModelUnsupported(accId: string, model: string, ttlMs = 30 * 60 * 1000): void {
+    const acc = this.accounts.get(accId);
+    if (!acc || !model) return;
+    if (!acc.unsupportedModels) acc.unsupportedModels = {};
+    acc.unsupportedModels[model] = Date.now() + ttlMs;
+    this.saveAccounts();
+  }
+
+  public isModelUnsupported(accId: string, model: string): boolean {
+    const acc = this.accounts.get(accId);
+    if (!acc || !model || !acc.unsupportedModels) return false;
+    const until = acc.unsupportedModels[model];
+    if (!until) return false;
+    if (Date.now() >= until) {
+      delete acc.unsupportedModels[model];
+      return false;
+    }
+    return true;
+  }
+
   public releaseAccount(accId: string, error?: { code: number; message: string }, family?: 'claude' | 'gemini'): void {
     const acc = this.accounts.get(accId);
     if (!acc) return;

@@ -17,12 +17,26 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 
 import codearts_client as client
 import codearts_session as session_store
 
 MODEL_PREFIX = "codearts-"
+
+# 客户端有时把推理档位拼进模型名（如 codearts-deepseek-v4.1-flash-1017:xhigh）。
+# 上游只认纯模型名，带后缀会被判成“无权调用该模型”（TM.000010051），故先剥离。
+_EFFORT_SUFFIX_RE = re.compile(r":(low|medium|high|xhigh|max)\s*$", re.IGNORECASE)
+
+
+def split_model_effort(model):
+    """``codearts-xxx:xhigh`` → (``codearts-xxx``, ``xhigh``)；无后缀时返回 (原值, None)。"""
+    text = str(model or "")
+    match = _EFFORT_SUFFIX_RE.search(text)
+    if not match:
+        return text, None
+    return text[:match.start()], match.group(1).lower()
 
 # 本地展示用清单：id 带前缀，其余字段对齐本仓库 /v1/models 的输出习惯。
 # 上游的真实清单以 /v1/model/builtin 为准，这里只是断网时的底座。
@@ -45,8 +59,8 @@ def is_codearts_model(model):
 
 
 def upstream_model(model):
-    """``codearts-kimi-k3`` → ``kimi-k3``。"""
-    text = str(model or "")
+    """``codearts-kimi-k3`` → ``kimi-k3``；同时剥离 ``:xhigh`` 这类推理档位后缀。"""
+    text, _ = split_model_effort(model)
     return text[len(MODEL_PREFIX):] if text.startswith(MODEL_PREFIX) else text
 
 
@@ -99,8 +113,12 @@ def catalog_models():
 def build_request(payload):
     """把 OpenAI 请求体改写成上游能接受的样子。只动必须动的地方。"""
     body = dict(payload or {})
-    model = upstream_model(body.get("model"))
+    base_model, effort = split_model_effort(body.get("model"))
+    model = base_model[len(MODEL_PREFIX):] if base_model.startswith(MODEL_PREFIX) else base_model
     body["model"] = model
+    # 模型名后缀携带的推理档位转成显式参数，避免信息丢失。
+    if effort and not (body.get("reasoning_effort") or body.get("reasoningEffort")):
+        body["reasoning_effort"] = effort
     # 本仓库内部的字段，上游不认识。
     for key in ("_namespace_map", "stream_options"):
         body.pop(key, None)

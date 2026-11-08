@@ -287,6 +287,12 @@ function init() {
       if (strategyDropdown) strategyDropdown.classList.remove('open');
     }
   });
+
+  initStatusTooltipHover();
+
+  // 模型实测台：绑定按钮并在已登录时载入模型清单
+  initBenchPanel();
+  if (adminPassword) loadBenchModels(false);
 }
 
 async function apiRequest(url, options = {}) {
@@ -336,6 +342,7 @@ async function handleLogin() {
 
 function startDataPolling() {
   loadAllData();
+  loadBenchModels(false);
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(loadAllData, 4000);
 }
@@ -717,7 +724,10 @@ function getStatusPill(acc) {
     const remainingSec = Math.max(0, Math.ceil((acc.cooldownUntil - Date.now()) / 1000));
     return `<span class="status-badge-pill status-badge-cooldown"><span class="pulse-dot amber"></span>冷却 (${remainingSec}s)</span>`;
   } else if (acc.status === 'dead') {
-    return `<span class="status-badge-pill status-badge-dead">异常失效</span>`;
+    const hasReason = Boolean(acc.lastError && acc.lastError.trim());
+    const reasonClass = hasReason ? ' status-badge-has-reason' : '';
+    const reasonData = hasReason ? ` data-acc-id="${acc.id}"` : '';
+    return `<span class="status-badge-pill status-badge-dead${reasonClass}"${reasonData}>异常失效</span>`;
   } else if (isClaudeExhausted && !isGeminiExhausted) {
     return `<span class="status-badge-pill status-badge-gemini" title="Claude 暂尽，Gemini 依然充足">Gemini可用</span>`;
   } else if (!isClaudeExhausted && isGeminiExhausted) {
@@ -726,6 +736,165 @@ function getStatusPill(acc) {
     return `<span class="status-badge-pill status-badge-dead">双额度暂尽</span>`;
   }
   return `<span class="status-badge-pill status-badge-active"><span class="pulse-dot green"></span>正常可用</span>`;
+}
+
+let statusTooltipEl = null;
+let statusTooltipHideTimer = null;
+
+function getStatusTooltipEl() {
+  if (!statusTooltipEl) statusTooltipEl = document.getElementById('status-reason-tooltip');
+  return statusTooltipEl;
+}
+
+function formatAccountError(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return null;
+
+  const info = { code: '', status: '', reason: '', message: '', appealUrl: '', appealText: '提交申诉' };
+  const httpMatch = text.match(/HTTP\s+(\d{3})/i);
+  if (httpMatch) info.code = httpMatch[1];
+
+  const jsonStart = text.indexOf('{');
+  if (jsonStart >= 0) {
+    try {
+      const parsed = JSON.parse(text.slice(jsonStart));
+      let err = parsed && parsed.error !== undefined ? parsed.error : parsed;
+      if (typeof err === 'string') {
+        info.reason = err;
+        if (parsed && parsed.error_description) info.message = String(parsed.error_description);
+        err = null;
+      }
+      if (err && typeof err === 'object') {
+        if (err.code !== undefined && err.code !== null) info.code = String(err.code);
+        if (err.status) info.status = String(err.status);
+        if (err.message) info.message = String(err.message);
+        const details = Array.isArray(err.details) ? err.details : [];
+        const detail = details.find(d => d && d.reason) || details[0];
+        if (detail) {
+          if (detail.reason) info.reason = String(detail.reason);
+          const meta = detail.metadata || {};
+          if (typeof meta.appeal_url === 'string' && /^https?:\/\//i.test(meta.appeal_url)) {
+            info.appealUrl = meta.appeal_url;
+          }
+          if (meta.appeal_url_link_text) info.appealText = String(meta.appeal_url_link_text);
+        }
+      }
+    } catch (_) {
+      info.message = '';
+    }
+  }
+
+  if (!info.message) {
+    const head = jsonStart >= 0 ? text.slice(0, jsonStart) : text.slice(0, 400);
+    info.message = head.replace(/^\[HTTP\s+\d{3}\]\s*/i, '').trim();
+    if (info.message.length > 400) info.message = `${info.message.slice(0, 400)}…`;
+  }
+
+  if (!info.message && !info.reason && !info.code) return null;
+  return info;
+}
+
+function buildStatusTooltipHtml(info) {
+  const codeText = [info.code ? `HTTP ${info.code}` : '', info.status].filter(Boolean).join(' · ');
+  const parts = [
+    `<div class="status-reason-head"><span class="status-reason-title">异常失效原因</span>${
+      codeText ? `<span class="status-reason-code">${escapeHtml(codeText)}</span>` : ''
+    }</div>`
+  ];
+  if (info.reason) {
+    parts.push(`<div class="status-reason-row"><span class="status-reason-label">原因码</span><code>${escapeHtml(info.reason)}</code></div>`);
+  }
+  if (info.message) {
+    parts.push(`<p class="status-reason-message">${escapeHtml(info.message)}</p>`);
+  }
+  if (info.appealUrl) {
+    parts.push(`<a class="status-reason-link" href="${escapeHtml(info.appealUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(info.appealText)} →</a>`);
+  }
+  return parts.join('');
+}
+
+function positionStatusTooltip(target) {
+  const tip = getStatusTooltipEl();
+  if (!tip) return;
+  const gap = 8;
+  const margin = 12;
+  const rect = target.getBoundingClientRect();
+  tip.style.left = '0px';
+  tip.style.top = '0px';
+  const tipRect = tip.getBoundingClientRect();
+  let left = rect.left + rect.width / 2 - tipRect.width / 2;
+  left = Math.max(margin, Math.min(left, window.innerWidth - tipRect.width - margin));
+  let top = rect.bottom + gap;
+  if (top + tipRect.height > window.innerHeight - margin) {
+    const above = rect.top - gap - tipRect.height;
+    top = above >= margin ? above : Math.max(margin, window.innerHeight - tipRect.height - margin);
+  }
+  tip.style.left = `${Math.round(left)}px`;
+  tip.style.top = `${Math.round(top)}px`;
+}
+
+function showStatusTooltip(target) {
+  const tip = getStatusTooltipEl();
+  const acc = cachedAccounts.find(a => a.id === target.dataset.accId);
+  const info = formatAccountError(acc && acc.lastError);
+  if (!tip || !info) return;
+  clearTimeout(statusTooltipHideTimer);
+  tip.innerHTML = buildStatusTooltipHtml(info);
+  tip.classList.add('visible');
+  tip.setAttribute('aria-hidden', 'false');
+  positionStatusTooltip(target);
+}
+
+function hideStatusTooltip(immediate) {
+  clearTimeout(statusTooltipHideTimer);
+  const apply = () => {
+    const tip = getStatusTooltipEl();
+    if (!tip) return;
+    tip.classList.remove('visible');
+    tip.setAttribute('aria-hidden', 'true');
+  };
+  if (immediate) {
+    apply();
+  } else {
+    statusTooltipHideTimer = setTimeout(apply, 160);
+  }
+}
+
+function refreshStatusTooltip(acc) {
+  const tip = getStatusTooltipEl();
+  if (!tip || !tip.classList.contains('visible')) return;
+  const badge = document.querySelector(`.status-badge-has-reason[data-acc-id="${acc.id}"]`);
+  const info = formatAccountError(acc.lastError);
+  if (!badge || !info) {
+    hideStatusTooltip(true);
+    return;
+  }
+  tip.innerHTML = buildStatusTooltipHtml(info);
+  positionStatusTooltip(badge);
+}
+
+function initStatusTooltipHover() {
+  const tip = getStatusTooltipEl();
+  if (tip) {
+    tip.addEventListener('mouseenter', () => clearTimeout(statusTooltipHideTimer));
+    tip.addEventListener('mouseleave', () => hideStatusTooltip(false));
+  }
+
+  document.addEventListener('mouseover', (e) => {
+    const badge = e.target && e.target.closest ? e.target.closest('.status-badge-has-reason') : null;
+    if (badge) showStatusTooltip(badge);
+  });
+
+  document.addEventListener('mouseout', (e) => {
+    const badge = e.target && e.target.closest ? e.target.closest('.status-badge-has-reason') : null;
+    if (!badge) return;
+    const to = e.relatedTarget;
+    if (to && (badge.contains(to) || (tip && tip.contains(to)))) return;
+    hideStatusTooltip(false);
+  });
+
+  window.addEventListener('scroll', () => hideStatusTooltip(true), true);
+  window.addEventListener('resize', () => hideStatusTooltip(true));
 }
 
 function getMetaClusterHtml(acc) {
@@ -852,6 +1021,8 @@ function updateCardInPlace(acc) {
   if (metaCluster && metaCluster.innerHTML !== newMetaHtml) {
     metaCluster.innerHTML = newMetaHtml;
   }
+
+  refreshStatusTooltip(acc);
 }
 
 // 渲染卡片矩阵视图 (带防闪烁差量比对机制)
@@ -872,6 +1043,7 @@ function renderCardsView(accounts) {
   const isSameOrder = existingIds.length === newIds.length && existingIds.every((id, i) => id === newIds[i]);
 
   if (!isSameOrder) {
+    hideStatusTooltip(true);
     cardsContainer.innerHTML = accounts.map(acc => getCardHtml(acc)).join('');
     return;
   }
@@ -1415,6 +1587,285 @@ function showToast(message, type = 'info') {
 function escapeHtml(text) {
   if (!text) return '';
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+
+/* ===== 模型实测台：每个模型一行 + 独立测速按钮 =====
+   测速走本机网关 /v1/chat/completions 的真实 SSE 流式请求，
+   量到的是「账号池选号 + 出口代理 + 上游」的端到端 TTFT 与生成速度。 */
+const BENCH_STORAGE_KEY = 'antigravity_bench_results_v2';
+let benchModels = [];
+let benchApiKey = '';
+let benchRunning = false;
+
+function loadBenchResults() {
+  try {
+    return JSON.parse(localStorage.getItem(BENCH_STORAGE_KEY) || '{}') || {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function saveBenchResults(results) {
+  try {
+    localStorage.setItem(BENCH_STORAGE_KEY, JSON.stringify(results));
+  } catch (e) {}
+}
+
+function setBenchResult(modelId, value) {
+  const all = loadBenchResults();
+  all[modelId] = value;
+  saveBenchResults(all);
+}
+
+async function getBenchApiKey(force) {
+  if (force) benchApiKey = '';
+  if (benchApiKey) return benchApiKey;
+  try {
+    const cfg = await apiRequest('/api/admin/config');
+    benchApiKey = (cfg && cfg.apiMasterKey) || '';
+  } catch (e) {
+    benchApiKey = '';
+  }
+  return benchApiKey;
+}
+
+async function loadBenchModels(force) {
+  const listEl = document.getElementById('bench-list');
+  const subEl = document.getElementById('bench-sub');
+  if (!listEl) return;
+  if (subEl) subEl.innerText = '正在读取模型清单...';
+  try {
+    const key = await getBenchApiKey(force);
+    const headers = key ? { 'Authorization': 'Bearer ' + key } : {};
+    const res = await fetch('/v1/models' + (force ? '?refresh=1' : ''), { headers, cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    benchModels = ((data && data.data) || []).filter((m) => m && m.id);
+    renderBenchList();
+    if (subEl) {
+      subEl.innerText = '共 ' + benchModels.length + ' 个模型 · 测速经本机账号池与出口代理';
+    }
+  } catch (err) {
+    if (subEl) subEl.innerText = '模型清单读取失败';
+    listEl.innerHTML = '<div class="bench-empty">模型清单读取失败：' + escapeHtml(err.message || String(err)) + '</div>';
+  }
+}
+
+function renderBenchList() {
+  const listEl = document.getElementById('bench-list');
+  if (!listEl) return;
+  if (!benchModels.length) {
+    listEl.innerHTML = '<div class="bench-empty">暂无可用模型</div>';
+    return;
+  }
+  const results = loadBenchResults();
+  listEl.innerHTML = benchModels.map((m) => {
+    const ctxK = Number(m.context_length) ? Math.round(Number(m.context_length) / 1024) + 'K' : '';
+    const outRaw = Number(m.max_output_tokens || m.max_tokens);
+    const outK = outRaw ? Math.round(outRaw / 1024) + 'K' : '';
+    const meta = [ctxK ? 'ctx ' + ctxK : '', outK ? 'out ' + outK : ''].filter(Boolean).join(' · ') || '-';
+    const r = results[m.id];
+    let resultHtml = '<span class="bench-ttft">未测速</span>';
+    if (r && r.loading) {
+      resultHtml = '<span class="bench-badge-loading"><span class="bench-spin">⟳</span> 测速中...</span>';
+    } else if (r && r.error) {
+      resultHtml = '<span class="bench-badge-fail" title="' + escapeHtml(r.error) + '">失败：' + escapeHtml(r.error) + '</span>';
+    } else if (r && typeof r.speed === 'number') {
+      const tip = '解码速率: ' + r.speed + ' tok/s · 首字延迟(TTFT): ' + r.ttft + 'ms · 解码耗时: ' + r.genSec + 's · 端到端总计: ' + (r.totalSec || r.genSec) + 's (' + (r.e2eSpeed || '-') + ' tok/s)';
+      resultHtml = '<span class="bench-speed">⚡ ' + r.speed + ' tok/s</span>'
+        + '<span class="bench-ttft" title="' + escapeHtml(tip) + '">TTFT '
+        + r.ttft + 'ms · 生成 ' + r.genSec + 's · ' + r.tokens + ' tok</span>';
+    }
+    const label = r && typeof r.speed === 'number' ? '重测' : '测速';
+    return '<div class="bench-row">'
+      + '<div class="bench-model" title="' + escapeHtml(m.id) + '">' + escapeHtml(m.id) + '</div>'
+      + '<div class="bench-meta">' + escapeHtml(meta) + '</div>'
+      + '<div class="bench-result">' + resultHtml + '</div>'
+      + '<button type="button" class="bench-btn-run" data-bench-model="' + escapeHtml(m.id) + '"'
+      + (benchRunning ? ' disabled' : '') + '>' + label + '</button>'
+      + '</div>';
+  }).join('');
+}
+
+/** SSE 里拿不到 usage 时的估算：CJK 约 1 token/字，其它约 1 token/4 字符。 */
+function estimateBenchTokens(text) {
+  let cjk = 0;
+  let other = 0;
+  for (const ch of text) {
+    const c = ch.codePointAt(0);
+    if ((c >= 0x2e80 && c <= 0x9fff) || (c >= 0xf900 && c <= 0xfaff)
+        || (c >= 0xff00 && c <= 0xffef) || (c >= 0x3000 && c <= 0x303f)) {
+      cjk++;
+    } else {
+      other++;
+    }
+  }
+  return Math.max(1, Math.round(cjk + other / 4));
+}
+
+async function benchmarkModel(modelId) {
+  if (!modelId) return null;
+  setBenchResult(modelId, { loading: true, at: Date.now() });
+  renderBenchList();
+
+  const startTime = performance.now();
+  let firstTokenTime = null;
+  let lastTokenTime = null;
+  let replyText = '';
+  let completionTokens = 0;
+
+  try {
+    const key = await getBenchApiKey(false);
+    const headers = { 'Content-Type': 'application/json' };
+    if (key) headers['Authorization'] = 'Bearer ' + key;
+
+    const resp = await fetch('/v1/chat/completions', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: modelId,
+        // 提示词要求约 150 字短文，正常产出 150~220 token。
+        // max_tokens 留足 4096，防止 Gemini 3.x 等带深度思考的模型在思考阶段消耗过多 token 导致输出截断。
+        messages: [{ role: 'user', content: '请用中文写一段约 150 字的短文，介绍人工智能在医疗、教育和交通三个领域的典型应用。' }],
+        stream: true,
+        stream_options: { include_usage: true },
+        max_tokens: 4096,
+        temperature: 0.3
+      })
+    });
+
+    if (!resp.ok) {
+      let msg = 'HTTP ' + resp.status;
+      try {
+        const j = await resp.json();
+        if (j && j.error && j.error.message) msg = j.error.message;
+      } catch (_) {}
+      throw new Error(msg);
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data:')) continue;
+        const dataStr = trimmed.slice(5).trim();
+        if (!dataStr || dataStr === '[DONE]') continue;
+        try {
+          const parsed = JSON.parse(dataStr);
+          if (parsed.choices && parsed.choices.length > 0) {
+            const delta = parsed.choices[0].delta || {};
+            const content = delta.content || delta.reasoning_content || '';
+            if (content) {
+              const now = performance.now();
+              if (firstTokenTime === null) firstTokenTime = now;
+              lastTokenTime = now;
+              replyText += content;
+            }
+          }
+          if (parsed.usage && parsed.usage.completion_tokens) {
+            completionTokens = parsed.usage.completion_tokens;
+          }
+        } catch (_) {}
+      }
+    }
+
+    const endTime = performance.now();
+    const ttftMs = firstTokenTime !== null
+      ? Math.round(firstTokenTime - startTime)
+      : Math.round(endTime - startTime);
+    const genSec = (firstTokenTime !== null && lastTokenTime !== null && lastTokenTime > firstTokenTime)
+      ? Math.max(0.08, (lastTokenTime - firstTokenTime) / 1000.0)
+      : (firstTokenTime !== null
+          ? Math.max(0.1, (endTime - firstTokenTime) / 1000.0)
+          : Math.max(0.1, (endTime - startTime) / 1000.0));
+    const totalSec = Math.max(0.1, (endTime - startTime) / 1000.0);
+
+    if (!completionTokens) {
+      completionTokens = estimateBenchTokens(replyText);
+    }
+    // 纯解码生成速率 (tok/s)，解耦首字思考/网络延迟
+    const speed = Number((completionTokens / genSec).toFixed(1));
+    const e2eSpeed = Number((completionTokens / totalSec).toFixed(1));
+
+    const resultObj = {
+      speed: speed,
+      e2eSpeed: e2eSpeed,
+      ttft: ttftMs,
+      tokens: completionTokens,
+      genSec: Number(genSec.toFixed(2)),
+      totalSec: Number(totalSec.toFixed(2)),
+      at: Date.now()
+    };
+    setBenchResult(modelId, resultObj);
+    showToast('模型 ' + modelId + ' 测速完成：' + speed + ' tok/s (TTFT ' + ttftMs + 'ms)', 'success');
+    return resultObj;
+  } catch (err) {
+    const errObj = { error: err.message || '测速失败', at: Date.now() };
+    setBenchResult(modelId, errObj);
+    showToast('模型 ' + modelId + ' 测速失败: ' + errObj.error, 'error');
+    return null;
+  } finally {
+    renderBenchList();
+  }
+}
+
+async function benchmarkAllModels(btn) {
+  if (benchRunning) return;
+  if (!benchModels.length) {
+    showToast('模型清单为空，无法批量测速', 'info');
+    return;
+  }
+  benchRunning = true;
+  const oldText = btn ? btn.innerText : '';
+  if (btn) btn.disabled = true;
+  renderBenchList();
+  const total = benchModels.length;
+  for (let i = 0; i < total; i++) {
+    if (btn) btn.innerText = '⏳ 测速中 ' + (i + 1) + '/' + total;
+    await benchmarkModel(benchModels[i].id);
+  }
+  benchRunning = false;
+  if (btn) {
+    btn.disabled = false;
+    btn.innerText = oldText || '⚡ 全部测速';
+  }
+  renderBenchList();
+  showToast('全部模型测速完成（共 ' + total + ' 个）', 'success');
+}
+
+function clearBenchResults() {
+  try {
+    localStorage.removeItem(BENCH_STORAGE_KEY);
+  } catch (e) {}
+  renderBenchList();
+  showToast('已清空本地测速结果', 'success');
+}
+
+function initBenchPanel() {
+  const btnAll = document.getElementById('btn-bench-all');
+  const btnClear = document.getElementById('btn-bench-clear');
+  const btnReload = document.getElementById('btn-bench-reload');
+  const listEl = document.getElementById('bench-list');
+
+  if (btnAll) btnAll.addEventListener('click', () => benchmarkAllModels(btnAll));
+  if (btnClear) btnClear.addEventListener('click', clearBenchResults);
+  if (btnReload) btnReload.addEventListener('click', () => loadBenchModels(true));
+  if (listEl) {
+    listEl.addEventListener('click', (e) => {
+      const target = e.target.closest('[data-bench-model]');
+      if (!target || benchRunning) return;
+      benchmarkModel(target.getAttribute('data-bench-model'));
+    });
+  }
 }
 
 document.addEventListener('DOMContentLoaded', init);

@@ -75,7 +75,12 @@ export function registerAdminRoutes(
         : '',
       accessTokenMasked: acc.accessToken
         ? `${acc.accessToken.substring(0, 10)}...`
-        : ''
+        : '',
+      // 模型池概览：面板/接口无需自行过滤完整清单
+      modelPool: acc.modelPool || (acc.availableModels?.length ? 'legacy' : undefined),
+      availableModelsCount: acc.availableModels?.length ?? 0,
+      opusModels: (acc.availableModels || []).filter(model => model.includes('opus')),
+      sonnetModels: (acc.availableModels || []).filter(model => model.includes('sonnet'))
     }));
     return { accounts: list };
   });

@@ -392,6 +392,8 @@ export function registerAnthropicRoutes(
     const payload: GoogleCloudCodePayload = {
       project: 'aicode-consumers',
       model: modelDef.upstreamModel,
+      clientModel: body.model,
+      effort,
       request: innerRequest
     };
 

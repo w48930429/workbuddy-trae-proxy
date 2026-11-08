@@ -261,3 +261,90 @@ export function resolveDynamicUpstreamModel(
 
   return { upstreamModel: clean, pool: 'cli' };
 }
+/**
+ * 账号模型池分化支持（2026-11 实测）：
+ * - 旧池账号：19 个模型，Opus 只有 claude-opus-4-6-thinking；
+ * - 新池账号：23 个模型，Opus 4.6 已下线，只有 claude-opus-5-5-high/medium/low。
+ *
+ * 对外仍然只暴露 opus / sonnet 这类稳定别名，内部按账号清单选择实际上游模型。
+ */
+export interface ModelCandidates {
+  family: 'claude-opus' | 'claude-sonnet' | 'other';
+  /** 旧池默认底座（清单未知时也回退到它，保持历史行为） */
+  legacy: string;
+  /** 新池候选，按本次 effort 的优先级排序 */
+  newPool: string[];
+  /** 全部候选（legacy + newPool） */
+  candidates: string[];
+}
+
+function normalizeModelName(inputModel: string): string {
+  return String(inputModel || '')
+    .replace(/\[.*?\]/g, '')
+    .trim()
+    .toLowerCase()
+    .replace(/^models\//, '');
+}
+
+function effortOrder(effort: ThinkingEffort): Array<'high' | 'medium' | 'low'> {
+  if (effort === 'low') return ['low', 'high', 'medium'];
+  if (effort === 'medium') return ['medium', 'high', 'low'];
+  return ['high', 'low', 'medium'];
+}
+
+export function resolveModelCandidates(
+  inputModel: string,
+  effort: ThinkingEffort = 'high'
+): ModelCandidates {
+  const clean = normalizeModelName(inputModel);
+
+  if (clean.includes('opus')) {
+    const legacy = 'claude-opus-4-6-thinking';
+    const newPool = effortOrder(effort).map(level => `claude-opus-5-5-${level}`);
+    return { family: 'claude-opus', legacy, newPool, candidates: [legacy, ...newPool] };
+  }
+
+  if (clean.includes('sonnet') || clean.includes('haiku')) {
+    const legacy = 'claude-sonnet-4-6';
+    const newPool = effortOrder(effort).map(level => `claude-sonnet-5-5-${level}`);
+    return { family: 'claude-sonnet', legacy, newPool, candidates: [legacy, ...newPool] };
+  }
+
+  const fallback = resolveDynamicUpstreamModel(inputModel, effort).upstreamModel;
+  return { family: 'other', legacy: fallback, newPool: [], candidates: [fallback] };
+}
+
+/**
+ * 结合账号可用模型清单选择实际上游模型：
+ * - 清单未知 → 回退 legacy，保持旧行为；
+ * - 新池账号（清单含 5.5）→ 选本次 effort 对应的 5.5 档位；
+ * - 两者都没有 → 仍返回 legacy，交给执行器按 404 / 下线提示换号。
+ */
+export function pickUpstreamModelForAccount(
+  inputModel: string,
+  effort: ThinkingEffort = 'high',
+  availableModels?: string[]
+): string {
+  const resolved = resolveModelCandidates(inputModel, effort);
+  if (!availableModels || availableModels.length === 0) return resolved.legacy;
+
+  const listed = new Set(availableModels);
+  for (const candidate of resolved.newPool) {
+    if (listed.has(candidate)) return candidate;
+  }
+  return resolved.legacy;
+}
+
+/**
+ * 选号阶段的能力过滤：清单未知时一律放行，避免新导入账号被误锁。
+ */
+export function accountSupportsModelFamily(
+  inputModel: string,
+  effort: ThinkingEffort = 'high',
+  availableModels?: string[]
+): boolean {
+  if (!availableModels || availableModels.length === 0) return true;
+  const resolved = resolveModelCandidates(inputModel, effort);
+  if (resolved.family === 'other') return true;
+  return resolved.candidates.some(candidate => availableModels.includes(candidate));
+}

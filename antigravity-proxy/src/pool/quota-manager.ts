@@ -234,11 +234,68 @@ export class QuotaManager {
         }
       } catch { /* tier 是增强信息，拉取失败不打断额度流程 */ }
 
+      // 模型池能力探测：新池用 Opus/Sonnet 5.5，旧池仍用 4.6/4-6（6 小时内不重复拉取）。
+      await this.syncAvailableModels(account);
+
       return quota;
     } catch (err: any) {
       console.error(`[QuotaManager] Error fetching quota for ${account.email}:`, err.message);
       return null;
     }
+  }
+
+  /**
+   * 拉取账号在上游真正可用的模型清单（v1internal:fetchAvailableModels）。
+   *
+   * 实测（2026-11）账号按模型池灰度分化：
+   * - 旧池：19 个模型，Opus 只有 claude-opus-4-6-thinking；
+   * - 新池：23 个模型，Opus 4.6 已下线，只有 claude-opus-5-5-*。
+   * 清单用于执行器按账号选择实际上游模型；拉取失败不影响额度流程。
+   */
+  public async syncAvailableModels(account: Account): Promise<void> {
+    const now = Date.now();
+    const CACHE_MS = 6 * 60 * 60 * 1000;
+    if (account.availableModelsAt && now - account.availableModelsAt < CACHE_MS) return;
+    if (!account.accessToken || now >= account.accessTokenExpiresAt) return;
+
+    const effectiveProxy = account.proxyUrl || this.config?.defaultProxyUrl || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+    const dispatcher = effectiveProxy ? new ProxyAgent({ uri: effectiveProxy, connect: { timeout: 30000 } }) : undefined;
+
+    try {
+      const res = await request('https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${account.accessToken}`,
+          'Content-Type': 'application/json',
+          'User-Agent': 'antigravity/2.14.0',
+          'x-goog-api-client': 'gl-node/22.7.0 grpc-web/1.0.0'
+        },
+        body: JSON.stringify({}),
+        headersTimeout: 30000,
+        bodyTimeout: 30000,
+        dispatcher
+      });
+
+      if (res.statusCode !== 200) {
+        await res.body.text();
+        return;
+      }
+
+      const data = (await res.body.json()) as any;
+      const modelIds = Object.keys(data?.models || {});
+      if (!modelIds.length) return;
+
+      const modelPool: 'legacy' | 'new' = modelIds.some(id => id.includes('opus-5-5')) ? 'new' : 'legacy';
+      account.availableModels = modelIds;
+      account.availableModelsAt = now;
+      account.modelPool = modelPool;
+      this.pool.updateAccount(account.id, {
+        availableModels: modelIds,
+        availableModelsAt: now,
+        modelPool
+      });
+      console.log(`[QuotaManager] ${account.email} 模型池=${modelPool} (${modelIds.length} 个模型)`);
+    } catch { /* 能力探测是增强信息，失败不影响额度流程 */ }
   }
 
   /**

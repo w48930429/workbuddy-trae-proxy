@@ -287,6 +287,8 @@ function init() {
       if (strategyDropdown) strategyDropdown.classList.remove('open');
     }
   });
+
+  initStatusTooltipHover();
 }
 
 async function apiRequest(url, options = {}) {
@@ -717,7 +719,10 @@ function getStatusPill(acc) {
     const remainingSec = Math.max(0, Math.ceil((acc.cooldownUntil - Date.now()) / 1000));
     return `<span class="status-badge-pill status-badge-cooldown"><span class="pulse-dot amber"></span>冷却 (${remainingSec}s)</span>`;
   } else if (acc.status === 'dead') {
-    return `<span class="status-badge-pill status-badge-dead">异常失效</span>`;
+    const hasReason = Boolean(acc.lastError && acc.lastError.trim());
+    const reasonClass = hasReason ? ' status-badge-has-reason' : '';
+    const reasonData = hasReason ? ` data-acc-id="${acc.id}"` : '';
+    return `<span class="status-badge-pill status-badge-dead${reasonClass}"${reasonData}>异常失效</span>`;
   } else if (isClaudeExhausted && !isGeminiExhausted) {
     return `<span class="status-badge-pill status-badge-gemini" title="Claude 暂尽，Gemini 依然充足">Gemini可用</span>`;
   } else if (!isClaudeExhausted && isGeminiExhausted) {
@@ -726,6 +731,165 @@ function getStatusPill(acc) {
     return `<span class="status-badge-pill status-badge-dead">双额度暂尽</span>`;
   }
   return `<span class="status-badge-pill status-badge-active"><span class="pulse-dot green"></span>正常可用</span>`;
+}
+
+let statusTooltipEl = null;
+let statusTooltipHideTimer = null;
+
+function getStatusTooltipEl() {
+  if (!statusTooltipEl) statusTooltipEl = document.getElementById('status-reason-tooltip');
+  return statusTooltipEl;
+}
+
+function formatAccountError(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return null;
+
+  const info = { code: '', status: '', reason: '', message: '', appealUrl: '', appealText: '提交申诉' };
+  const httpMatch = text.match(/HTTP\s+(\d{3})/i);
+  if (httpMatch) info.code = httpMatch[1];
+
+  const jsonStart = text.indexOf('{');
+  if (jsonStart >= 0) {
+    try {
+      const parsed = JSON.parse(text.slice(jsonStart));
+      let err = parsed && parsed.error !== undefined ? parsed.error : parsed;
+      if (typeof err === 'string') {
+        info.reason = err;
+        if (parsed && parsed.error_description) info.message = String(parsed.error_description);
+        err = null;
+      }
+      if (err && typeof err === 'object') {
+        if (err.code !== undefined && err.code !== null) info.code = String(err.code);
+        if (err.status) info.status = String(err.status);
+        if (err.message) info.message = String(err.message);
+        const details = Array.isArray(err.details) ? err.details : [];
+        const detail = details.find(d => d && d.reason) || details[0];
+        if (detail) {
+          if (detail.reason) info.reason = String(detail.reason);
+          const meta = detail.metadata || {};
+          if (typeof meta.appeal_url === 'string' && /^https?:\/\//i.test(meta.appeal_url)) {
+            info.appealUrl = meta.appeal_url;
+          }
+          if (meta.appeal_url_link_text) info.appealText = String(meta.appeal_url_link_text);
+        }
+      }
+    } catch (_) {
+      info.message = '';
+    }
+  }
+
+  if (!info.message) {
+    const head = jsonStart >= 0 ? text.slice(0, jsonStart) : text.slice(0, 400);
+    info.message = head.replace(/^\[HTTP\s+\d{3}\]\s*/i, '').trim();
+    if (info.message.length > 400) info.message = `${info.message.slice(0, 400)}…`;
+  }
+
+  if (!info.message && !info.reason && !info.code) return null;
+  return info;
+}
+
+function buildStatusTooltipHtml(info) {
+  const codeText = [info.code ? `HTTP ${info.code}` : '', info.status].filter(Boolean).join(' · ');
+  const parts = [
+    `<div class="status-reason-head"><span class="status-reason-title">异常失效原因</span>${
+      codeText ? `<span class="status-reason-code">${escapeHtml(codeText)}</span>` : ''
+    }</div>`
+  ];
+  if (info.reason) {
+    parts.push(`<div class="status-reason-row"><span class="status-reason-label">原因码</span><code>${escapeHtml(info.reason)}</code></div>`);
+  }
+  if (info.message) {
+    parts.push(`<p class="status-reason-message">${escapeHtml(info.message)}</p>`);
+  }
+  if (info.appealUrl) {
+    parts.push(`<a class="status-reason-link" href="${escapeHtml(info.appealUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(info.appealText)} →</a>`);
+  }
+  return parts.join('');
+}
+
+function positionStatusTooltip(target) {
+  const tip = getStatusTooltipEl();
+  if (!tip) return;
+  const gap = 8;
+  const margin = 12;
+  const rect = target.getBoundingClientRect();
+  tip.style.left = '0px';
+  tip.style.top = '0px';
+  const tipRect = tip.getBoundingClientRect();
+  let left = rect.left + rect.width / 2 - tipRect.width / 2;
+  left = Math.max(margin, Math.min(left, window.innerWidth - tipRect.width - margin));
+  let top = rect.bottom + gap;
+  if (top + tipRect.height > window.innerHeight - margin) {
+    const above = rect.top - gap - tipRect.height;
+    top = above >= margin ? above : Math.max(margin, window.innerHeight - tipRect.height - margin);
+  }
+  tip.style.left = `${Math.round(left)}px`;
+  tip.style.top = `${Math.round(top)}px`;
+}
+
+function showStatusTooltip(target) {
+  const tip = getStatusTooltipEl();
+  const acc = cachedAccounts.find(a => a.id === target.dataset.accId);
+  const info = formatAccountError(acc && acc.lastError);
+  if (!tip || !info) return;
+  clearTimeout(statusTooltipHideTimer);
+  tip.innerHTML = buildStatusTooltipHtml(info);
+  tip.classList.add('visible');
+  tip.setAttribute('aria-hidden', 'false');
+  positionStatusTooltip(target);
+}
+
+function hideStatusTooltip(immediate) {
+  clearTimeout(statusTooltipHideTimer);
+  const apply = () => {
+    const tip = getStatusTooltipEl();
+    if (!tip) return;
+    tip.classList.remove('visible');
+    tip.setAttribute('aria-hidden', 'true');
+  };
+  if (immediate) {
+    apply();
+  } else {
+    statusTooltipHideTimer = setTimeout(apply, 160);
+  }
+}
+
+function refreshStatusTooltip(acc) {
+  const tip = getStatusTooltipEl();
+  if (!tip || !tip.classList.contains('visible')) return;
+  const badge = document.querySelector(`.status-badge-has-reason[data-acc-id="${acc.id}"]`);
+  const info = formatAccountError(acc.lastError);
+  if (!badge || !info) {
+    hideStatusTooltip(true);
+    return;
+  }
+  tip.innerHTML = buildStatusTooltipHtml(info);
+  positionStatusTooltip(badge);
+}
+
+function initStatusTooltipHover() {
+  const tip = getStatusTooltipEl();
+  if (tip) {
+    tip.addEventListener('mouseenter', () => clearTimeout(statusTooltipHideTimer));
+    tip.addEventListener('mouseleave', () => hideStatusTooltip(false));
+  }
+
+  document.addEventListener('mouseover', (e) => {
+    const badge = e.target && e.target.closest ? e.target.closest('.status-badge-has-reason') : null;
+    if (badge) showStatusTooltip(badge);
+  });
+
+  document.addEventListener('mouseout', (e) => {
+    const badge = e.target && e.target.closest ? e.target.closest('.status-badge-has-reason') : null;
+    if (!badge) return;
+    const to = e.relatedTarget;
+    if (to && (badge.contains(to) || (tip && tip.contains(to)))) return;
+    hideStatusTooltip(false);
+  });
+
+  window.addEventListener('scroll', () => hideStatusTooltip(true), true);
+  window.addEventListener('resize', () => hideStatusTooltip(true));
 }
 
 function getMetaClusterHtml(acc) {
@@ -852,6 +1016,8 @@ function updateCardInPlace(acc) {
   if (metaCluster && metaCluster.innerHTML !== newMetaHtml) {
     metaCluster.innerHTML = newMetaHtml;
   }
+
+  refreshStatusTooltip(acc);
 }
 
 // 渲染卡片矩阵视图 (带防闪烁差量比对机制)
@@ -872,6 +1038,7 @@ function renderCardsView(accounts) {
   const isSameOrder = existingIds.length === newIds.length && existingIds.every((id, i) => id === newIds[i]);
 
   if (!isSameOrder) {
+    hideStatusTooltip(true);
     cardsContainer.innerHTML = accounts.map(acc => getCardHtml(acc)).join('');
     return;
   }
