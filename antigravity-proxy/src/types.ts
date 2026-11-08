@@ -37,6 +37,9 @@ export interface Account {
   lastError?: string;
   quota?: AccountQuota;
   validationUrl?: string;
+  // 因 loadCodeAssist 明确判定为 free 而自动停用的标记：
+  // 额度刷新成功会清空 lastError，无法再靠错误文案识别自动停用，故单独留痕供复检自愈。
+  autoDisabledForFree?: boolean;
 }
 
 export interface AppConfig {

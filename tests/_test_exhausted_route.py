@@ -157,10 +157,22 @@ class ExhaustedRoutePayloadTests(unittest.TestCase):
         ok = types.SimpleNamespace(uid="synthetic-cn")
         with self.assertRaises(urllib.error.HTTPError):
             self._run([error, ok],
-                      {"model": "deepseek-v4.1-flash",
+                      {"model": "space-bunny",
                        "messages": [{"role": "user", "content": "hi"}]})
-        self.assertEqual(self.sent_models, ["deepseek-v4.1-flash"])
+        self.assertEqual(self.sent_models, ["space-bunny"])
 
+    def test_flash_rewrites_to_space_bunny(self):
+        detail = json_dumps({"code": 14018, "msg": "insufficient credits"})
+        error = urllib.error.HTTPError(
+            "https://upstream.invalid", 400, "bad request", {},
+            io.BytesIO(detail.encode("utf-8")))
+        ok = types.SimpleNamespace(uid="synthetic-cn")
+        (_resp, _acct), _seen = self._run([error, ok],
+                                          {"model": "deepseek-v4.1-flash",
+                                           "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(len(self.sent_bodies), 2)
+        second = self.sent_bodies[1]
+        self.assertEqual(second["model"], "space-bunny")
 
 class ExhaustedRouteDispatchTests(unittest.TestCase):
     """open_upstream() must retry on the designated route after 14018."""
@@ -227,6 +239,20 @@ class ExhaustedRouteDispatchTests(unittest.TestCase):
         self.assertEqual(seen[0]["model"], "step-5-preview")
         self.assertEqual(seen[1]["model"], "deepseek-v4.1-flash")
 
+    def test_14018_flash_reroutes_to_space_bunny(self):
+        detail = json_dumps({"code": 14018, "msg": "insufficient credits"})
+        error = urllib.error.HTTPError(
+            "https://upstream.invalid", 400, "bad request", {},
+            io.BytesIO(detail.encode("utf-8")))
+        ok = types.SimpleNamespace(uid="synthetic-cn")
+        (resp, _acct), seen = self._run(
+            [error, ok],
+            {"model": "deepseek-v4.1-flash",
+             "messages": [{"role": "user", "content": "hi"}]})
+        self.assertIs(resp, ok)
+        self.assertEqual(len(seen), 2, "exactly one reroute, no retry storm")
+        self.assertEqual(seen[0]["model"], "deepseek-v4.1-flash")
+        self.assertEqual(seen[1]["model"], "space-bunny")
     def test_non_credit_400_is_not_rerouted(self):
         detail = json_dumps({"code": 11102, "msg": "prompt is too long"})
         error = urllib.error.HTTPError(

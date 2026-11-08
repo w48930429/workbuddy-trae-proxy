@@ -78,8 +78,14 @@ export class AccountPool {
         for (const acc of list) {
           // 重置瞬态状态
           acc.activeConcurrency = 0;
-          if (!acc.tier || !['free', 'pro', 'ultra'].includes(acc.tier)) {
-            acc.tier = 'free';
+          // 旧逻辑（已停用）：缺少/非法 tier 一律强制视为 free。
+          // 这会把尚未探测等级的新导入账号误判为免费号，进而触发 QuotaManager 的 free 自动停用。
+          // if (!acc.tier || !['free', 'pro', 'ultra'].includes(acc.tier)) {
+          //   acc.tier = 'free';
+          // }
+          // 新逻辑：未知等级保持 undefined，等 loadCodeAssist 明确返回后再落库。
+          if (acc.tier && !['free', 'pro', 'ultra'].includes(acc.tier)) {
+            delete (acc as any).tier;
           }
           this.accounts.set(acc.id, acc);
         }
@@ -166,7 +172,8 @@ export class AccountPool {
       proxyUrl: params.proxyUrl?.trim() || undefined,
       lastUsedAt: 0,
       createdAt: now,
-      tier: (params.tier && ['free', 'pro', 'ultra'].includes(params.tier)) ? params.tier : 'free'
+      // 未知等级不再默认成 free（会被误判并自动停用），留空等待真实探测。
+      tier: (params.tier && ['free', 'pro', 'ultra'].includes(params.tier)) ? params.tier : undefined
     };
 
     this.accounts.set(id, newAcc);

@@ -99,6 +99,7 @@ def get_endpoints(region: str) -> Endpoints:
 # ---------------------------------------------------------------------------
 
 DEFAULT_MODEL_MAPPING = {
+    "qoduck": "lmodel",
     "opus": "qmodel_38max",
     "sonnet": "gmodel",
     "haiku": "qfmodel",
@@ -176,7 +177,9 @@ class UpstreamError(Exception):
         self.status = status
         self.detail = detail
         self.err_type = err_type
-        super().__init__(f"upstream status={status} detail={detail[:200]}")
+        # detail 不截断：Qoder 把后端供应商的真实原因套在 provider_error
+        # 的 details 里，截断会让唯一的排查线索消失。
+        super().__init__(f"upstream status={status} detail={detail}")
 
 
 def _to_envelope_status(v) -> int:
@@ -263,7 +266,7 @@ def _envelope_detail(wrapper: dict) -> str:
     if isinstance(body, str) and body:
         return body
     try:
-        return json.dumps(wrapper, ensure_ascii=False)[:400]
+        return json.dumps(wrapper, ensure_ascii=False)
     except (TypeError, ValueError):
         return ""
 
@@ -274,10 +277,87 @@ def _is_content_policy(code: str, msg: str) -> bool:
 
 
 def is_transient_upstream(status: int, detail: str) -> bool:
-    """等价 Go: IsTransientUpstream —— 418/5xx 视为瞬时。"""
+    """等价 Go: IsTransientUpstream —— 418/5xx 视为瞬时。
+
+    provider_error 不在此列：此处重试复用同一个 request_id、同一账号，
+    成功率最低且每次可能耗时上百秒，交给上层换号（pool.should_failover）。
+    """
     if status == 418 or status >= 500:
         return True
     return False
+
+
+# ── Qoder provider_error 包装解构 ─────────────────────────────────────────
+#
+# Qoder 网关转发到后端供应商失败时，返回的是「包装错误」：
+#   {"code":"provider_error","message":"Error in upstream response",
+#    "request_id":"...","type":"provider_error",
+#    "details":"data: {\"error\":{\"code\":\"invalid_parameter_error\",
+#             \"message\":\"...\"}}"}
+# details 里才是真实原因，且可能带 SSE 的 `data: ` 前缀或多套一层 JSON
+# 字符串。这层包装意味着「Qoder 的后端供应商拒了这次转发」，不等于本客户端
+# 的请求体非法 —— 实测同一份 4.2MB 请求体在全部 CN 账号上重放均返回 200。
+
+PROVIDER_ERROR_CODE = "provider_error"
+
+
+def provider_error_payload(detail: str) -> Optional[dict]:
+    try:
+        obj = json.loads(detail)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(obj, dict):
+        return None
+    if obj.get("code") == PROVIDER_ERROR_CODE or obj.get("type") == PROVIDER_ERROR_CODE:
+        return obj
+    return None
+
+
+def is_provider_error(detail: str) -> bool:
+    """detail 是否为 Qoder provider_error 包装（不论内层是否解得出）。"""
+    return provider_error_payload(detail) is not None
+
+
+def provider_error_inner(detail: str) -> Optional[tuple[str, str]]:
+    """解出 provider_error 内层的 (code, message)。
+
+    不是 provider_error 时返回 None；是包装但内层无法解析时返回 ("", <原文>)。
+    """
+    obj = provider_error_payload(detail)
+    if obj is None:
+        return None
+    node = obj.get("details")
+    for _ in range(4):
+        if isinstance(node, str):
+            text = node.strip()
+            if text.startswith("data:"):
+                text = text[len("data:"):].strip()
+            try:
+                node = json.loads(text)
+            except (TypeError, ValueError):
+                return "", text
+            continue
+        if isinstance(node, dict):
+            cand = node.get("error")
+            if not isinstance(cand, dict):
+                cand = node
+            code = cand.get("code") or ""
+            msg = cand.get("message") or cand.get("msg") or ""
+            if code or msg:
+                return str(code), str(msg)
+            for key in ("body", "details", "response"):
+                nxt = node.get(key)
+                if isinstance(nxt, (str, dict)) and nxt:
+                    node = nxt
+                    break
+            else:
+                try:
+                    return "", json.dumps(node, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    return "", ""
+            continue
+        break
+    return "", ""
 
 
 # ---------------------------------------------------------------------------
@@ -534,13 +614,23 @@ def list_available_models(client: BearerClient, region: str) -> list:
 
 
 def parse_qoder_models(resp: dict) -> list:
-    for cat in ("assistant", "developer", "chat"):
+    """解析上游返回的模型列表字典。
+
+    聚合 app、assistant、developer、chat 分类中的全部可用模型，按模型 key 去重。
+    特别说明：0 倍率官方模型 QoDuck（key: lmodel）位于 app 分类中，
+    不能在首个分类命中时早退，否则会导致 app 分类模型丢失。
+    """
+    seen_keys = set()
+    combined = []
+    for cat in ("app", "assistant", "developer", "chat"):
         raw = resp.get(cat)
         if isinstance(raw, list):
-            out = _extract_models(raw)
-            if out:
-                return out
-    return []
+            for m in _extract_models(raw):
+                k = m.get("key")
+                if k and k not in seen_keys:
+                    seen_keys.add(k)
+                    combined.append(m)
+    return combined
 
 
 def _extract_models(raw_list: list) -> list:
@@ -551,22 +641,28 @@ def _extract_models(raw_list: list) -> list:
         ctx = 0
         cc = it.get("context_config")
         if isinstance(cc, dict):
-            default_cfg = None
+            # 优先提取支持的最大上下文窗口（例如 1M -> 1,000,000）
+            max_token = 0
             for cfg in cc.values():
-                if isinstance(cfg, dict) and cfg.get("is_default"):
-                    default_cfg = cfg
-                    break
-            if default_cfg is None:
-                for cfg in cc.values():
-                    if isinstance(cfg, dict):
-                        default_cfg = cfg
-                        break
-            if default_cfg is not None:
-                ctx = int(default_cfg.get("token_count") or 0)
+                if isinstance(cfg, dict):
+                    tc = int(cfg.get("token_count") or 0)
+                    if tc > max_token:
+                        max_token = tc
+            if max_token > 0:
+                ctx = max_token
         max_input = int(it.get("max_input_tokens") or 0)
         if ctx == 0:
             ctx = max_input
         is_reasoning = bool(it.get("is_reasoning"))
+        # 倍率缺失 ≠ 倍率为 0：上游漏报字段时保留 None，否则面板会把
+        # 「未上报」显示成「限时免费 0.00x」，凭空调价。
+        pf_raw = it.get("price_factor")
+        price_factor = None
+        if pf_raw is not None:
+            try:
+                price_factor = float(pf_raw)
+            except (TypeError, ValueError):
+                price_factor = None
         out.append({
             "key": _str_val(it, "key"),
             "display_name": _str_val(it, "display_name"),
@@ -576,7 +672,7 @@ def _extract_models(raw_list: list) -> list:
             "context_window": ctx,
             "max_output_tokens": 32768 if is_reasoning else 16384,
             "max_input_tokens": max_input,
-            "price_factor": float(it.get("price_factor") or 0),
+            "price_factor": price_factor,
         })
     return out
 
@@ -658,12 +754,18 @@ if __name__ == "__main__":
     assert extract_delta(json.dumps({"body": ""})).is_empty()
     print("[OK] ExtractDelta usage/噪声帧")
 
-    # 8) 模型列表解析
-    models = parse_qoder_models({"assistant": [
-        {"key": "auto", "display_name": "Auto", "enable": True, "is_default": True},
-        {"key": "dmodel", "display_name": "D", "enable": False},
-    ]})
-    assert len(models) == 2 and models[0]["key"] == "auto", models
+    # 8) 模型列表解析（验证 app 分类与 assistant 分类聚合去重）
+    models = parse_qoder_models({
+        "app": [
+            {"key": "lmodel", "display_name": "QoDuck", "enable": True, "price_factor": 0.0, "is_reasoning": True},
+            {"key": "auto", "display_name": "AutoDup", "enable": True},
+        ],
+        "assistant": [
+            {"key": "auto", "display_name": "Auto", "enable": True, "is_default": True},
+            {"key": "dmodel", "display_name": "D", "enable": False},
+        ],
+    })
+    assert len(models) == 3 and models[0]["key"] == "lmodel" and models[1]["key"] == "auto", models
     print("[OK] 模型列表解析")
 
     # 9) 请求模板可加载

@@ -30,11 +30,16 @@ import urllib.error
 import urllib.request
 import uuid
 
-import codearts_signer as signer
+try:
+    from codearts import codearts_signer as signer
+except ImportError:
+    import codearts_signer as signer
 
 CHAT_HOST = "https://snap-access.cn-north-4.myhuaweicloud.com"
 CHAT_PATH = "/api/v2/chat/completions"
 CREDITS_PATH = "/snap-manager/v1/statistics/plugin"
+WELFARE_DELIVERY_PATH = "/v1/ops/delivery"
+WELFARE_CLAIM_PATH = "/v1/ops/claim"
 
 # 客户端版本：上游按这些头做路由/埋点/限流，缺省值对齐 CodeArts Agent 26.9.902。
 PLUGIN_NAME = "codemate_vscode"
@@ -213,6 +218,165 @@ def fetch_credits(session, timeout=30, proxy=""):
     request = build_signed_request(CHAT_HOST + CREDITS_PATH, None, session,
                                    "GET", headers)
     return parse_response(_urlopen(request, timeout, proxy))
+
+
+def fetch_welfare_delivery(session, channel="IDE", timeout=15, proxy=""):
+    """查询 CodeArts 福利发放与活动列表 (GET /v1/ops/delivery?channel=IDE)。"""
+    headers = {
+        "x-snap-traceid": uuid.uuid4().hex,
+        "Agent-Type": "PromptCenter",
+        "X-Language": "zh-cn",
+        "Content-Type": "application/json",
+    }
+    url = f"{CHAT_HOST}{WELFARE_DELIVERY_PATH}?channel={channel}"
+    request = build_signed_request(url, None, session, "GET", headers)
+    return parse_response(_urlopen(request, timeout, proxy))
+
+
+def claim_welfare(session, campaign_id, benefit_id=None, channel="IDE", timeout=15, proxy=""):
+    """领取指定的福利活动权益 (POST /v1/ops/claim)。"""
+    headers = {
+        "x-snap-traceid": uuid.uuid4().hex,
+        "Agent-Type": "PromptCenter",
+        "X-Language": "zh-cn",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "campaignId": int(campaign_id),
+        "idempotentKey": str(uuid.uuid4()),
+        "channel": channel,
+    }
+    if benefit_id:
+        payload["benefitId"] = benefit_id
+    url = f"{CHAT_HOST}{WELFARE_CLAIM_PATH}"
+    request = build_signed_request(url, payload, session, "POST", headers)
+    return parse_response(_urlopen(request, timeout, proxy))
+
+
+def claim_all_eligible_welfare(session, timeout=15, proxy=""):
+    """自动查询并领取当前所有可领取的福利（如每日签到 100 积分等）。
+
+    返回规范字典：
+    - ok (bool): 请求是否正常完成
+    - already_claimed (bool): 是否今日已领过（或当前无需领取）
+    - claimed_campaigns (list): 成功领取的活动列表
+    - total_amount (float): 本次成功领取的积分总额
+    - message (str): 用户友好的提示信息
+    """
+    claimed_campaigns = []
+    total_amount = 0.0
+    already_claimed = False
+    message = ""
+
+    try:
+        delivery_resp = fetch_welfare_delivery(session, timeout=timeout, proxy=proxy)
+    except Exception as exc:
+        delivery_resp = None
+
+    items = []
+    if isinstance(delivery_resp, dict):
+        data = delivery_resp.get("data")
+        if isinstance(data, dict):
+            items = data.get("items") or []
+
+    # 筛选待领取活动
+    eligible_items = []
+    daily_claimed = False
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        cid = it.get("campaignId")
+        status = it.get("status")
+        claimable = it.get("claimable")
+        if cid == 34 and status in ("CLAIMED", "CONFIRMED", "CONSUMED"):
+            daily_claimed = True
+        if claimable is True or status == "ELIGIBLE":
+            eligible_items.append(it)
+
+    if eligible_items:
+        for it in eligible_items:
+            cid = it.get("campaignId")
+            bid = it.get("benefitId")
+            title = it.get("title") or f"活动#{cid}"
+            try:
+                c_resp = claim_welfare(session, cid, benefit_id=bid, timeout=timeout, proxy=proxy)
+                if isinstance(c_resp, dict):
+                    code = c_resp.get("code")
+                    c_data = c_resp.get("data") or {}
+                    if code == 0:
+                        amt = float(c_data.get("totalAmount") or it.get("benefitAmount") or 0.0)
+                        total_amount += amt
+                        claimed_campaigns.append({
+                            "campaignId": cid,
+                            "title": title,
+                            "totalAmount": amt,
+                            "detail": c_data
+                        })
+                    elif code == 40001:
+                        if cid == 34:
+                            daily_claimed = True
+            except Exception:
+                pass
+
+        if claimed_campaigns:
+            message = f"签到成功，已领取 {total_amount:g} 积分（共 {len(claimed_campaigns)} 项福利）"
+            return {
+                "ok": True,
+                "already_claimed": False,
+                "claimed_campaigns": claimed_campaigns,
+                "total_amount": total_amount,
+                "message": message,
+            }
+
+    # 如果没有通过 eligible_items 成功领取，检查兜底：
+    if daily_claimed:
+        return {
+            "ok": True,
+            "already_claimed": True,
+            "claimed_campaigns": [],
+            "total_amount": 0.0,
+            "message": "今日已签到 (尚未到达权益刷新时间)",
+        }
+
+    # 兜底直接尝试领取每日签到活动 34 (USER_LOGIN)
+    try:
+        c_resp = claim_welfare(session, 34, timeout=timeout, proxy=proxy)
+        if isinstance(c_resp, dict):
+            code = c_resp.get("code")
+            if code == 0:
+                c_data = c_resp.get("data") or {}
+                amt = float(c_data.get("totalAmount") or 100.0)
+                return {
+                    "ok": True,
+                    "already_claimed": False,
+                    "claimed_campaigns": [{"campaignId": 34, "title": "每日签到领100积分", "totalAmount": amt, "detail": c_data}],
+                    "total_amount": amt,
+                    "message": f"签到成功，已领取 {amt:g} 积分",
+                }
+            elif code == 40001:
+                return {
+                    "ok": True,
+                    "already_claimed": True,
+                    "claimed_campaigns": [],
+                    "total_amount": 0.0,
+                    "message": c_resp.get("message") or "今日已签到",
+                }
+            else:
+                return {
+                    "ok": False,
+                    "already_claimed": False,
+                    "claimed_campaigns": [],
+                    "total_amount": 0.0,
+                    "message": c_resp.get("message") or f"领取返回业务码 {code}",
+                }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "already_claimed": False,
+            "claimed_campaigns": [],
+            "total_amount": 0.0,
+            "message": f"签到请求异常: {exc}",
+        }
 
 
 def _urlopen(request, timeout, proxy):

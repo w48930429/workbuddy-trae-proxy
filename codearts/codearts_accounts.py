@@ -81,6 +81,12 @@ class CodeArtsAccount:
         self.last_error = str(data.get("lastError") or data.get("last_error") or "")
         self.last_used = float(data.get("lastUsed") or data.get("last_used") or 0.0)
 
+        self.last_checkin_time = str(data.get("lastCheckinTime") or data.get("last_checkin_time") or "")
+        self.last_checkin_result = (
+            data.get("lastCheckinResult")
+            if isinstance(data.get("lastCheckinResult"), dict)
+            else (data.get("last_checkin_result") if isinstance(data.get("last_checkin_result"), dict) else {})
+        )
         # 冷却与风控机制（与 WorkBuddy 完全一致）
         self.cooldown_until = float(data.get("cooldownUntil") or data.get("cooldown_until") or 0.0)
         self.restricted_until = float(data.get("restrictedUntil") or data.get("restricted_until") or 0.0)
@@ -88,6 +94,13 @@ class CodeArtsAccount:
             data.get("restrictedDetail") or data.get("restricted_detail") or ""
         )[:2000]
 
+        # 积分余额与套餐配额缓存
+        self.credits = (
+            data.get("credits")
+            if isinstance(data.get("credits"), dict)
+            else (data.get("credits_data") if isinstance(data.get("credits_data"), dict) else {})
+        )
+        self.credits_updated_at = float(data.get("creditsUpdatedAt") or data.get("credits_updated_at") or 0.0)
         # 运行时并发度计数器（华为云 CodeArts 单 Session 并发上限为 3）
         self.in_flight = 0
 
@@ -151,6 +164,74 @@ class CodeArtsAccount:
             source=self.source,
         )
 
+    def get_welfare_delivery(self) -> Dict[str, Any]:
+        """获取当前账号的福利发放与活动列表。"""
+        try:
+            from codearts import codearts_client as cac
+        except ImportError:
+            import codearts_client as cac
+        sess = self.to_session()
+        return cac.fetch_welfare_delivery(sess, proxy=self.proxy)
+
+    def checkin(self) -> Dict[str, Any]:
+        """对当前账号执行每日签到（领取所有可用福利，特别是每日签到）。"""
+        try:
+            from codearts import codearts_client as cac
+        except ImportError:
+            import codearts_client as cac
+        sess = self.to_session()
+        res = cac.claim_all_eligible_welfare(sess, proxy=self.proxy)
+        if res.get("ok"):
+            self.last_checkin_time = time.strftime("%Y-%m-%d %H:%M:%S")
+            self.last_checkin_result = {
+                "ok": True,
+                "already_claimed": res.get("already_claimed", False),
+                "total_amount": res.get("total_amount", 0.0),
+                "message": res.get("message", ""),
+                "timestamp": self.last_checkin_time,
+            }
+            try:
+                self.fetch_credits(force=True)
+            except Exception:
+                pass
+        return res
+
+    def fetch_credits(self, force: bool = False, timeout: int = 15) -> Dict[str, Any]:
+        """获取当前账号的积分与用量配额。具备 60 秒内存缓存以避免频繁调用华为云接口。"""
+        now = time.time()
+        if not force and self.credits and (now - self.credits_updated_at < 60.0):
+            return self.credits
+        try:
+            from codearts import codearts_client as cac
+        except ImportError:
+            import codearts_client as cac
+        sess = self.to_session()
+        raw = cac.fetch_credits(sess, timeout=timeout, proxy=self.proxy)
+        remain = 0.0
+        total = 0.0
+        used = 0.0
+        metrics = raw.get("metrics") or []
+        tot_metric = next((m for m in metrics if m.get("name") == "usageTotalPackageCredit"), None)
+        if tot_metric:
+            remain = float(tot_metric.get("package_credit_remain", 0.0) or 0.0)
+            total = float(tot_metric.get("package_credit_amount", 0.0) or 0.0)
+            used = float(tot_metric.get("package_credit_used", 0.0) or 0.0)
+        elif raw.get("package"):
+            total = 1000.0
+            remain = 1000.0
+        pkg_name = (raw.get("package") or {}).get("package_name_cn") or "体验版"
+        end_date = (raw.get("package") or {}).get("end_date") or raw.get("end_date") or ""
+        self.credits = {
+            "remain": round(remain, 2),
+            "total": round(total, 2),
+            "used": round(used, 2),
+            "package_name": pkg_name,
+            "end_date": end_date,
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        self.credits_updated_at = now
+        return self.credits
+
     def to_dict(self) -> Dict[str, Any]:
         """序列化供持久化到 codearts_accounts.json。"""
         return {
@@ -173,6 +254,10 @@ class CodeArtsAccount:
             "restrictedDetail": self.restricted_detail,
             "lastUsed": self.last_used,
             "lastError": self.last_error,
+            "lastCheckinTime": self.last_checkin_time,
+            "lastCheckinResult": self.last_checkin_result,
+            "credits": self.credits,
+            "creditsUpdatedAt": self.credits_updated_at,
         }
 
     def masked(self) -> Dict[str, Any]:
@@ -221,6 +306,9 @@ class CodeArtsAccount:
             "restrictedDetail": self.restricted_detail,
             "lastUsed": self.last_used,
             "lastError": self.last_error,
+            "lastCheckinTime": self.last_checkin_time,
+            "lastCheckinResult": self.last_checkin_result,
+            "credits": self.credits,
         }
 
     def save(self, *args, **kwargs) -> None:
@@ -261,25 +349,31 @@ class CodeArtsAccountPool:
                 except Exception as exc:
                     print(f"[CodeArtsPool] Failed to parse {self.file_path}: {exc}")
 
-            # 兼容迁移：若 codearts_accounts.json 没有任何账号，但单账号文件存在，则自动导入
-            if not loaded_accounts and os.path.isfile(self.legacy_single_file):
+            # 兼容迁移与自动合并：确保 codearts_account.json 单账号已包含在池中
+            if os.path.isfile(self.legacy_single_file):
                 try:
                     with open(self.legacy_single_file, "r", encoding="utf-8") as f:
                         single_data = json.load(f)
                     if isinstance(single_data, dict) and (
                         single_data.get("accessKey") or single_data.get("access_key")
                     ):
-                        acct = CodeArtsAccount(single_data)
-                        loaded_accounts.append(acct)
-                        print(f"[CodeArtsPool] Auto-migrated single account to pool: {acct.label}")
+                        single_acct = CodeArtsAccount(single_data)
+                        if not any(
+                            (single_acct.id and a.id == single_acct.id)
+                            or (single_acct.domain_id and a.domain_id == single_acct.domain_id)
+                            or (single_acct.label and a.label == single_acct.label)
+                            for a in loaded_accounts
+                        ):
+                            loaded_accounts.append(single_acct)
+                            print(f"[CodeArtsPool] Auto-merged single Web account to pool: {single_acct.label}")
                 except Exception as exc:
-                    print(f"[CodeArtsPool] Failed to auto-migrate single account: {exc}")
+                    print(f"[CodeArtsPool] Failed to auto-merge single account: {exc}")
 
             self.accounts = loaded_accounts
 
         self.apply_proxy_slots()
-        # 若刚才发生了单账号自动迁移，顺便落盘一次 codearts_accounts.json
-        if self.accounts and not os.path.isfile(self.file_path):
+        self.sync_desktop_account()
+        if self.accounts:
             self.save()
 
     def save(self) -> None:
@@ -381,6 +475,84 @@ class CodeArtsAccountPool:
         self.apply_proxy_slots()
         self.save()
         return True
+    def set_primary(self, account_id: str) -> bool:
+        """将指定账号移至首选（第一顺位）并重置调度指针。"""
+        with self._lock:
+            target = None
+            for a in self.accounts:
+                if a.id == account_id:
+                    target = a
+                    break
+            if not target:
+                return False
+            self.accounts.remove(target)
+            self.accounts.insert(0, target)
+            self._cursor = 0
+        self.save()
+        return True
+    def set_all(self, enabled: bool) -> int:
+        """批量启用或停用所有账号。"""
+        count = 0
+        with self._lock:
+            for a in self.accounts:
+                a.enabled = enabled
+                count += 1
+        self.save()
+        return count
+
+    def sync_desktop_account(self, force: bool = False) -> Optional[CodeArtsAccount]:
+        """从本机桌面端 CodeArts Agent 提取会话，并同步/合并至多账号池。"""
+        try:
+            from codearts import codearts_session
+            ds = codearts_session.load_desktop_session()
+            if not ds or not ds.access_key:
+                return None
+
+            with self._lock:
+                matched: Optional[CodeArtsAccount] = None
+                for a in self.accounts:
+                    if (ds.domain_id and a.domain_id == ds.domain_id) or \
+                       (ds.account_label and a.label == ds.account_label) or \
+                       (a.access_key and a.access_key == ds.access_key):
+                        matched = a
+                        break
+
+                if matched:
+                    if matched.source == "desktop" or force:
+                        matched.access_key = ds.access_key
+                        matched.secret_key = ds.secret_key
+                        matched.security_token = ds.security_token
+                        matched.expires_at = ds.expires_at
+                        matched.refresh_token = ds.refresh_token
+                        if ds.account_label and not matched.label:
+                            matched.label = ds.account_label
+                        if ds.domain_id and not matched.domain_id:
+                            matched.domain_id = ds.domain_id
+                    res = matched
+                else:
+                    acct_id = ds.domain_id or f"desktop_{ds.account_label}"
+                    res = CodeArtsAccount({
+                        "id": acct_id,
+                        "label": ds.account_label or "desktop",
+                        "accessKey": ds.access_key,
+                        "secretKey": ds.secret_key,
+                        "securityToken": ds.security_token,
+                        "expiresAt": ds.expires_at,
+                        "refreshToken": ds.refresh_token,
+                        "domainId": ds.domain_id,
+                        "source": "desktop",
+                        "enabled": True,
+                    })
+                    self.accounts.append(res)
+                    print(f"[CodeArtsPool] Synced desktop account into pool: {res.label}")
+
+            self.apply_proxy_slots()
+            self.save()
+            return res
+        except Exception as exc:
+            # e.g. SessionMissing on non-Windows or not installed
+            return None
+
 
     def mark_cooldown(self, account_id: str, duration: float = DEFAULT_RATE_LIMIT_COOLDOWN) -> None:
         """对账号实施临时频控冷却（如触发 429）。"""
@@ -450,3 +622,148 @@ class CodeArtsAccountPool:
     def public_view(self) -> List[Dict[str, Any]]:
         with self._lock:
             return [a.masked() for a in self.accounts]
+
+    def checkin_account(self, account_id: str) -> Dict[str, Any]:
+        """对指定账号执行签到。"""
+        acct = self.get(account_id)
+        if not acct:
+            return {"ok": False, "error": f"Account {account_id} not found"}
+        res = acct.checkin()
+        self.save()
+        return {"ok": res.get("ok", False), "account": acct.masked(), "result": res}
+
+    def checkin_all(self) -> Dict[str, Any]:
+        """对池中所有已启用且有效的账号执行签到。"""
+        results = []
+        total_points = 0.0
+        success_count = 0
+        with self._lock:
+            accounts_to_check = [a for a in self.accounts if a.enabled]
+        if not accounts_to_check:
+            # 兜底：若池中为空，尝试从默认 session 签到
+            try:
+                from codearts import codearts_session as cas
+                from codearts import codearts_client as cac
+                sess = cas.load_session()
+                r = cac.claim_all_eligible_welfare(sess)
+                amt = float(r.get("total_amount") or 0.0)
+                return {
+                    "ok": r.get("ok", False),
+                    "success_count": 1 if r.get("ok") else 0,
+                    "total_accounts": 1,
+                    "total_points": amt,
+                    "details": [{
+                        "id": getattr(sess, "account_label", "default"),
+                        "label": getattr(sess, "account_label", "default"),
+                        "ok": r.get("ok", False),
+                        "already_claimed": r.get("already_claimed", False),
+                        "total_amount": amt,
+                        "message": r.get("message", ""),
+                        "result": r
+                    }]
+                }
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "success_count": 0,
+                    "total_accounts": 0,
+                    "total_points": 0.0,
+                    "error": f"暂无可用的 CodeArts 账号: {exc}",
+                    "details": []
+                }
+
+        for idx, acct in enumerate(accounts_to_check):
+            if idx > 0:
+                time.sleep(1.0)
+            try:
+                r = acct.checkin()
+                points = float(r.get("total_amount") or 0.0)
+                total_points += points
+                if r.get("ok"):
+                    success_count += 1
+                results.append({
+                    "id": acct.id,
+                    "label": acct.label,
+                    "ok": r.get("ok", False),
+                    "already_claimed": r.get("already_claimed", False),
+                    "total_amount": points,
+                    "message": r.get("message", ""),
+                    "result": r
+                })
+            except Exception as exc:
+                results.append({
+                    "id": acct.id,
+                    "label": acct.label,
+                    "ok": False,
+                    "already_claimed": False,
+                    "total_amount": 0.0,
+                    "message": str(exc),
+                    "error": str(exc)
+                })
+        self.save()
+        return {
+            "ok": True,
+            "success_count": success_count,
+            "total_accounts": len(accounts_to_check),
+            "total_points": total_points,
+            "details": results
+        }
+
+    def fetch_all_credits(self, force: bool = False) -> Dict[str, Any]:
+        """聚合查询所有可用账号的积分并计算全池总积分余额。"""
+        import concurrent.futures
+
+        def _fetch_one(acct: CodeArtsAccount):
+            try:
+                c = acct.fetch_credits(force=force)
+                return acct, c, None
+            except Exception as e:
+                return acct, acct.credits or {}, str(e)
+
+        active_accts = [a for a in self.accounts if a.enabled and a.has_sts and not a.is_expired()]
+        if not active_accts and self.accounts:
+            active_accts = [self.accounts[0]]
+
+        if active_accts:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(active_accts), 5)) as pool:
+                futures = [pool.submit(_fetch_one, a) for a in active_accts]
+                for f in concurrent.futures.as_completed(futures):
+                    pass
+
+        total_remain = 0.0
+        total_amount = 0.0
+        total_used = 0.0
+        accounts_credits = []
+        for a in self.accounts:
+            c = a.credits or {}
+            c_remain = float(c.get("remain", 0.0) or 0.0)
+            c_total = float(c.get("total", 0.0) or 0.0)
+            c_used = float(c.get("used", 0.0) or 0.0)
+            if a.enabled:
+                total_remain += c_remain
+                total_amount += c_total
+                total_used += c_used
+            accounts_credits.append({
+                "id": a.id,
+                "label": a.label,
+                "enabled": a.enabled,
+                "source": a.source,
+                "remain": round(c_remain, 2),
+                "total": round(c_total, 2),
+                "used": round(c_used, 2),
+                "package_name": c.get("package_name", "体验版"),
+                "end_date": c.get("end_date", ""),
+            })
+
+        self.save()
+        pct_remain = round((total_remain / total_amount) * 100, 1) if total_amount > 0 else 0.0
+        return {
+            "ok": True,
+            "total_remain": round(total_remain, 2),
+            "total_amount": round(total_amount, 2),
+            "total_used": round(total_used, 2),
+            "percent_remain": pct_remain,
+            "accounts_count": len(self.accounts),
+            "active_accounts_count": len([a for a in self.accounts if a.enabled]),
+            "accounts": accounts_credits,
+        }

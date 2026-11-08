@@ -102,12 +102,14 @@ def _sorted_tool_calls(merged: dict) -> list:
     return result
 
 
-def call_qoder_claude(req: dict, on_event=None, proxy: str = "") -> tuple[int, str]:
+def call_qoder_claude(req: dict, on_event=None, proxy: str = "", realm: str = "") -> tuple[int, str]:
     """处理 Claude /v1/messages 请求，返回 (status_code, response_body)。
 
     on_event: 回调函数，接收 (event_type, data_dict)，用于 SSE 流式转发。
     如果 on_event 为 None，则收集所有内容后一次性返回 JSON。
     """
+    if not realm:
+        realm = req.get("realm", "")
     stream = bool(req.get("stream"))
     model = req.get("model") or "auto"
     _t0 = time.time()
@@ -152,16 +154,21 @@ def call_qoder_claude(req: dict, on_event=None, proxy: str = "") -> tuple[int, s
             params["max_tokens"] = max_tokens
 
     p = route.get_pool(proxy)
-    if p.size() == 0:
+    try:
+        sz = p.size(realm=realm) if realm else p.size()
+    except TypeError:
+        sz = p.size()
+    if sz == 0:
+        msg = f"未配置或无启用的 Qoder {realm} 账号，请在控制台 (/qoder/dashboard) 添加对应区域账号。" if realm else route.NO_ACCOUNT_MESSAGE
         return 503, json.dumps({"type": "error", "error": {
-            "type": "api_error", "message": route.NO_ACCOUNT_MESSAGE}})
-
+            "type": "no_available_account", "message": msg}})
     agent = client.infer_agent(model)
     mapped = route.map_model(model, agent)
 
     extra = {"x-model-key": mapped, "x-model-source": "system"}
 
     tried: set[str] = set()
+    acct_ref: list = []
     last_err = None
     msg_id = "msg_" + cosy.new_uuid()[:12]
 
@@ -223,12 +230,13 @@ def call_qoder_claude(req: dict, on_event=None, proxy: str = "") -> tuple[int, s
             "content_block": {"type": "text", "text": ""}})
         on_event("ping", {"type": "ping"})
 
-        status, body_str = _call_with_pool(p, body, extra, mapped, tried, on_delta)
+        status, body_str = _call_with_pool(p, body, extra, mapped, tried, on_delta, realm=realm,
+                                           account_out=acct_ref)
         if status != 200:
             err_data = json.loads(body_str) if body_str else {}
             err_msg = err_data.get("error", {}).get("message", "unknown error")
             on_event("error", {"type": "error", "error": {"type": "api_error", "message": err_msg}})
-            route.record_qoder_usage(model, "", stream, "failed",
+            route.record_qoder_usage(model, (acct_ref[0] if acct_ref else ""), stream, "failed",
                                      int((time.time() - _t0) * 1000), 0, 0, 0, err_msg)
             return status, body_str
 
@@ -263,7 +271,7 @@ def call_qoder_claude(req: dict, on_event=None, proxy: str = "") -> tuple[int, s
             "usage": {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens}})
         on_event("message_stop", {"type": "message_stop"})
 
-        route.record_qoder_usage(model, "", stream, "completed",
+        route.record_qoder_usage(model, (acct_ref[0] if acct_ref else ""), stream, "completed",
                                  int((time.time() - _t0) * 1000),
                                  total_input_tokens, total_output_tokens,
                                  total_input_tokens + total_output_tokens)
@@ -288,9 +296,10 @@ def call_qoder_claude(req: dict, on_event=None, proxy: str = "") -> tuple[int, s
             if delta.tool_calls:
                 tool_call_buf.extend(delta.tool_calls)
 
-        status, body_str = _call_with_pool(p, body, extra, mapped, tried, on_delta)
+        status, body_str = _call_with_pool(p, body, extra, mapped, tried, on_delta, realm=realm,
+                                           account_out=acct_ref)
         if status != 200:
-            route.record_qoder_usage(model, "", stream, "failed",
+            route.record_qoder_usage(model, (acct_ref[0] if acct_ref else ""), stream, "failed",
                                      int((time.time() - _t0) * 1000), 0, 0, 0, body_str[:200])
             return status, body_str
 
@@ -318,7 +327,7 @@ def call_qoder_claude(req: dict, on_event=None, proxy: str = "") -> tuple[int, s
             "stop_reason": stop_reason, "stop_sequence": None,
             "content": content,
             "usage": {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens}}
-        route.record_qoder_usage(model, "", stream, "completed",
+        route.record_qoder_usage(model, (acct_ref[0] if acct_ref else ""), stream, "completed",
                                  int((time.time() - _t0) * 1000),
                                  total_input_tokens, total_output_tokens,
                                  total_input_tokens + total_output_tokens)
@@ -326,11 +335,12 @@ def call_qoder_claude(req: dict, on_event=None, proxy: str = "") -> tuple[int, s
 
 
 def _call_with_pool(p: pool.Pool, body: dict, extra: dict, mapped_model: str,
-                     tried: set, on_delta) -> tuple[int, str]:
+                     tried: set, on_delta, realm: str = "",
+                     account_out: list | None = None) -> tuple[int, str]:
     """账号池选号 + SSE 流式 + 失败换号（复用 qoder_route 逻辑）。"""
     refreshed: set = set()
     while True:
-        slot, ok = route.pick_slot_for_model(p, mapped_model, tried)
+        slot, ok = route.pick_slot_for_model(p, mapped_model, tried, realm=realm)
         if not ok:
             break
 
@@ -364,6 +374,8 @@ def _call_with_pool(p: pool.Pool, body: dict, extra: dict, mapped_model: str,
 
         if err is None:
             p.note_success(slot.id)
+            if account_out is not None:
+                account_out.append(slot.id)
             return 200, json.dumps({"status": "ok"})
 
         last_err = err
@@ -375,58 +387,78 @@ def _call_with_pool(p: pool.Pool, body: dict, extra: dict, mapped_model: str,
     if last_err is None:
         last_err = pool.NoAccountError()
     status = pool.error_status(last_err)
-    msg, etype = route._friendly_error(last_err)
+    msg, etype = route._friendly_error(last_err, p, mapped_model, realm=realm)
     if etype == "qoder_error":
         etype = "api_error"
     return status, json.dumps({"type": "error", "error": {"type": etype, "message": msg}})
 
 
-def claude_models(proxy: str = "") -> list[dict]:
-    """获取 Qoder 模型列表，返回 Claude /v1/models 兼容格式。"""
+def claude_models(proxy: str = "", realm: str = "") -> list[dict]:
+    """获取 Qoder 模型列表，返回 Claude /v1/models 兼容格式（支持按 realm 过滤）。"""
     p = route.get_pool(proxy)
     models = []
-    for slot in p.snapshot():
-        if not slot.available():
-            continue
-        try:
-            ep = client.get_endpoints(slot.region)
-            resp = slot.bearer.call_get(ep.model_list_url)
-            raw = client.parse_qoder_models(resp)
-            for m in raw:
-                ctx_win = m.get("context_window", 0)
-                if ctx_win == 0:
-                    ctx_win = m.get("max_input_tokens", 0)
-                if ctx_win == 0:
-                    ctx_win = 180000
-                is_reasoning = m.get("is_reasoning", False)
-                max_out = 32768 if is_reasoning else 16384
-                models.append({
-                    # Same contract as qoder_route.qoder_models(): advertise the
-                    # name a client can actually call, keep the internal key
-                    # alongside for the dispatcher.
-                    "id": m["display_name"] if m.get("display_name") else m.get("key", ""),
-                    "qoder_key": m.get("key", ""),
-                    "object": "model",
-                    "created": 1687864820,
-                    "owned_by": "qoder",
-                    "display_name": m.get("display_name", ""),
-                    "context_window": ctx_win,
-                    "max_output_tokens": max_out,
-                    "enable": m.get("enable", True),
-                    "is_default": m.get("is_default", False),
-                    "is_reasoning": is_reasoning,
-                    "price_factor": m.get("price_factor", 0),
-                })
-            break
-        except Exception:
-            continue
-    if not models:
-        for key in ["auto", "qmodel_38max", "qfmodel", "qmodel_latest", "qmodel",
-                     "q37fmodel", "dmodel", "dfmodel", "gmodel", "gfmodel",
-                     "gm51model", "kmodel_latest", "kmodel", "mmodel"]:
+    seen_ids = set()
+    target_realm = pool.normalize_realm(realm)
+    regions_to_probe = [target_realm] if target_realm else ["cn", "global"]
+
+    for reg in regions_to_probe:
+        slots = sorted(p.snapshot(realm=reg), key=lambda s: 0 if s.available() else 1)
+        for slot in slots:
+            try:
+                ep = client.get_endpoints(slot.region)
+                resp = slot.bearer.call_get(ep.model_list_url)
+                raw = client.parse_qoder_models(resp)
+                if not raw:
+                    continue
+                for m in raw:
+                    mid = m.get("display_name") or m.get("key", "")
+                    if mid in seen_ids:
+                        continue
+                    seen_ids.add(mid)
+                    ctx_win = m.get("context_window", 0)
+                    if ctx_win == 0:
+                        ctx_win = m.get("max_input_tokens", 0)
+                    if ctx_win == 0:
+                        ctx_win = 180000
+                    is_reasoning = m.get("is_reasoning", False)
+                    max_out = m.get("max_output_tokens", 0) or (32768 if is_reasoning else 16384)
+                    models.append({
+                        "id": mid,
+                        "qoder_key": m.get("key", ""),
+                        "object": "model",
+                        "created": 1687864820,
+                        "owned_by": "qoder",
+                        "region": slot.region,
+                        "display_name": m.get("display_name", ""),
+                        "context_window": ctx_win,
+                        "max_output_tokens": max_out,
+                        "enable": m.get("enable", True),
+                        "is_default": m.get("is_default", False),
+                        "is_reasoning": is_reasoning,
+                        "price_factor": m.get("price_factor", 0),
+                    })
+                break
+            except Exception:
+                continue
+        # 上游不可达时的兜底：2026-11-07 实拉的目录快照。
+        for key, name, reasoning, ctx, out, pf in [
+            ("auto", "Auto", True, 200000, 32768, 0.5),
+            ("qmodel_38max", "Qwen3.8-Max", True, 200000, 32768, 0.5),
+            ("qfmodel", "Qwen3.8-Flash", True, 200000, 32768, 0.1),
+            ("dmodel", "DeepSeek-V4-Pro", True, 200000, 32768, 0.5),
+            ("dfmodel", "DeepSeek-Flash", False, 200000, 16384, 0.1),
+            ("gmodel", "GLM-5.3", True, 200000, 32768, 0.8),
+            ("gfmodel", "GLM-5.3-Flash", True, 200000, 32768, 0.1),
+            ("kmodel_latest", "Kimi-K3.1-Pro", False, 200000, 16384, 1.0),
+            ("kmodel", "Kimi-K2.8-Preview", True, 200000, 32768, 0.8),
+            ("jmodel", "Step-5-Preview", True, 200000, 32768, 0.3),
+            ("mmodel", "MiniMax-M3.1-Flash", True, 200000, 32768, 0.1),
+        ]:
             models.append({
-                "id": key, "object": "model", "created": 1687864820,
-                "owned_by": "qoder", "qoder_key": key, "display_name": key, "context_window": 180000})
+                "id": name, "object": "model", "created": 1687864820,
+                "owned_by": "qoder", "qoder_key": key, "display_name": name,
+                "context_window": ctx, "max_output_tokens": out,
+                "is_reasoning": reasoning, "price_factor": pf})
     return models
 
 

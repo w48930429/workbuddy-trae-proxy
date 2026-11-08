@@ -63,7 +63,10 @@ class TokenRefresher:
         ten_minutes = 10 * 60 * 1000
 
         for acc in self.pool.get_all_accounts():
-            if acc.get('status') in ('dead', 'disabled'):
+            # dead 账号凭据已明确失效，不再刷新；
+            # disabled 仍需刷新 token，否则被误停用的账号拿不到新 token，
+            # 额度/等级复检永远失败，会形成不可逆死锁（刷新只更新 token，不改变 status）。
+            if acc.get('status') == 'dead':
                 continue
             if not acc.get('refreshToken'):
                 continue

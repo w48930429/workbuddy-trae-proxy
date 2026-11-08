@@ -194,7 +194,11 @@ export function registerAdminRoutes(
 
     acc.status = body.status;
     acc.cooldownUntil = 0;
-    if (body.status === 'active') acc.lastError = undefined;
+    if (body.status === 'active') {
+      acc.lastError = undefined;
+      // 用户手动启用后清除“自动停用”标记，后续复检不再自动改变启停状态
+      delete (acc as any).autoDisabledForFree;
+    }
     pool.saveAccounts();
     return { success: true, message: body.status === 'disabled' ? '账号已停用，不会参与后续调度' : '账号已重新启用', account: acc };
   });

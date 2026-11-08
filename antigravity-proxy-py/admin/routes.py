@@ -219,6 +219,7 @@ def build_admin_router(
         acc['cooldownUntil'] = 0
         acc['activeConcurrency'] = 0
         acc['lastError'] = None
+        acc.pop('autoDisabledForFree', None)
         pool.save_accounts()
         return {'message': 'Account status reset to active', 'account': acc}
 
@@ -246,6 +247,8 @@ def build_admin_router(
         acc['cooldownUntil'] = 0
         if status == 'active':
             acc['lastError'] = None
+            # 用户手动启用后清除“自动停用”标记，后续复检不再自动改变启停状态
+            acc.pop('autoDisabledForFree', None)
         pool.save_accounts()
         msg = '账号已停用，不会参与后续调度' if status == 'disabled' else '账号已重新启用'
         return {'success': True, 'message': msg, 'account': acc}

@@ -65,7 +65,18 @@ def record_qoder_usage(model: str, account_id: str, stream: bool, outcome: str,
         pass
 
 
-def recent_qoder_usage(limit: int = 20, page: int = 1) -> dict:
+def _account_realm_map() -> dict:
+    """账号 id -> 区域（'global' / 'cn'）。用于按区域过滤历史用量记录。"""
+    out = {}
+    try:
+        for a in accounts.list_accounts():
+            out[a.id] = pool.normalize_realm(getattr(a, "region", "") or "")
+    except Exception:
+        pass
+    return out
+
+
+def recent_qoder_usage(limit: int = 20, page: int = 1, realm: str = "") -> dict:
     if not os.path.isfile(USAGE_FILE):
         return {"total": 0, "page": page, "total_pages": 0, "rows": []}
     rows = []
@@ -81,6 +92,11 @@ def recent_qoder_usage(limit: int = 20, page: int = 1) -> dict:
     except Exception:
         return {"total": 0, "page": page, "total_pages": 0, "rows": []}
     rows.reverse()
+    target_realm = pool.normalize_realm(realm)
+    if target_realm:
+        realm_of = _account_realm_map()
+        rows = [r for r in rows
+                if realm_of.get(str(r.get("account", "")), "") == target_realm]
     total = len(rows)
     total_pages = max(1, (total + limit - 1) // limit)
     start = (page - 1) * limit
@@ -88,10 +104,12 @@ def recent_qoder_usage(limit: int = 20, page: int = 1) -> dict:
     return {"total": total, "page": page, "total_pages": total_pages, "rows": rows[start:end]}
 
 
-def qoder_usage_snapshot() -> dict:
+def qoder_usage_snapshot(realm: str = "") -> dict:
     if not os.path.isfile(USAGE_FILE):
         return {"requests": 0, "total_tokens": 0, "prompt_tokens": 0,
                 "completion_tokens": 0, "by_model": {}, "by_account": {}}
+    target_realm = pool.normalize_realm(realm)
+    realm_of = _account_realm_map() if target_realm else {}
     requests = 0
     total_tokens = 0
     prompt_tokens = 0
@@ -107,6 +125,8 @@ def qoder_usage_snapshot() -> dict:
                 try:
                     r = json.loads(line)
                 except ValueError:
+                    continue
+                if target_realm and realm_of.get(str(r.get("account", "")), "") != target_realm:
                     continue
                 requests += 1
                 pt = r.get("prompt_tokens", 0)
@@ -133,6 +153,8 @@ def qoder_usage_snapshot() -> dict:
 
 DEFAULT_MODEL_MAPPING = {
     # ── Qoder 官方模型与别名映射 ──
+    "qoduck": "lmodel",
+    "lmodel": "lmodel",
     "auto": "auto",
     "qwen3.8-max": "qmodel_38max",
     "qwen-max": "qmodel_38max",
@@ -157,6 +179,9 @@ DEFAULT_MODEL_MAPPING = {
     "minimax-m3.1-flash": "mmodel",
     "minimax-flash": "mmodel",
     "minimax": "mmodel",
+    "step-5-preview": "jmodel",
+    "step-5": "jmodel",
+    "step": "jmodel",
     # ── 第三方通用别名映射 ──
     "opus": "qmodel_38max",
     "sonnet": "gmodel",
@@ -671,10 +696,26 @@ def is_flash_promo_model(model_key: str) -> bool:
     return mk in ("qfmodel", "qmodel_38flash", "qwen3.8-flash", "qwen-flash", "qwen") or ("qwen" in mk and "flash" in mk)
 
 
+def _safe_pool_size(p: pool.Pool, realm: str = "") -> int:
+    try:
+        return p.size(realm=realm) if realm else p.size()
+    except TypeError:
+        return p.size()
+
+
+def _safe_pool_snapshot(p: pool.Pool, realm: str = "") -> list:
+    try:
+        return p.snapshot(realm=realm) if realm else p.snapshot()
+    except TypeError:
+        return p.snapshot()
+
+
 def pick_slot_for_model(p: pool.Pool, model_key: str,
-                         exclude: set = None) -> tuple[Optional[pool.Slot], bool]:
+                         exclude: set = None,
+                         realm: str = None) -> tuple[Optional[pool.Slot], bool]:
     """按模型选号：优先选目录里有该模型的账号；都没有则退回任意可用账号。
-    若为千问 3.8 Flash 免费活动模型，则跳过当日免费额度已用尽的账号。"""
+    若为千问 3.8 Flash 免费活动模型，则跳过当日免费额度已用尽的账号。
+    若指定 realm，则仅在对应区域（global 或 cn）内选号。"""
     is_promo = is_flash_promo_model(model_key)
 
     def filter_fn(s: pool.Slot) -> bool:
@@ -683,14 +724,21 @@ def pick_slot_for_model(p: pool.Pool, model_key: str,
         ensure_catalog(s)
         return s.supports_model(model_key)
 
-    slot, ok = p.pick(exclude, filter_fn=filter_fn)
+    def _do_pick(ex, fn=None):
+        if realm:
+            try:
+                return p.pick(ex, filter_fn=fn, realm=realm)
+            except TypeError:
+                pass
+        return p.pick(ex, filter_fn=fn)
+
+    slot, ok = _do_pick(exclude, filter_fn)
     if ok:
         return slot, True
     if is_promo:
         # Flash 模型不回退到 flash_free_exhausted 的账号
-        return p.pick(exclude, filter_fn=lambda s: not s.flash_free_exhausted)
-    return p.pick(exclude)
-
+        return _do_pick(exclude, lambda s: not s.flash_free_exhausted)
+    return _do_pick(exclude)
 # ── 信封重试闸门 (streamWithSlot) ──────────────────────────────────────────
 
 TRANSIENT_MAX_RETRIES = 2
@@ -700,7 +748,12 @@ def _is_retryable_stream_error(err) -> bool:
     if err is None:
         return False
     if isinstance(err, pool.UpstreamError):
-        return pool.is_transient_upstream(err.status, err.detail)
+        detail = getattr(err, "detail", "") or ""
+        # provider_error 只换号、不原地重试：单次尝试可能耗时上百秒，
+        # 而换号会拿到新 request_id + 新会话，实测可恢复。
+        if client.is_provider_error(detail):
+            return False
+        return pool.is_transient_upstream(err.status, detail)
     return pool.is_transient_transport(err)
 
 
@@ -803,16 +856,20 @@ def _redact_value(v, parent_field: str):
 
 # ── 核心调用：账号池选号 + SSE 流式 + 失败换号 ──────────────────────────
 
-def call_qoder(payload: dict, on_delta=None, proxy: str = "") -> tuple[int, str]:
+def call_qoder(payload: dict, on_delta=None, proxy: str = "", realm: str = "") -> tuple[int, str]:
     """调用 Qoder 上游，返回 (status_code, response_body)。
 
     on_delta: 回调函数，接收 OpenAI chunk dict，用于 SSE 流式转发。
     如果 on_delta 为 None，则收集所有 delta 后一次性返回。
     """
+    if not realm:
+        realm = payload.get("realm", "")
+
     p = get_pool(proxy)
-    if p.size() == 0:
+    if _safe_pool_size(p, realm=realm) == 0:
+        msg = f"未配置或无启用的 Qoder {realm} 账号，请在控制台 (/qoder/dashboard) 添加对应区域账号。" if realm else NO_ACCOUNT_MESSAGE
         return 503, json.dumps({"error": {"type": "no_available_account",
-                                           "message": NO_ACCOUNT_MESSAGE}})
+                                           "message": msg}})
 
     model = payload.get("model", "")
     _t0 = time.time()
@@ -830,15 +887,17 @@ def call_qoder(payload: dict, on_delta=None, proxy: str = "") -> tuple[int, str]
     tried: set[str] = set()
     refreshed: set[str] = set()
     last_err = None
+    last_slot_id = ""
     collected_content = []
     collected_usage = {}
     waited = 0
 
     while True:
-        slot, ok = pick_slot_for_model(p, mapped, tried)
+        slot, ok = pick_slot_for_model(p, mapped, tried, realm=realm)
         if not ok:
             break
 
+        last_slot_id = slot.id
         ep = client.get_endpoints(slot.region)
         qurl = ep.chat_stream_url
 
@@ -934,17 +993,17 @@ def call_qoder(payload: dict, on_delta=None, proxy: str = "") -> tuple[int, str]
     if last_err is None:
         last_err = pool.NoAccountError()
 
-    status = pool.error_status(last_err)
-    msg, etype = _friendly_error(last_err, p, mapped)
+    msg, etype = _friendly_error(last_err, p, mapped, realm=realm)
+    status = pool.error_status(last_err, etype)
     if pool.is_flash_free_exhausted(last_err) or etype == "flash_free_quota_exhausted":
         status = 429
-    record_qoder_usage(model, "", on_delta is not None, "failed",
+    record_qoder_usage(model, last_slot_id, on_delta is not None, "failed",
                        int((time.time() - _t0) * 1000), 0, 0, 0, str(last_err))
     return status, json.dumps({"error": {"type": etype, "message": msg}})
 
 
 def _friendly_error(err: Exception, p: Optional[pool.Pool] = None,
-                    model_key: str = "") -> tuple[str, str]:
+                    model_key: str = "", realm: str = "") -> tuple[str, str]:
     if pool.is_flash_free_exhausted(err):
         rem_s = int(max(0, pool.get_next_utc8_midnight() - time.time()))
         hrs = rem_s // 3600
@@ -957,8 +1016,8 @@ def _friendly_error(err: Exception, p: Optional[pool.Pool] = None,
             "flash_free_quota_exhausted",
         )
     if isinstance(err, pool.NoAccountError):
-        if p and p.size() > 0:
-            slots = p.snapshot()
+        if p and _safe_pool_size(p, realm=realm) > 0:
+            slots = _safe_pool_snapshot(p, realm=realm)
             if is_flash_promo_model(model_key):
                 all_flash_exhausted = all(s.flash_free_exhausted for s in slots if s.enabled)
                 if all_flash_exhausted:
@@ -975,53 +1034,72 @@ def _friendly_error(err: Exception, p: Optional[pool.Pool] = None,
             cool_times = [s.cooling_remaining_ms for s in slots if s.cooling_remaining_ms > 0]
             if cool_times and len(cool_times) == len(slots):
                 min_s = int(min(cool_times) / 1000)
+                realm_desc = f" ({realm})" if realm else ""
                 return (
-                    f"所有 Qoder 账号当前处于冷却中（预计最快将在 {min_s} 秒后自动恢复）。"
+                    f"所有 Qoder{realm_desc} 账号当前处于冷却中（预计最快将在 {min_s} 秒后自动恢复）。"
                     "如需立即使用，请访问控制台 http://127.0.0.1:28087/（点击【Qoder 看板】）扫码登录新账号；或者稍候等待冷却结束。",
                     "no_available_account",
                 )
+        if realm:
+            return f"没有可用的 Qoder {realm} 账号（或当前区域未配置/未启用账号）。", "no_available_account"
         return NO_ACCOUNT_MESSAGE, "no_available_account"
     if isinstance(err, (pool.UpstreamError, client.UpstreamError)):
-        msg = getattr(err, "message", None) or str(err)
-        etype = getattr(err, "err_type", "") or "upstream_error"
+        # 交给 pool 统一格式化：解构 provider_error 内层真实原因，完整透传
+        # 上游原文（不再截断），并给出可恢复的提示。
+        msg, etype = pool.friendly_upstream_error(
+            err.status, getattr(err, "detail", "") or "",
+            getattr(err, "err_type", "") or "")
         return msg, etype
     return str(err), "qoder_error"
 
-
 # ── 模型列表 ──────────────────────────────────────────────────────────────
 
-def qoder_models(proxy: str = "") -> list[dict]:
-    """获取 Qoder 模型列表，返回 OpenAI /v1/models 格式。"""
+def qoder_models(proxy: str = "", realm: str = "") -> list[dict]:
+    """获取 Qoder 模型列表，返回 OpenAI /v1/models 格式（支持按 realm 过滤）。
+
+    合并模式（realm 为空）下按模型 id 去重，`region` 记录首次出现的区域，
+    `regions` 列出该模型实际存在的全部区域，供前端判定「双域支持 / 区域独有」。
+    """
     p = get_pool(proxy)
     models = []
-    for slot in p.snapshot():
-        if not slot.available():
-            continue
-        try:
-            ep = client.get_endpoints(slot.region)
-            resp = slot.bearer.call_get(ep.model_list_url)
-            raw = client.parse_qoder_models(resp)
-            for m in raw:
-                # Advertise the name a client can actually call. The internal
-                # key (gmodel, qmodel_38max, ...) is not a valid wire model, so
-                # the display name is used and the key is kept alongside.
-                models.append({
-                    "id": m.get("display_name") or m.get("key", ""),
-                    "object": "model",
-                    "created": int(time.time()),
-                    "owned_by": "qoder",
-                    "qoder_key": m.get("key", ""),
-                    "is_reasoning": m.get("is_reasoning", False),
-                    "context_window": m.get("context_window", 0),
-                    # price_factor is the upstream per-1K-token consumption
-                    # multiplier. It was parsed and then dropped here, which is
-                    # why the dashboard had no rate to display for this column.
-                    "price_factor": m.get("price_factor", 0),
-                    "max_output_tokens": m.get("max_output_tokens", 0),
-                })
-            break
-        except Exception:
-            continue
+    by_id = {}
+    target_realm = pool.normalize_realm(realm)
+
+    regions_to_probe = [target_realm] if target_realm else ["cn", "global"]
+
+    for reg in regions_to_probe:
+        slots = sorted(p.snapshot(realm=reg), key=lambda s: 0 if s.available() else 1)
+        for slot in slots:
+            try:
+                ep = client.get_endpoints(slot.region)
+                resp = slot.bearer.call_get(ep.model_list_url)
+                raw = client.parse_qoder_models(resp)
+                if not raw:
+                    continue
+                for m in raw:
+                    mid = m.get("display_name") or m.get("key", "")
+                    entry = by_id.get(mid)
+                    if entry is None:
+                        entry = {
+                            "id": mid,
+                            "object": "model",
+                            "created": int(time.time()),
+                            "owned_by": "qoder",
+                            "region": slot.region,
+                            "regions": [slot.region],
+                            "qoder_key": m.get("key", ""),
+                            "is_reasoning": m.get("is_reasoning", False),
+                            "context_window": m.get("context_window", 0),
+                            "price_factor": m.get("price_factor"),
+                            "max_output_tokens": m.get("max_output_tokens", 0),
+                        }
+                        by_id[mid] = entry
+                        models.append(entry)
+                    elif slot.region not in entry["regions"]:
+                        entry["regions"].append(slot.region)
+                break
+            except Exception:
+                continue
     return models
 
 

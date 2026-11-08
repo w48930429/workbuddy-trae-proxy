@@ -70,6 +70,9 @@ def is_expired(session):
 CodeArtsError = client.CodeArtsError
 CodeArtsCredentialError = client.CodeArtsCredentialError
 fetch_credits = client.fetch_credits
+fetch_welfare_delivery = client.fetch_welfare_delivery
+claim_welfare = client.claim_welfare
+claim_all_eligible_welfare = client.claim_all_eligible_welfare
 
 
 def catalog_models():

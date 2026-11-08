@@ -143,6 +143,11 @@ def is_content_policy(detail: str) -> bool:
 def is_transient_upstream(code: int, detail: str) -> bool:
     if code in (401, 403, 429):
         return False
+    # provider_error 是 Qoder 网关转发后端供应商失败的包装：真实原因在
+    # details 内层，内层的 invalid_parameter_error 只说明「那家供应商不收」，
+    # 换一次路由就可能成功。所以必须先于 CLIENT_FAULT_MARKERS 判断。
+    if client.is_provider_error(detail):
+        return True
     if _contains_any(detail, CLIENT_FAULT_MARKERS):
         return False
     if code in TRANSIENT_HTTP_CODES or code >= 500:
@@ -275,6 +280,9 @@ def should_failover(err: Exception) -> bool:
             return True
         if err.status == 418 or err.status >= 500:
             return True
+        # provider_error 包装：后端供应商偶发拒转，换号/换路由有意义。
+        if client.is_provider_error(err.detail):
+            return True
         if 400 <= err.status < 500:
             return False
         return is_account_exhausted_detail(err.detail)
@@ -330,36 +338,56 @@ def _retry_after_from_detail(detail: str) -> Optional[int]:
     return min(n, 300)
 
 
-def friendly_upstream_error(code: int, detail: str) -> tuple[str, str]:
-    """返回 (message, err_type)。"""
+def friendly_upstream_error(code: int, detail: str, err_type: str = "") -> tuple[str, str]:
+    """返回 (message, err_type)。
+
+    err_type 非空时沿用上游已判定的分类（流内 code 115 之类的中文审核文案
+    没有英文 CLIENT_FAULT_MARKERS，只能靠它）。
+    """
     detail = detail.strip()
-    if is_content_policy(detail):
+    if err_type == "content_policy_rejected" or is_content_policy(detail):
         msg = ("上游内容安全审核未通过 (DataInspectionFailed)：输入可能含不当内容，"
                "属确定性拒绝、重试无效。请检查/缩短输入后重试。上游详情：" +
-               _truncate(detail, 300))
+               detail)
         return msg, "content_policy_rejected"
-    if is_transient_upstream(code, detail) or \
-       ("provider_error" in detail and "invalid_" not in detail):
-        d = _truncate(detail, 300) or "(无详情)"
-        msg = f"上游瞬时故障 (HTTP {code})：网关已对同账号自动重试仍失败，请稍后重试。上游详情：{d}"
+    # provider_error 包装：把内层真实原因解出来，原文完整透传，不截断。
+    inner = client.provider_error_inner(detail)
+    if inner is not None:
+        inner_code, inner_msg = inner
+        reason = inner_msg or "(上游未给出内层原因)"
+        if inner_code:
+            reason = f"{inner_code}: {reason}"
+        if not reason.endswith(("。", ".", "！", "!", "?", "？")):
+            reason += "。"
+        payload = client.provider_error_payload(detail) or {}
+        rid = payload.get("request_id") or ""
+        rid_part = f"，request_id={rid}" if rid else ""
+        msg = (f"上游供应商拒绝转发 (HTTP {code})：Qoder 网关把请求转给后端供应商时"
+               f"失败（provider_error{rid_part}），网关已自动重试并换号仍失败。"
+               f"真实原因：{reason}"
+               "若内层提示参数或长度超限，请缩短输入 / 降低 max_tokens 后重试；"
+               f"否则稍后重试。上游原文：{detail}")
+        return msg, "upstream_transient_error"
+    if is_transient_upstream(code, detail):
+        msg = (f"上游瞬时故障 (HTTP {code})：网关已对同账号自动重试仍失败，"
+               f"请稍后重试。上游详情：{detail or '(无详情)'}")
         return msg, "upstream_transient_error"
     return f"upstream {code}: {detail}", "upstream_error"
 
 
-def _truncate(s: str, max_len: int) -> str:
-    if len(s) <= max_len:
-        return s
-    return s[:max_len] + "..."
+def error_status(err: Exception, etype: str = "") -> int:
+    """取错误对应的 HTTP 状态码。
 
-
-def error_status(err: Exception) -> int:
-    """取错误对应的 HTTP 状态码。"""
+    etype 是 friendly_upstream_error 分类后的类型；裸 client.UpstreamError
+    的 err_type 为空，只有分类结果才知道它是否属于上游瞬时故障。
+    """
     if isinstance(err, NoAccountError):
         return 503
     if isinstance(err, (UpstreamError, client.UpstreamError)):
-        if err.err_type == "content_policy_rejected":
+        kind = etype or getattr(err, "err_type", "") or ""
+        if kind == "content_policy_rejected":
             return 400
-        if err.err_type == "upstream_transient_error":
+        if kind == "upstream_transient_error":
             return 502
         if 400 <= err.status <= 599:
             return err.status
@@ -534,6 +562,20 @@ def rotate_slot_credential(slot: Slot, proxy: str = "") -> bool:
     return True
 
 
+# ── 区域与别名归一化 ────────────────────────────────────────────────────────
+
+def normalize_realm(realm: Optional[str]) -> str:
+    """归一化区域标识：intl/global -> global, cn/china -> cn。"""
+    if not realm:
+        return ""
+    r = str(realm).strip().lower()
+    if r in ("intl", "international", "global"):
+        return client.REGION_GLOBAL
+    if r in ("cn", "china", "domestic"):
+        return client.REGION_CN
+    return r
+
+
 # ── Pool: 账号池 ──────────────────────────────────────────────────────────
 
 class Pool:
@@ -551,18 +593,26 @@ class Pool:
         with self._lock:
             self._slots.append(slot)
 
-    def size(self) -> int:
+    def size(self, realm: str = None) -> int:
+        target = normalize_realm(realm)
         with self._lock:
-            return len(self._slots)
+            if not target:
+                return len(self._slots)
+            return sum(1 for s in self._slots if s.region == target)
 
-    def snapshot(self) -> list[Slot]:
+    def snapshot(self, realm: str = None) -> list[Slot]:
+        target = normalize_realm(realm)
         with self._lock:
-            return list(self._slots)
+            if not target:
+                return list(self._slots)
+            return [s for s in self._slots if s.region == target]
 
     def pick(self, exclude: set[str] = None,
-             filter_fn=None) -> tuple[Optional[Slot], bool]:
-        """从轮询游标开始扫描，返回第一个可用的账号。"""
+             filter_fn=None,
+             realm: str = None) -> tuple[Optional[Slot], bool]:
+        """从轮询游标开始扫描，返回第一个可用的账号（支持按 realm/region 过滤）。"""
         exclude = exclude or set()
+        target = normalize_realm(realm)
         slots = self.snapshot()
         n = len(slots)
         if n == 0:
@@ -573,6 +623,8 @@ class Pool:
         for i in range(n):
             idx = (start + i) % n
             s = slots[idx]
+            if target and s.region != target:
+                continue
             if s.id in exclude:
                 continue
             if not s.available(now):
@@ -583,7 +635,6 @@ class Pool:
                 self._cursor = (idx + 1) % n
             return s, True
         return None, False
-
     def cool(self, slot_id: str, duration_sec: int, reason: str):
         for s in self.snapshot():
             if s.id == slot_id:
@@ -718,7 +769,21 @@ if __name__ == "__main__":
     # Actually 'a' is cooled so should not be picked
     picked3, ok3 = pool.pick()
     assert ok3 and picked3.id == "b", "should skip cooled 'a' and pick 'b'"
-    print("Test 2 PASS: Pool pick / cool / exclude")
+
+    # Test realm filtering
+    s_cn = Slot(id="cn_1", name="acct-cn", region="cn")
+    s_intl = Slot(id="intl_1", name="acct-intl", region="global")
+    p_realm = Pool([s_cn, s_intl])
+    assert p_realm.size("cn") == 1
+    assert p_realm.size("intl") == 1
+    assert p_realm.size("global") == 1
+    p_cn, ok = p_realm.pick(realm="cn")
+    assert ok and p_cn.id == "cn_1"
+    p_intl, ok = p_realm.pick(realm="intl")
+    assert ok and p_intl.id == "intl_1"
+    p_none, ok = p_realm.pick(realm="unknown_region")
+    assert not ok and p_none is None
+    print("Test 2 PASS: Pool pick / cool / exclude / realm")
 
     # Test 3: should_failover
     assert not should_failover(None), "nil error"

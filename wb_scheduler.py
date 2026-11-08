@@ -194,7 +194,23 @@ class Scheduler:
                         self.log(f"! 账号 [{uid8}] 每日活跃对话失败: {res.get('error') or res.get('msg')}")
                     time.sleep(1.5)
 
-        self.log(f"巡检完成：Token保活 {refreshed_count} 个，国内签到 {checkin_count} 个，猫猫日常 {travel_count} 个，国际活跃 {daily_chat_count} 个")
+        # 4. CodeArts 多账号每日签到与福利权益自动领取
+        ca_succ = 0
+        ca_tot = 0
+        ca_pts = 0.0
+        try:
+            import wb_proxy
+            cp = wb_proxy.get_codearts_pool()
+            if cp and cp.accounts:
+                ca_res = cp.checkin_all()
+                ca_succ = ca_res.get("success_count", 0)
+                ca_tot = ca_res.get("total_accounts", 0)
+                ca_pts = float(ca_res.get("total_points") or 0.0)
+                self.log(f"CodeArts 自动签到: 成功 {ca_succ}/{ca_tot} 个账号，本次新领 {ca_pts:g} 积分")
+        except Exception as exc:
+            self.log(f"! CodeArts 自动签到异常: {exc}")
+
+        self.log(f"巡检完成：Token保活 {refreshed_count} 个，国内签到 {checkin_count} 个，猫猫日常 {travel_count} 个，国际活跃 {daily_chat_count} 个，CodeArts签到 {ca_succ}/{ca_tot} 个 (+{ca_pts:g}分)")
 
     def status(self):
         return {

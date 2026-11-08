@@ -44,7 +44,10 @@ export class TokenRefresher {
     const tenMinutes = 10 * 60 * 1000;
 
     for (const acc of this.pool.getAllAccounts()) {
-      if (acc.status === 'dead' || acc.status === 'disabled') continue;
+      // dead 账号凭据已明确失效，不再刷新；
+      // disabled 仍需刷新 token，否则被误停用的账号拿不到新 token，
+      // 额度/等级复检永远失败，会形成不可逆死锁（刷新只更新 token，不改变 status）。
+      if (acc.status === 'dead') continue;
       if (!acc.refreshToken) continue;
 
       const needsRefresh = !acc.accessToken || acc.accessTokenExpiresAt - now < tenMinutes;

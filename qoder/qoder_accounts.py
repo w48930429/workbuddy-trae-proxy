@@ -131,11 +131,20 @@ def _account_path(account_id: str) -> str:
     return os.path.join(accounts_dir(), sanitize_id(account_id) + ".json")
 
 
-def list_accounts() -> list:
+def list_accounts(region: str = "") -> list:
     d = accounts_dir()
     if not os.path.isdir(d):
         return []
     out = []
+    norm_region = ""
+    if region:
+        r = region.strip().lower()
+        if r in ("intl", "international", "global"):
+            norm_region = "global"
+        elif r in ("cn", "china", "domestic"):
+            norm_region = "cn"
+        else:
+            norm_region = r
     for name in os.listdir(d):
         if not name.endswith(".json"):
             continue
@@ -144,7 +153,10 @@ def list_accounts() -> list:
                 raw_data = json.load(f)
                 valid_fields = {f.name for f in fields(Account)}
                 filtered = {k: v for k, v in raw_data.items() if k in valid_fields}
-                out.append(Account(**filtered))
+                acct = Account(**filtered)
+                if norm_region and acct.region != norm_region:
+                    continue
+                out.append(acct)
         except (OSError, ValueError, TypeError):
             continue
     out.sort(key=lambda a: a.sort_order)

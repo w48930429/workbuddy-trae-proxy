@@ -1,6 +1,7 @@
 # 核心机密数据（千万不能上传到公共仓库）
 accounts/*.json
 !accounts/README.txt
+data/
 
 # 运行时日志和用量统计
 usage/*.jsonl

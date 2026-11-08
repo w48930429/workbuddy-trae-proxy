@@ -40,12 +40,19 @@ body{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif
 .badge-warn{background:var(--warn-soft);color:var(--warn)}
 .badge-accent{background:var(--accent-soft);color:var(--accent-h)}
 
+/* Realm switch group */
+.realm-switch-group{display:inline-flex;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:3px;gap:3px}
+.realm-pill{background:transparent;border:none;color:var(--dim);font-size:12px;padding:6px 14px;border-radius:8px;cursor:pointer;transition:all .15s}
+.realm-pill:hover{color:var(--fg)}
+.realm-pill.active{background:var(--accent);color:#fff;font-weight:600;box-shadow:var(--shadow)}
+.realm-badge-intl{color:#38bdf8 !important;background:rgba(56,189,248,.12) !important;border:1px solid rgba(56,189,248,.3) !important}
+.realm-badge-cn{color:#f87171 !important;background:rgba(248,113,113,.12) !important;border:1px solid rgba(248,113,113,.3) !important}
+
 /* Region selector */
 .region-row{display:flex;gap:12px;margin-bottom:16px;align-items:center}
 .region-row label{font-size:13px;color:var(--dim)}
 .region-row select{padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--fg);font-size:14px;cursor:pointer}
 .region-row select:hover{border-color:var(--accent)}
-
 /* Action buttons */
 .actions{display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap}
 .btn{padding:10px 18px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);color:var(--fg);cursor:pointer;font-size:14px;font-weight:500;transition:all .15s;display:inline-flex;align-items:center;gap:6px}
@@ -164,6 +171,11 @@ body{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif
       <div class="subtitle">账号管理 · 移植看板 · workbuddy-trae-proxy</div>
     </div>
   </div>
+  <div class="realm-switch-group" id="realmSwitchGroup">
+    <button class="realm-pill active" data-realm="">全部区域</button>
+    <button class="realm-pill" data-realm="global">🌐 国际站 (global)</button>
+    <button class="realm-pill" data-realm="cn">🇨🇳 国内站 (cn)</button>
+  </div>
 </div>
 
 <!-- Tab navigation -->
@@ -186,8 +198,10 @@ body{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif
   <div class="actions">
     <button class="btn primary" id="btnLogin">OAuth 登录</button>
     <button class="btn" id="btnRefresh">刷新账号</button>
-    <button class="btn" id="btnCheckinAll">一键签到（全部）</button>
+    <button class="btn" id="btnCheckinAll">一键签到（当前视域）</button>
+    <button class="btn" id="btnInspectModels">探测当前区域可用模型</button>
   </div>
+  <div id="accountSummary" style="font-size:13px;color:var(--dim);margin-bottom:14px"></div>
 
   <div class="login-panel" id="loginPanel">
     <h3>扫码授权登录</h3>
@@ -246,7 +260,7 @@ body{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif
     </div>
     <div class="stat-card">
       <div class="label">Qoder 模型</div>
-      <div class="value">14</div>
+      <div class="value">11</div>
       <div class="sub">含 context_window</div>
     </div>
     <div class="stat-card">
@@ -393,7 +407,7 @@ body{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif
       <div class="test-card">
         <div class="endpoint">/v1/models</div>
         <div class="result" style="color:var(--ok)">PASS</div>
-        <div class="detail">29 总模型 · 14 Qoder 模型</div>
+        <div class="detail">42 总模型 · 11 Qoder 模型</div>
       </div>
       <div class="test-card">
         <div class="endpoint">/v1/chat/completions</div>
@@ -456,8 +470,8 @@ body{font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif
       <div class="changelog-item"><span class="chg">FIX-01</span> <span class="desc">build_session_from_secret 支持 drt- 直接凭证</span></div>
       <div class="changelog-item"><span class="chg">CHG-10</span> <span class="desc">CleanupAllData 数据清理</span></div>
       <div class="changelog-item"><span class="chg">CHG-09</span> <span class="desc">账号排序 Reorder 功能</span></div>
+      <div class="changelog-item"><span class="chg">CHG-09</span> <span class="desc">双出口双轨隔离（global / intl vs cn）、多区域路由调度与看板视域切换</span></div>
       <div class="changelog-item"><span class="chg">CHG-08</span> <span class="desc">StartCheckinScheduler 后台调度线程</span></div>
-      <div class="changelog-item"><span class="chg">CHG-07</span> <span class="desc">BlankResponseMeta 字段结构对齐 Go 端</span></div>
       <div class="changelog-item"><span class="chg">M7g</span> <span class="desc">qoder_logger.py 日志系统</span></div>
       <div class="changelog-item"><span class="chg">M7a/M7b</span> <span class="desc">qoder_claude.py + qoder_codex.py</span></div>
       <div class="changelog-item"><span class="chg">M5b+M7d/e/h</span> <span class="desc">qoder_route.py 信封重试 + 按模型路由 + 脱敏</span></div>
@@ -577,23 +591,39 @@ function closeLoginPanel() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
 }
 
+var currentRealm = '';
+
 function loadAccounts() {
-  api('/qoder/accounts').then(function(d) {
+  var url = '/qoder/accounts' + (currentRealm ? '?realm=' + encodeURIComponent(currentRealm) : '');
+  api(url).then(function(d) {
     var list = document.getElementById('accountsList');
     list.innerHTML = '';
-    if (!d.accounts || d.accounts.length === 0) {
-      list.innerHTML = '<div class="empty-state"><div class="icon">&#128274;</div><div>暂无账号，请点击 OAuth 登录</div></div>';
-      log('账号数: 0');
+    var accounts = d.accounts || [];
+    var summaryEl = document.getElementById('accountSummary');
+    var globalCount = accounts.filter(function(a){ return a.region === 'global' || a.region === 'intl'; }).length;
+    var cnCount = accounts.filter(function(a){ return a.region === 'cn'; }).length;
+    if (summaryEl) {
+      var realmLabel = currentRealm ? (currentRealm === 'global' ? '🌐 国际站' : '🇨🇳 国内站') : '全部区域';
+      summaryEl.textContent = '【' + realmLabel + '】账号共 ' + accounts.length + ' 个 (🌐 国际站: ' + globalCount + ' · 🇨🇳 国内站: ' + cnCount + ')';
+    }
+    if (accounts.length === 0) {
+      list.innerHTML = '<div class="empty-state"><div class="icon">&#128274;</div><div>当前视域无账号，请点击 OAuth 登录</div></div>';
+      log('当前视域账号数: 0');
       return;
     }
-    log('账号数: ' + d.accounts.length);
-    d.accounts.forEach(function(a) {
+    log('当前视域账号数: ' + accounts.length);
+    accounts.forEach(function(a) {
       var card = document.createElement('div');
       card.className = 'account-card';
       var initials = (a.name || a.email || '?').substring(0, 2).toUpperCase();
       var badges = '';
       if (a.plan) badges += '<span class="badge plan">' + a.plan + '</span>';
-      if (a.region) badges += '<span class="badge region">' + a.region + '</span>';
+      var isGlobal = (a.region === 'global' || a.region === 'intl');
+      if (isGlobal) {
+        badges += '<span class="badge region realm-badge-intl">🌐 国际站 (global)</span>';
+      } else {
+        badges += '<span class="badge region realm-badge-cn">🇨🇳 国内站 (cn)</span>';
+      }
       if (a.active) badges += '<span class="badge active">默认</span>';
       if (a.auth_mode) badges += '<span class="badge auth">' + a.auth_mode + '</span>';
       var isEnabled = (a.enabled !== false);
@@ -726,13 +756,58 @@ function deleteAccount(id, name) {
   });
 }
 
+function inspectModels() {
+  var url = '/qoder/models' + (currentRealm ? '?realm=' + encodeURIComponent(currentRealm) : '');
+  log('探测可用模型: ' + url);
+  api(url).then(function(d) {
+    var models = d.models || [];
+    var names = models.map(function(m) {
+      var id = typeof m === 'string' ? m : (m.id || JSON.stringify(m));
+      var ctx = m.context_window ? ' (' + Math.round(m.context_window / 1024) + 'k)' : '';
+      return id + ctx;
+    });
+    var realmLabel = currentRealm ? (currentRealm === 'global' ? '🌐 国际站' : '🇨🇳 国内站') : '全部区域';
+    var msg = '【' + realmLabel + '】可用模型 (' + models.length + '个): ' + (names.join(', ') || '无');
+    log(msg);
+    toast(msg, 'info');
+  }).catch(function(err) {
+    toast('探测模型失败: ' + err.message, 'error');
+  });
+}
+
+/* Realm switch buttons */
+document.querySelectorAll('#realmSwitchGroup .realm-pill').forEach(function(pill) {
+  pill.addEventListener('click', function() {
+    document.querySelectorAll('#realmSwitchGroup .realm-pill').forEach(function(p) { p.classList.remove('active'); });
+    pill.classList.add('active');
+    currentRealm = pill.dataset.realm || '';
+    if (currentRealm) {
+      document.getElementById('regionSelect').value = currentRealm;
+    }
+    log('视域切换为: ' + (currentRealm ? currentRealm : '全部区域'));
+    loadAccounts();
+  });
+});
+
+document.getElementById('regionSelect').addEventListener('change', function() {
+  var sel = this.value;
+  document.querySelectorAll('#realmSwitchGroup .realm-pill').forEach(function(p) {
+    if (p.dataset.realm === sel) {
+      document.querySelectorAll('#realmSwitchGroup .realm-pill').forEach(function(x) { x.classList.remove('active'); });
+      p.classList.add('active');
+      currentRealm = sel;
+      loadAccounts();
+    }
+  });
+});
+
 /* Event bindings */
 document.getElementById('btnLogin').addEventListener('click', startLogin);
 document.getElementById('btnRefresh').addEventListener('click', loadAccounts);
 document.getElementById('btnCheckinAll').addEventListener('click', checkinAll);
+document.getElementById('btnInspectModels').addEventListener('click', inspectModels);
 document.getElementById('btnCloseLogin').addEventListener('click', closeLoginPanel);
 document.getElementById('btnClearLog').addEventListener('click', clearLog);
-
 /* Delegate clicks for dynamically created checkin/quota buttons */
 document.getElementById('accountsList').addEventListener('click', function(e) {
   var btn = e.target.closest('button');

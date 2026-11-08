@@ -210,29 +210,50 @@ def campaigns_checkin(device_token: str, res: CheckinResult, host: str, proxy: s
         return res
 
     campaigns = (body or {}).get("campaigns") or []
-    benefit_campaigns = [c for c in campaigns
-                         if isinstance(c, dict) and c.get("actionType") == "CLAIM_BENEFIT"]
-    claimables = [c for c in benefit_campaigns if c.get("claimStatus") == "CLAIMABLE"]
-    already_claimed = any(c.get("claimStatus") == "CLAIMED" for c in benefit_campaigns)
+    campaigns = [c for c in campaigns if isinstance(c, dict)]
 
-    # 每日窗口取窗口最短的活动（daily 重置；限时活动跨度数月，不能代表窗口）。
+    def _is_benefit(c: dict) -> bool:
+        amt = int((c.get("benefit") or {}).get("amount") or 0)
+        return (c.get("actionType") == "CLAIM_BENEFIT") or (amt > 0)
+
     def _span(c: dict) -> int:
         s, e = int(c.get("startAt") or 0), int(c.get("endAt") or 0)
         return (e - s) if (s > 0 and e > s) else 1 << 62
-    window_src = min(benefit_campaigns, key=_span) if benefit_campaigns else None
+
+    # 每日签到活动：带有积分权益 (is_benefit) 或跨度为每日窗口 (<= 2 天)
+    daily_campaigns = [c for c in campaigns if _is_benefit(c) or _span(c) <= 172800]
+
+    claimables = [c for c in campaigns if c.get("claimStatus") == "CLAIMABLE"]
+    already_claimed_daily = any(c.get("claimStatus") == "CLAIMED" for c in daily_campaigns)
+    any_claimed = any(c.get("claimStatus") == "CLAIMED" for c in campaigns)
+
+    # 每日窗口取窗口最短的每日活动
+    window_src = min(daily_campaigns, key=_span) if daily_campaigns else None
     if window_src and int(window_src.get("startAt") or 0) > 0:
         res.window_date = datetime.fromtimestamp(
             int(window_src["startAt"])).strftime("%Y-%m-%d")
 
     if not claimables:
-        if already_claimed:
+        if already_claimed_daily:
             res.status = STATUS_ALREADY
-            res.message = _window_hint(res, "今日已领取")
+            for c in daily_campaigns:
+                if c.get("claimStatus") == "CLAIMED":
+                    amt = int((c.get("benefit") or {}).get("amount") or 0)
+                    if amt > 0:
+                        res.amount = amt
+                        break
+            if res.amount == 0 and not res.reward_credits:
+                res.amount = DEFAULT_REWARD
+            res.message = _window_hint(res, "今日已签到")
+        elif any_claimed:
+            res.status = STATUS_NO_CAMPAIGN
+            res.amount = 0
+            res.message = "暂无可用积分签到活动（海外站当前仅限时订阅宣传，无每日积分签到）"
         else:
             res.status = STATUS_NO_CAMPAIGN
+            res.amount = 0
             res.message = "无可用签到活动"
         return res
-
     # 逐个领取全部可领活动（daily + 限时活动可能同时 CLAIMABLE，
     # 旧逻辑只保留最后一个 target，会漏领）。
     fresh, replayed, failed = [], [], []
@@ -257,12 +278,16 @@ def campaigns_checkin(device_token: str, res: CheckinResult, host: str, proxy: s
     if fresh:
         res.status = STATUS_CLAIMED
         res.expires_at = fresh[0][2]
-        res.message = "领取成功 " + " + ".join(
-            f"+{a} {k}" for k, a, _ in fresh) + (
-            f"（另 {len(replayed)} 项此前已领）" if replayed else "") + fail_suffix
+        # VIEW_DETAILS 这类活动只回 grantId、不带 benefit 金额，不显示 "+0"。
+        if res.amount > 0:
+            res.message = "领取成功 " + " + ".join(
+                (f"+{a} {k}" if a else k) for k, a, _ in fresh) + (
+                f"（另 {len(replayed)} 项此前已领）" if replayed else "") + fail_suffix
+        else:
+            res.message = "领取成功 " + " + ".join(k for k, _, _ in fresh) + "（宣传活动，无额外积分）" + fail_suffix
     elif replayed:
         res.status = STATUS_ALREADY
-        res.message = _window_hint(res, "今日已领取")
+        res.message = _window_hint(res, "今日已签到")
     else:
         res.message = "领取失败: " + ", ".join(failed)
     return res
@@ -309,17 +334,20 @@ def checkin_account(acct: accounts.Account, proxy: str = "") -> CheckinResult:
     res = campaigns_checkin(device_token, res, host, proxy)
     _read_daily_checkin_stats(device_token, res, host, proxy)
 
-    record = res.status in (STATUS_CLAIMED, STATUS_ALREADY)
-    amount = res.amount or res.reward_credits or DEFAULT_REWARD
-    _apply_local_streak(acct.id, res, record, res.window_date, amount)
-    if record or res.streak_days > 0 or res.total_claim_days > 0:
+    record = (res.status in (STATUS_CLAIMED, STATUS_ALREADY)) and (res.amount > 0 or res.reward_credits > 0)
+    amount = res.amount or res.reward_credits or 0
+    if record and amount > 0:
+        _apply_local_streak(acct.id, res, record, res.window_date, amount)
+        res.message += _streak_suffix(res)
+    elif res.streak_days > 0 or res.total_claim_days > 0:
         res.message += _streak_suffix(res)
     return res
 
 
-def checkin_all(proxy: str = "") -> list:
+def checkin_all(proxy: str = "", region: str = "") -> list:
+    """对全部（或指定区域）账号执行签到。region 为空表示不区分区域。"""
     results = []
-    for acct in accounts.list_accounts():
+    for acct in accounts.list_accounts(region=region):
         if not accounts.has_secret(acct.id):
             results.append(CheckinResult(account=acct.name, account_id=acct.id,
                                          status=STATUS_NO_TOKEN, message="无 secret，跳过"))

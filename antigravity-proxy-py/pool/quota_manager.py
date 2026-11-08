@@ -10,6 +10,55 @@ QUOTA_SUMMARY_URL = 'https://daily-cloudcode-pa.googleapis.com/v1internal:retrie
 LOAD_CODE_ASSIST_URL = 'https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist'
 
 
+def resolve_tier_from_code_assist(tier_data: Dict[str, Any]) -> Optional[str]:
+    """从 loadCodeAssist 响应解析订阅等级。
+
+    实测（2026-11）结构：
+    - 个人号 currentTier.id 恒为 "free-tier"、name 为 "Antigravity"；
+    - 付费订阅在 paidTier：id="g1-pro-tier"、name="Google AI Pro"，
+      免费号为 "Antigravity Starter Quota"（或不存在 paidTier）。
+
+    返回 None 表示本次响应无法给出明确结论（字段缺失/未知命名），
+    调用方必须保留账号原有 tier，绝不能默认按 free 处理并停用账号。
+    """
+    if not isinstance(tier_data, dict):
+        return None
+
+    current_tier = tier_data.get('currentTier') or {}
+    paid_tier = tier_data.get('paidTier') or {}
+
+    current_id = str(current_tier.get('id') or '').lower()
+    current_name = str(current_tier.get('name') or '').lower()
+    paid_id = str(paid_tier.get('id') or '').lower()
+    paid_name = str(paid_tier.get('name') or '').lower()
+    available_credits = paid_tier.get('availableCredits') or []
+    has_ai_credit = any(
+        isinstance(c, dict) and c.get('creditType') == 'GOOGLE_ONE_AI'
+        for c in available_credits
+    )
+
+    # paidTier 存在时优先采信（id 与 name 双通道，兼容上游改字段）
+    if paid_id or paid_name:
+        paid_probe = f'{paid_id} {paid_name}'
+        if 'ultra' in paid_probe:
+            return 'ultra'
+        if 'pro' in paid_probe or has_ai_credit:
+            return 'pro'
+        if 'free' in paid_id or 'starter' in paid_name or 'free' in paid_name:
+            return 'free'
+        return None
+
+    # 无 paidTier 时退回 currentTier（企业/特殊租户可能直接给出标准付费档）
+    current_probe = f'{current_id} {current_name}'
+    if 'ultra' in current_probe:
+        return 'ultra'
+    if 'pro' in current_probe:
+        return 'pro'
+    if 'free' in current_id or 'starter' in current_name or 'free' in current_name:
+        return 'free'
+    return None
+
+
 class QuotaManager:
     def __init__(self, pool: AccountPool, config: Optional[Dict[str, Any]] = None):
         self.pool = pool
@@ -182,32 +231,34 @@ class QuotaManager:
                 )
             if tier_res.status_code == 200:
                 tier_data = tier_res.json()
-                current_id = str(tier_data.get('currentTier', {}).get('id') or '').lower()
-                paid_id = str(tier_data.get('paidTier', {}).get('id') or '').lower()
-                available_credits = tier_data.get('paidTier', {}).get('availableCredits', [])
-                has_ai_credit = any(c.get('creditType') == 'GOOGLE_ONE_AI' for c in available_credits if isinstance(c, dict))
+                # 判定规则见 resolve_tier_from_code_assist：
+                # 返回 None 表示本次响应无法判定，保留原 tier，避免把 PRO 误判为 free。
+                tier = resolve_tier_from_code_assist(tier_data)
 
-                tier = 'free'
-                probe = paid_id or current_id
-                if 'ultra' in probe:
-                    tier = 'ultra'
-                elif 'pro' in probe or has_ai_credit:
-                    tier = 'pro'
-                elif 'ultra' in current_id:
-                    tier = 'ultra'
-                elif 'pro' in current_id:
-                    tier = 'pro'
+                if tier:
+                    account['tier'] = tier
+                    self.pool.update_account(account['id'], {'tier': tier})
 
-                account['tier'] = tier
-                self.pool.update_account(account['id'], {'tier': tier})
+                    # 免费号输入上限远低于 PRO，确认 free 才自动停用
+                    if tier == 'free' and account.get('status') == 'active':
+                        self.pool.update_account(account['id'], {
+                            'status': 'disabled',
+                            'lastError': 'free 账号已自动停用：输入上限过低',
+                            'autoDisabledForFree': True
+                        })
+                        print(f"[QuotaManager] {account.get('email')} 为 free 账号（输入上限过低），已自动停用。")
 
-                # 免费号输入上限远低于 PRO，自动停用
-                if tier == 'free' and account.get('status') == 'active':
-                    self.pool.update_account(account['id'], {
-                        'status': 'disabled',
-                        'lastError': 'free 账号已自动停用：输入上限过低'
-                    })
-                    print(f"[QuotaManager] {account.get('email')} 为 free 账号（输入上限过低），已自动停用。")
+                    # 自愈：此前因 tier 未知/误判被自动停用的账号，复检确认是 pro/ultra 后自动恢复，
+                    # 否则停用账号永远拿不到调度机会，形成不可逆死锁。
+                    # 用 autoDisabledForFree 标记区分“自动停用”与“用户手动停用”，不误启用后者。
+                    if (tier != 'free' and account.get('status') == 'disabled' and
+                            account.get('autoDisabledForFree') is True):
+                        self.pool.update_account(account['id'], {
+                            'status': 'active',
+                            'lastError': None,
+                            'autoDisabledForFree': None
+                        })
+                        print(f"[QuotaManager] {account.get('email')} 复检确认为 {tier} 账号，已自动恢复启用。")
         except Exception:
             pass
 
@@ -216,7 +267,9 @@ class QuotaManager:
     async def fetch_all_quotas(self) -> None:
         accounts = self.pool.get_all_accounts()
         for acc in accounts:
-            if acc.get('status') in ('dead', 'disabled'):
+            # dead 账号凭据已明确失效，不再消耗上游请求；
+            # disabled 必须继续复检，否则被误停的账号永远无法重新识别为 pro（死锁）。
+            if acc.get('status') == 'dead':
                 continue
             await self.fetch_quota_for_account(acc)
             await asyncio.sleep(0.6)
@@ -232,14 +285,16 @@ class QuotaManager:
         # 初始延迟 5 秒后首次运行
         await asyncio.sleep(5)
         try:
-            # 启动时检查：把当前已知为 free 且仍 active 的账号立即停用
-            for acc in self.pool.get_all_accounts():
-                if acc.get('tier') == 'free' and acc.get('status') == 'active':
-                    self.pool.update_account(acc['id'], {
-                        'status': 'disabled',
-                        'lastError': 'free 账号已自动停用：输入上限过低'
-                    })
-                    print(f"[QuotaManager] {acc.get('email')} 为 free 账号（输入上限过低），已自动停用。")
+            # 旧逻辑（已停用）：启动时把“当前已知为 free”且仍 active 的账号立即停用。
+            # 该兜底会在账号等级尚未真实探测（导入时 tier 缺省为 free）时抢先误杀 PRO 账号，
+            # 且停用后不再复检，形成永久死锁。现在统一改为：只有 loadCodeAssist 明确返回 free 才停用。
+            # for acc in self.pool.get_all_accounts():
+            #     if acc.get('tier') == 'free' and acc.get('status') == 'active':
+            #         self.pool.update_account(acc['id'], {
+            #             'status': 'disabled',
+            #             'lastError': 'free 账号已自动停用：输入上限过低'
+            #         })
+            #         print(f"[QuotaManager] {acc.get('email')} 为 free 账号（输入上限过低），已自动停用。")
             await self.fetch_all_quotas()
         except Exception as e:
             print(f"[QuotaManager] Initial fetch error: {e}")

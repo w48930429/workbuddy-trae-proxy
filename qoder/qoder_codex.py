@@ -67,11 +67,13 @@ def codex_input_to_messages(input_val, instructions: str = "") -> list:
     return msgs
 
 
-def call_qoder_codex(req: dict, on_event=None, proxy: str = "") -> tuple[int, str]:
+def call_qoder_codex(req: dict, on_event=None, proxy: str = "", realm: str = "") -> tuple[int, str]:
     """处理 Codex /v1/responses 请求，返回 (status_code, response_body)。
 
     on_event: 回调函数，接收 (event_type, data_dict)，用于 SSE 流式转发。
     """
+    if not realm:
+        realm = req.get("realm", "")
     stream = bool(req.get("stream"))
     model = req.get("model") or "auto"
     _t0 = time.time()
@@ -99,14 +101,19 @@ def call_qoder_codex(req: dict, on_event=None, proxy: str = "") -> tuple[int, st
     body = route.build_qoder_request_body(openai_payload, route._get_template_base(), proxy)
 
     p = route.get_pool(proxy)
-    if p.size() == 0:
-        return 503, json.dumps({"error": {"message": route.NO_ACCOUNT_MESSAGE, "type": "server_error"}})
-
+    try:
+        sz = p.size(realm=realm) if realm else p.size()
+    except TypeError:
+        sz = p.size()
+    if sz == 0:
+        msg = f"未配置或无启用的 Qoder {realm} 账号，请在控制台 (/qoder/dashboard) 添加对应区域账号。" if realm else route.NO_ACCOUNT_MESSAGE
+        return 503, json.dumps({"error": {"message": msg, "type": "server_error"}})
     agent = client.infer_agent(model)
     mapped = route.map_model(model, agent)
     extra = {"x-model-key": mapped, "x-model-source": "system"}
 
     tried: set[str] = set()
+    acct_ref: list = []
     resp_id = "resp_" + cosy.new_uuid()[:12]
 
     if stream:
@@ -137,12 +144,13 @@ def call_qoder_codex(req: dict, on_event=None, proxy: str = "") -> tuple[int, st
             "item_id": output_item_id, "output_index": 0, "content_index": 0,
             "part": {"type": "output_text", "text": ""}})
 
-        status, body_str = _call_with_pool(p, body, extra, mapped, tried, on_delta)
+        status, body_str = _call_with_pool(p, body, extra, mapped, tried, on_delta, realm=realm,
+                                account_out=acct_ref)
         if status != 200:
             err_data = json.loads(body_str) if body_str else {}
             err_msg = err_data.get("error", {}).get("message", "unknown error")
             on_event("error", {"type": "error", "message": err_msg})
-            route.record_qoder_usage(model, "", stream, "failed",
+            route.record_qoder_usage(model, (acct_ref[0] if acct_ref else ""), stream, "failed",
                                      int((time.time() - _t0) * 1000), 0, 0, 0, err_msg)
             return status, body_str
 
@@ -176,7 +184,7 @@ def call_qoder_codex(req: dict, on_event=None, proxy: str = "") -> tuple[int, st
             "response": {"id": resp_id, "model": model, "status": "completed",
                          "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}}})
 
-        route.record_qoder_usage(model, "", stream, "completed",
+        route.record_qoder_usage(model, (acct_ref[0] if acct_ref else ""), stream, "completed",
                                  int((time.time() - _t0) * 1000))
         return 200, json.dumps({"status": "streamed"})
 
@@ -190,9 +198,10 @@ def call_qoder_codex(req: dict, on_event=None, proxy: str = "") -> tuple[int, st
             if delta.tool_calls:
                 tool_call_buf.extend(delta.tool_calls)
 
-        status, body_str = _call_with_pool(p, body, extra, mapped, tried, on_delta)
+        status, body_str = _call_with_pool(p, body, extra, mapped, tried, on_delta, realm=realm,
+                                account_out=acct_ref)
         if status != 200:
-            route.record_qoder_usage(model, "", stream, "failed",
+            route.record_qoder_usage(model, (acct_ref[0] if acct_ref else ""), stream, "failed",
                                      int((time.time() - _t0) * 1000), 0, 0, 0, body_str[:200])
             return status, body_str
 
@@ -216,17 +225,18 @@ def call_qoder_codex(req: dict, on_event=None, proxy: str = "") -> tuple[int, st
             "id": resp_id, "model": model, "status": "completed",
             "output": output,
             "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}}
-        route.record_qoder_usage(model, "", stream, "completed",
+        route.record_qoder_usage(model, (acct_ref[0] if acct_ref else ""), stream, "completed",
                                  int((time.time() - _t0) * 1000))
         return 200, json.dumps(resp)
 
 
 def _call_with_pool(p: pool.Pool, body: dict, extra: dict, mapped_model: str,
-                     tried: set, on_delta) -> tuple[int, str]:
+                     tried: set, on_delta, realm: str = "",
+                     account_out: list | None = None) -> tuple[int, str]:
     """账号池选号 + SSE 流式 + 失败换号。"""
     refreshed: set = set()
     while True:
-        slot, ok = route.pick_slot_for_model(p, mapped_model, tried)
+        slot, ok = route.pick_slot_for_model(p, mapped_model, tried, realm=realm)
         if not ok:
             break
 
@@ -260,6 +270,8 @@ def _call_with_pool(p: pool.Pool, body: dict, extra: dict, mapped_model: str,
 
         if err is None:
             p.note_success(slot.id)
+            if account_out is not None:
+                account_out.append(slot.id)
             return 200, json.dumps({"status": "ok"})
 
         last_err = err
@@ -271,7 +283,7 @@ def _call_with_pool(p: pool.Pool, body: dict, extra: dict, mapped_model: str,
     if last_err is None:
         last_err = pool.NoAccountError()
     status = pool.error_status(last_err)
-    msg, etype = route._friendly_error(last_err)
+    msg, etype = route._friendly_error(last_err, p, mapped_model, realm=realm)
     if etype == "qoder_error":
         etype = "server_error"
     return status, json.dumps({"error": {"message": msg, "type": etype}})

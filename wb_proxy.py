@@ -360,7 +360,7 @@ DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
 # 一律原样透传，不偷偷换模型。
 # ---------------------------------------------------------------------------
 DEFAULT_ROUTE_MODEL = "deepseek-v4.1-flash"
-EXHAUSTED_ROUTE_MODEL = "deepseek-v4.1-flash"
+EXHAUSTED_ROUTE_MODEL = "space-bunny"
 # 上游表达「额度不足」的措辞。码 14018 之外，中文侧的「额度不足」也算——
 # 早期只认英文 "insufficient credits"，国内版中文报文被静默忽略，
 # 于是重试目标永远没生效。
@@ -369,6 +369,45 @@ CREDIT_EXHAUSTED_MARKERS = (
     "insufficient balance", "balance is insufficient",
     "额度不足", "积分不足", "额度已用完", "额度耗尽",
 )
+
+
+def is_deepseek_v41_flash(model: str) -> bool:
+    """True if model refers to deepseek-v4.1-flash or its aliases/variants."""
+    if not model:
+        return False
+    m = str(model).strip().lower()
+    if m in (
+        "deepseek-v4.1-flash",
+        "deepseek-v4.1-flash-1017",
+        "deepseek-flash",
+        "ds-v4.1-flash",
+        "ds-flash",
+        "codearts-deepseek-v4.1-flash",
+        "codearts-deepseek-v4.1-flash-1017",
+    ):
+        return True
+    if "deepseek" in m and "v4.1" in m and "flash" in m:
+        return True
+    return False
+
+
+def get_exhausted_route_model(model: str, realm: str = "cn"):
+    """Determine the fallback model when credits are exhausted.
+
+    - WorkBuddy CN deepseek-v4.1-flash (and variants) falls back to space-bunny.
+    - If already requesting space-bunny, returns None to avoid infinite loops.
+    - Other models (e.g. kimi-k3, step-5-preview) fall back to deepseek-v4.1-flash.
+    """
+    m = str(model or "").strip().lower()
+    if realm == "cn":
+        if is_deepseek_v41_flash(m):
+            return "space-bunny"
+        if m == "space-bunny":
+            return None
+        return "deepseek-v4.1-flash"
+    if m == EXHAUSTED_ROUTE_MODEL.lower():
+        return None
+    return EXHAUSTED_ROUTE_MODEL
 # The WorkBuddy AI desktop app caches its account product config here on every
 # launch. That file carries the real model catalog the app shows in its picker
 # (21 models, incl. deepseek-v4.1-flash / gpt-6-astra) - the CLI-facing
@@ -700,26 +739,6 @@ def _persist_usage(row, fail_label):
     except Exception as exc:
         log("%s: %s" % (fail_label, exc))
 
-
-def record_error(model, status, message, elapsed_ms=None, account=None,
-                 usage=None, stream=None, ttft_ms=None, gen_ms=None, fp=None,
-                 outcome="failed"):
-    """Record one failed request as exactly one JSONL row.
-
-    Passing the account uid records which account the request was bound to, so
-    per-realm success rates attribute the failure by fact instead of falling
-    back to guessing from the model name.
-
-    The usage argument carries whatever the upstream had already reported when
-    a stream broke. An aborted stream used to write an error row AND a usage
-    row, so one request counted as both a failure and a success; the token
-    totals stay accurate here without inflating the request count.
-
-    status stays the HTTP status code; outcome is the terminal state, so the
-    two never disagree about what the field means.
-    """
-    fields = _extract_usage(usage) or {}
-
 #: Upstream 14018 means the CodeBuddy account behind the key is out of credits.
 #: Nothing a retry can fix, and the English blob is easy to skim past, so say it
 #: in Chinese on the console and inside the message the client echoes.
@@ -756,14 +775,80 @@ def credit_exhausted(text):
             pass
     return any(marker in low for marker in CREDIT_EXHAUSTED_MARKERS)
 
+def read_http_error_body(exc, max_len=65536) -> str:
+    """Safely read and cache body from urllib.error.HTTPError, avoiding stream drain and truncation."""
+    if hasattr(exc, "_cached_body"):
+        cached = exc._cached_body
+        if isinstance(cached, bytes):
+            return cached.decode("utf-8", "replace")
+        return str(cached or "")
+    if not hasattr(exc, "read"):
+        return str(exc or "")
+    try:
+        raw = exc.read(max_len)
+        try:
+            exc._cached_body = raw
+        except Exception:
+            pass
+        if isinstance(raw, bytes):
+            return raw.decode("utf-8", "replace")
+        return str(raw or "")
+    except Exception:
+        return ""
+
+def extract_upstream_error_text(detail: str) -> str:
+    """Extract clean error message text from upstream response string/JSON."""
+    if not detail:
+        return ""
+    text = str(detail).strip()
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                def _pick_lang(val):
+                    if isinstance(val, dict):
+                        return str(val.get("zh") or val.get("zh-cn") or val.get("zh-hans") or val.get("en") or next(iter(val.values()), "")).strip()
+                    return str(val).strip() if val else ""
+
+                tip = _pick_lang(data.get("displayTips"))
+                disp = _pick_lang(data.get("displayMsg"))
+                if tip and disp and tip != disp:
+                    return f"{disp}：{tip}"
+                if tip:
+                    return tip
+                if disp:
+                    return disp
+
+                if data.get("message") and isinstance(data["message"], str):
+                    return data["message"].strip()
+                if isinstance(data.get("error"), dict) and data["error"].get("message"):
+                    return str(data["error"]["message"]).strip()
+                if isinstance(data.get("error"), str):
+                    return data["error"].strip()
+                if data.get("msg") and isinstance(data["msg"], str):
+                    return data["msg"].strip()
+                if data.get("error_description"):
+                    return str(data["error_description"]).strip()
+                if data.get("detail"):
+                    return str(data["detail"]).strip()
+        except Exception:
+            pass
+    return text
+
 def upstream_error_message(code, detail):
     """Passthrough error text, with the Chinese hint appended when credits are gone."""
-    msg = "upstream %s: %s" % (code, detail)
+    extracted = extract_upstream_error_text(detail)
+    msg = f"upstream {code}: {extracted}"
     if credit_exhausted(detail):
         msg += "  " + CREDIT_EXHAUSTED_HINT
     return msg
 
 
+def record_error(model, status, message, elapsed_ms=None, account=None,
+                 usage=None, stream=None, ttft_ms=None, gen_ms=None, fp=None,
+                 outcome="failed"):
+    """Record one failed request as exactly one JSONL row."""
+    fields = _extract_usage(usage) or {}
     row = {
         "at": time.time(),
         "iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -771,7 +856,7 @@ def upstream_error_message(code, detail):
         "error": True,
         "outcome": outcome,
         "status": status,
-        "message": str(message)[:200],
+        "message": str(message)[:2000],
         "elapsed_ms": elapsed_ms,
     }
     if stream is not None:
@@ -798,6 +883,140 @@ def upstream_error_message(code, detail):
     dur = f" {elapsed_ms:.0f}ms" if elapsed_ms is not None else ""
     log(f"request error: model={model}{dur} status={status} msg={str(message)[:180]}", level="ERROR", tag="chat")
     return row
+
+def localize_error_message(message: str, code: int = None) -> str:
+    """将英文报错信息本地化为标准中文提示，并保留原始英文以便排查溯源。
+
+    若信息已包含标准中文提示（如以【开头），则避免重复包装。
+    """
+    if not message:
+        return "未知错误"
+
+    msg_str = str(message).strip()
+
+    # 如果已经有详细的中文结构化提示（如【...】开头），直接返回
+    if msg_str.startswith("【"):
+        return msg_str
+
+    # 0. 规范化 upstream 报错前缀：提取 JSON 中的业务信息并生成标准结构
+    m_up = re.match(r"^upstream\s+(\d+)\s*:\s*(.*)$", msg_str, re.IGNORECASE | re.DOTALL)
+    if m_up:
+        up_code = int(m_up.group(1))
+        up_body = m_up.group(2).strip()
+        code = code or up_code
+        clean_text = extract_upstream_error_text(up_body)
+        if clean_text:
+            up_body = clean_text
+        if "14018" in up_body or credit_exhausted(up_body):
+            hint = "【额度已用完】上游账号配额已耗尽（错误码 14018 或额度不足）。重试无法恢复，需充值或等待额度周期重置。"
+            return f"{hint}（原始信息: {msg_str}）"
+        chinese_count = len(re.findall(r'[\u4e00-\u9fff]', up_body))
+        if chinese_count >= 4:
+            return f"【上游错误 {up_code}】{up_body}"
+        msg_str = f"upstream {up_code}: {up_body}"
+
+    msg_lower = msg_str.lower()
+
+    # 1. 账号池无可用账号 (503)
+    if "no usable account" in msg_lower:
+        m = re.search(r"realm '([^']+)'", msg_str, re.IGNORECASE)
+        realm = m.group(1) if m else ""
+        if realm == "cn":
+            realm_desc = "国内版 (cn)"
+        elif realm == "intl":
+            realm_desc = "国际版 (intl)"
+        elif realm:
+            realm_desc = f"区域 '{realm}'"
+        else:
+            realm_desc = "当前区域"
+
+        hint = (f"【账号池无可用账号】{realm_desc} 当前没有可用账号："
+                f"全部账号已禁用、处于失败冷却期、Token 已过期或达到每日 Token 限额。"
+                f"请访问控制台 (/) 检查账号状态、解除禁用或添加新账号。")
+        return f"{hint}（原始信息: {msg_str}）"
+
+    # 2. 每日限额已达到
+    if "reached today's token limit" in msg_lower or "daily token limit" in msg_lower:
+        hint = "【达到每日 Token 限额】所有可用账号均已达到今日 Token 配额上限；账号池将在今晚午夜（00:00）自动重置恢复。"
+        return f"{hint}（原始信息: {msg_str}）"
+
+    # 3. API Key 无效 (401)
+    if "invalid api key" in msg_lower:
+        hint = ("【API Key 无效】提供的 API Key 不正确或已失效。"
+                "请检查请求头 'Authorization: Bearer <key>'，或登录控制台 (/) 的「设置」页面复制正确的 API Key。")
+        return f"{hint}（原始信息: {msg_str}）"
+
+    # 4. 上游连接超时 / 不可达 / 网络错误 (502/504)
+    if any(k in msg_lower for k in ["upstream unreachable", "connection refused", "failed to establish a new connection", "timed out", "connect timeout", "temporary failure in name resolution"]):
+        hint = "【上游服务无法连接】无法连接到上游服务节点，请检查本机网络连通性、代理网络或上游服务可用性。"
+        return f"{hint}（原始信息: {msg_str}）"
+
+    # 5. 上游额度耗尽 (14018 / 额度不足)
+    if "14018" in msg_str or ("credit" in msg_lower and "exhausted" in msg_lower) or "额度不足" in msg_str or "积分不足" in msg_str:
+        hint = "【额度已用完】上游账号配额已耗尽（错误码 14018 或额度不足）。重试无法恢复，需充值或等待额度周期重置。"
+        return f"{hint}（原始信息: {msg_str}）"
+
+    # 6. 上游调用频率超限 / 429 限流
+    if any(k in msg_lower for k in ["rate limit", "frequency limit", "too many requests"]) or code == 429:
+        time_hint = ""
+        m_retry = re.search(r"retry in (\d+s?[^;)]*)", msg_str, re.IGNORECASE)
+        if m_retry:
+            time_hint = f"（建议在 {m_retry.group(1)} 后重试）"
+        hint = f"【调用频率超限/限流中】该模型已触发上游调用频率限制或并发配额{time_hint}，请等待冷却结束后重试。"
+        return f"{hint}（原始信息: {msg_str}）"
+
+    # 7. 内容合规风控拦截 (403)
+    if "content rejected" in msg_lower or "sensitive" in msg_lower:
+        hint = "【内容安全风控拦截】输入内容触发了上游安全合规审查拦截，请调整提示词后重试。"
+        return f"{hint}（原始信息: {msg_str}）"
+
+    # 8. 请求过长 (414 / BodyTooLarge)
+    if "request line too long" in msg_lower or "body too large" in msg_lower:
+        hint = "【请求过长】HTTP 请求超过代理最大长度限制，请缩短内容或将其放入 POST 请求体中。"
+        return f"{hint}（原始信息: {msg_str}）"
+
+    # 9. 连坐保护
+    if "upstream account restriction in effect" in msg_lower:
+        hint = "【账号风控保护中】同区域账号触发上游限制，为保护池内其他账号，整池暂时暂停派发，请稍后重试。"
+        return f"{hint}（原始信息: {msg_str}）"
+
+    # 10. Qoder 异常
+    if "qoder" in msg_lower and any(k in msg_lower for k in ["error", "exhausted", "no_available_account", "fail"]):
+        hint = "【Qoder 服务异常】Qoder 上游账号额度耗尽、接口报错或无可用账号，请在控制台检查 Qoder 账号绑定。"
+        return f"{hint}（原始信息: {msg_str}）"
+
+    # 11. Trae 异常
+    if "trae" in msg_lower and any(k in msg_lower for k in ["fail", "error", "exhausted"]):
+        hint = "【Trae 服务异常】Trae 上游调用失败或故障转移未配置。"
+        return f"{hint}（原始信息: {msg_str}）"
+
+    # 12. CodeArts 异常
+    if "codearts" in msg_lower and any(k in msg_lower for k in ["error", "fail", "unavailable"]):
+        hint = "【CodeArts 服务异常】CodeArts 上游调用失败或凭证失效，请检查 CodeArts 登录状态。"
+        return f"{hint}（原始信息: {msg_str}）"
+
+    # 13. 如果包含大量中文字符（> 30% 或 6个汉字以上），则无需额外添加通用前缀
+    chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', msg_str))
+    if chinese_chars >= 6 or (len(msg_str) > 0 and chinese_chars / len(msg_str) > 0.3):
+        return msg_str
+
+    # 14. 按常见 HTTP 状态码回退通用中文提示
+    code_hints = {
+        400: "【请求参数错误】客户端发送的请求格式或参数不合法。",
+        401: "【认证未通过】未提供有效的 API Key 或 Token 已过期。",
+        403: "【访问受限/禁止访问】上游服务或代理拒绝访问（权限不足或安全拦截）。",
+        404: "【资源或模型不存在】请求的模型或 API 路径不存在。",
+        429: "【请求过多/限流中】调用频率超出限制，请稍后重试。",
+        500: "【上游服务内部错误】上游服务处理时发生内部异常。",
+        502: "【网关错误】代理作为网关向上游请求失败或收到无效响应。",
+        503: "【服务不可用】当前无可用上游服务或账号可用，请检查服务状态。",
+        504: "【网关超时】向上游请求超时，请检查上游网络连接。",
+    }
+    if code in code_hints:
+        return f"{code_hints[code]}（原始信息: {msg_str}）"
+
+    return msg_str
+
 def _pct(values, q):
     """Nearest-rank percentile (no interpolation) - good enough for latency."""
     if not values:
@@ -3762,15 +3981,13 @@ def open_upstream(payload, session_key=None, target_realm=None):
         if session_key and AFFINITY_DEBUG:
             log("affinity: derived %s for %d msgs"
                 % (session_key, len(upstream_body.get("messages") or [])))
-    # PATCHED-BY-OPS: 额度不足改路由。上游说这个账号/模型没额度（14018 或
-    # 中文「额度不足」）时，把请求改到指定的 deepseek-v4.1-flash（cn 出口
-    # DeepSeek-V4.1-Flash-1017，x0.00）重发一次，而不是 Trae/Qoder，更不是
-    # step。目标先算好，等上游真的回「没额度」再用；已经在目标模型上时保持
-    # None（没有可改的对象）。换的只有模型名，账号、会话、采样参数都不动；
-    # 参数类 400 原样抛出。
+    # PATCHED-BY-OPS: 额度不足改路由。当上游明确返回「额度不足」时，
+    # 若为 WorkBuddy CN 的 deepseek-v4.1-flash（或其变体），且全池账号额度均耗尽，
+    # 自动无缝降级改路由至 space-bunny。
+    fallback_model = get_exhausted_route_model(model, realm)
     exhausted_payload = None
-    if str(payload.get("model") or "").strip().lower() != EXHAUSTED_ROUTE_MODEL:
-        exhausted_payload = dict(payload, model=EXHAUSTED_ROUTE_MODEL)
+    if fallback_model:
+        exhausted_payload = dict(payload, model=fallback_model)
         exhausted_payload.pop("reasoning_effort", None)
         exhausted_payload.pop("reasoningEffort", None)
     exhausted_tried = False
@@ -3826,10 +4043,7 @@ def open_upstream(payload, session_key=None, target_realm=None):
             return resp, account
         except urllib.error.HTTPError as exc:
             if exc.code == 429:
-                try:
-                    detail = exc.read(600).decode("utf-8", "replace")
-                except Exception:
-                    detail = ""
+                detail = read_http_error_body(exc)
                 reset_at = parse_rate_limit_reset(detail)
                 wait = max(1.0, reset_at - time.time()) if reset_at else 60.0
                 # Model-scoped: only this model is throttled for this account,
@@ -3856,10 +4070,7 @@ def open_upstream(payload, session_key=None, target_realm=None):
                 last_429_detail = detail
                 continue
             if exc.code == 403:
-                try:
-                    detail = exc.read(600).decode("utf-8", "replace")
-                except Exception:
-                    detail = ""
+                detail = read_http_error_body(exc)
                 # 风控限制 403 与内容审核 403 分流：前者是账号级的坏，换提示词
                 # 救不了。按社区复盘红线处理：冷却并持久化该号，默认停手，
                 # 不再把同一请求换到下一个号继续打（设备指纹会连坐）。
@@ -3886,28 +4097,36 @@ def open_upstream(payload, session_key=None, target_realm=None):
                 last_403_detail = detail
                 break
             if exc.code == 400:
-                try:
-                    detail = exc.read(600)
-                    detail = detail.decode("utf-8", "replace") if isinstance(detail, bytes) else str(detail)
-                except Exception:
-                    detail = ""
+                detail = read_http_error_body(exc)
                 # 只有「额度不足」才改路由：参数越界/上下文超限必须原样抛出，
                 # 换模型会把它伪装成一次成功的降级，客户端永远看不到真实原因。
-                if exhausted_tried or not exhausted_payload or not credit_exhausted(detail):
+                if not credit_exhausted(detail):
                     raise
-                exhausted_tried = True
-                log("account %s out of credit on '%s', rerouting to %s"
-                    % (account.uid[:8], model, EXHAUSTED_ROUTE_MODEL))
+                account.note_error("HTTP 400 (credit exhausted)", model=model, cooldown=1800)
                 if session_key and POOL:
                     POOL.affinity.unbind(session_key)
-                try:
-                    return open_upstream(exhausted_payload,
-                                         session_key=session_key,
-                                         target_realm=realm)
-                except Exception as reroute_exc:
-                    log("exhausted-route reroute failed: %s" % reroute_exc)
-                    last_error = reroute_exc
+                last_error = exc
+                remaining_candidates = [
+                    a for a in POOL.accounts
+                    if a.realm == realm and a.ready(model=model) and a.uid not in tried
+                ] if POOL else []
+                if remaining_candidates:
+                    log("account %s out of credit on '%s', rotating to next ready account in pool (%d remaining)"
+                        % (account.uid[:8], model, len(remaining_candidates)))
                     continue
+                if exhausted_payload and not exhausted_tried:
+                    exhausted_tried = True
+                    log("all accounts out of credit on '%s' in realm '%s', auto-rerouting to %s"
+                        % (model, realm, exhausted_payload.get("model")))
+                    try:
+                        return open_upstream(exhausted_payload,
+                                             session_key=session_key,
+                                             target_realm=realm)
+                    except Exception as reroute_exc:
+                        log("exhausted-route reroute failed: %s" % reroute_exc)
+                        last_error = reroute_exc
+                        continue
+                raise
             if exc.code == 401:
                 log("account %s rejected (HTTP 401), rotating" % account.uid[:8])
                 if session_key and POOL:
@@ -3967,6 +4186,17 @@ def open_upstream(payload, session_key=None, target_realm=None):
                   % wb_settings.daily_token_limit(ACCOUNTS_DIR))
         raise RateLimited(None, reason,
                           wait=seconds_until_local_midnight(), message=reason)
+    if exhausted_payload and POOL:
+        ready_for_fallback = [
+            a for a in POOL.accounts
+            if a.realm == realm and a.ready(model=exhausted_payload.get("model"))
+        ]
+        if ready_for_fallback:
+            log("no ready accounts for '%s' in realm '%s' (all cooling down/exhausted), auto-rerouting to %s"
+                % (model, realm, exhausted_payload.get("model")))
+            return open_upstream(exhausted_payload,
+                                 session_key=session_key,
+                                 target_realm=realm)
     raise RuntimeError(f"no usable account for realm '{realm}': all are disabled, "
                        f"cooling down, expired or parked by the daily token limit")
 def extract_session_key(headers, payload):
@@ -5749,7 +5979,12 @@ class Handler(BaseHTTPRequestHandler):
         # the drain below waits for data that will never arrive.
         self._handle_expect_continue()
         self._discard_body()
-        self._json(code, {"error": {"message": message, "type": err_type, "code": code}})
+        localized_message = localize_error_message(message, code=code)
+        try:
+            log(f"【错误响应 HTTP {code}】[{err_type}] {localized_message}", level="ERROR", tag="error")
+        except Exception:
+            pass
+        self._json(code, {"error": {"message": localized_message, "type": err_type, "code": code}})
     def _rate_limited(self, exc):
         """429 with Retry-After, so clients back off instead of hammering.
 
@@ -5789,9 +6024,15 @@ class Handler(BaseHTTPRequestHandler):
         # checked on the way in), so drain it exactly like _error does.
         self._handle_expect_continue()
         self._discard_body()
+        raw_msg = text + detail
+        localized_message = localize_error_message(raw_msg, code=429)
+        try:
+            log(f"【限流响应 HTTP 429】[rate_limit_error] {localized_message}", level="WARN", tag="rate_limit")
+        except Exception:
+            pass
         body = json.dumps({
             "error": {
-                "message": text + detail,
+                "message": localized_message,
                 "type": "rate_limit_error",
                 "code": 429,
                 "retry_after": wait,
@@ -5889,6 +6130,8 @@ class Handler(BaseHTTPRequestHandler):
         """
         if not realm or not model:
             return ""
+        if self._panel_ok():
+            return ""
         owner = exclusive_realm(model)
         if not owner or owner == realm:
             return ""
@@ -5925,16 +6168,23 @@ class Handler(BaseHTTPRequestHandler):
         """
         if explicit:
             return explicit
+        try:
+            q_realm = parse_qs(urlparse(self.path).query).get("realm", [None])[0]
+            if q_realm:
+                return q_realm
+        except Exception:
+            pass
+        if self._panel_ok():
+            header = self.headers.get("X-Realm")
+            if header:
+                return header
         bound = self._key_realm()
         if bound:
             return bound
         header = self.headers.get("X-Realm")
         if header:
             return header
-        try:
-            return parse_qs(urlparse(self.path).query).get("realm", [None])[0]
-        except Exception:
-            return None
+        return None
     def _authorized(self):
         if self._panel_ok() or self._key_ok():
             return True
@@ -5978,6 +6228,10 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/logs") or path.startswith("/trae"):
             return True
         if path.startswith("/qoder") and not path.startswith("/qoder/v1/"):
+            return True
+        if path.startswith("/codearts"):
+            return True
+        if path.startswith("/antigravity") or path.startswith("/ag/"):
             return True
         return False
     def do_OPTIONS(self):
@@ -6837,7 +7091,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"data": codearts_route.catalog_models()})
         if path == "/codearts/credits":
             if self.command == "GET":
-                return self._route_codearts_credits()
+                acct_id = query_or_payload.get("id") or query_or_payload.get("account_id") if isinstance(query_or_payload, dict) else None
+                force = False
+                if isinstance(query_or_payload, dict):
+                    f_val = query_or_payload.get("force")
+                    if isinstance(f_val, list) and f_val:
+                        f_val = f_val[0]
+                    force = str(f_val).lower() in ("1", "true", "yes")
+                return self._route_codearts_credits(acct_id, force=force)
         if path == "/codearts/oauth/start":
             port = getattr(getattr(self, "server", None), "server_port", 28999)
             info = codearts_oauth.start_oauth_login(port)
@@ -6848,13 +7109,35 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/codearts/oauth/refresh":
             try:
                 updated = codearts_oauth.refresh_sts_token()
+                cp = get_codearts_pool()
+                if cp:
+                    cp.load()
                 return self._json(200, {"ok": True, "account": updated.get("account", {}).get("label")})
             except Exception as exc:
                 return self._error(500, "Refresh failed: %s" % exc, "oauth_error")
         if path == "/codearts/accounts":
             if self.command == "GET":
                 cp = get_codearts_pool()
+                if cp:
+                    cp.sync_desktop_account()
                 return self._json(200, {"ok": True, "accounts": cp.public_view() if cp else []})
+        if path == "/codearts/accounts/scan_desktop":
+            if self.command == "POST":
+                cp = get_codearts_pool()
+                if not cp:
+                    return self._error(500, "CodeArts pool unavailable")
+                acct = cp.sync_desktop_account(force=True)
+                if not acct:
+                    return self._error(404, "未检测到本机 CodeArts Agent 桌面端登录凭据，或当前平台不支持 DPAPI 解密")
+                return self._json(200, {"ok": True, "account": acct.masked(), "accounts": cp.public_view()})
+        if path == "/codearts/accounts/set_all":
+            if self.command == "POST":
+                cp = get_codearts_pool()
+                if not cp:
+                    return self._error(500, "CodeArts pool unavailable")
+                enabled = bool(query_or_payload.get("enabled", True))
+                count = cp.set_all(enabled)
+                return self._json(200, {"ok": True, "count": count, "accounts": cp.public_view()})
         if path == "/codearts/accounts/set":
             if self.command == "POST":
                 cp = get_codearts_pool()
@@ -6889,11 +7172,111 @@ class Handler(BaseHTTPRequestHandler):
                 if not acct:
                     return self._error(404, "account not found")
                 try:
-                    codearts_oauth.refresh_sts_token_for_account(acct, proxy=acct.proxy)
-                    cp.save()
-                    return self._json(200, {"ok": True, "account": acct.masked()})
+                    if acct.source == "desktop":
+                        updated = cp.sync_desktop_account(force=True)
+                        return self._json(200, {"ok": True, "account": (updated or acct).masked()})
+                    else:
+                        codearts_oauth.refresh_sts_token_for_account(acct, proxy=acct.proxy)
+                        cp.save()
+                        return self._json(200, {"ok": True, "account": acct.masked()})
                 except Exception as exc:
                     return self._error(500, "Refresh failed: %s" % exc, "oauth_error")
+        if path == "/codearts/accounts/set_primary":
+            if self.command == "POST":
+                cp = get_codearts_pool()
+                if not cp:
+                    return self._error(500, "CodeArts pool unavailable")
+                account_id = str(query_or_payload.get("id") or query_or_payload.get("account_id") or "").strip()
+                if not account_id:
+                    return self._error(400, "account id required")
+                ok = cp.set_primary(account_id)
+                return self._json(200, {"ok": ok, "id": account_id, "accounts": cp.public_view()})
+        if path == "/codearts/accounts/test":
+            if self.command == "POST":
+                cp = get_codearts_pool()
+                if not cp:
+                    return self._error(500, "CodeArts pool unavailable")
+                account_id = str(query_or_payload.get("id") or query_or_payload.get("account_id") or "").strip()
+                acct = cp.get(account_id) if account_id else (cp.accounts[0] if cp.accounts else None)
+                if not acct:
+                    return self._error(404, "account not found")
+                test_model = str(query_or_payload.get("model") or "codearts-openpangu-2.0-flash").strip()
+                t0 = time.time()
+                try:
+                    from codearts import codearts_route
+                    sess = acct.to_session()
+                    reply = codearts_route.complete(
+                        payload={
+                            "model": test_model,
+                            "messages": [{"role": "user", "content": "你好，请回复OK"}],
+                            "max_tokens": 64,
+                        },
+                        session=sess,
+                        timeout=25,
+                        proxy=acct.proxy,
+                    )
+                    elapsed_ms = int((time.time() - t0) * 1000)
+                    reply_text = ""
+                    choices = reply.get("choices") if isinstance(reply, dict) else []
+                    if choices:
+                        msg = choices[0].get("message") or {}
+                        reply_text = str(msg.get("content") or msg.get("reasoning_content") or "OK").strip()
+                    if len(reply_text) > 80:
+                        reply_text = reply_text[:77] + "..."
+                    acct.cooldown_until = 0
+                    return self._json(200, {
+                        "ok": True,
+                        "id": acct.id,
+                        "label": acct.label,
+                        "model": test_model,
+                        "elapsed_ms": elapsed_ms,
+                        "reply": reply_text or "测试成功",
+                    })
+                except Exception as exc:
+                    elapsed_ms = int((time.time() - t0) * 1000)
+                    return self._json(200, {
+                        "ok": False,
+                        "id": acct.id,
+                        "label": acct.label,
+                        "model": test_model,
+                        "elapsed_ms": elapsed_ms,
+                        "error": str(exc),
+                    })
+        if path == "/codearts/accounts/checkin":
+            if self.command == "POST":
+                cp = get_codearts_pool()
+                if not cp:
+                    return self._error(500, "CodeArts pool unavailable")
+                payload = query_or_payload if isinstance(query_or_payload, dict) else {}
+                account_id = str(payload.get("id") or payload.get("account_id") or "").strip()
+                if account_id:
+                    res = cp.checkin_account(account_id)
+                    return self._json(200, res)
+                else:
+                    res = cp.checkin_all()
+                    return self._json(200, res)
+        if path == "/codearts/accounts/welfare":
+            if self.command in ("GET", "POST"):
+                cp = get_codearts_pool()
+                if not cp:
+                    return self._error(500, "CodeArts pool unavailable")
+                payload = query_or_payload if isinstance(query_or_payload, dict) else {}
+                account_id = str(payload.get("id") or payload.get("account_id") or "").strip()
+                acct = cp.get(account_id) if account_id else (cp.accounts[0] if cp.accounts else None)
+                if not acct:
+                    try:
+                        from codearts import codearts_session as cas
+                        from codearts import codearts_client as cac
+                        sess = cas.load_session()
+                        welfare = cac.fetch_welfare_delivery(sess)
+                        return self._json(200, {"ok": True, "account": {"label": getattr(sess, "account_label", "default")}, "welfare": welfare})
+                    except Exception as exc:
+                        return self._error(404, f"account not found and fallback failed: {exc}")
+                try:
+                    welfare = acct.get_welfare_delivery()
+                    return self._json(200, {"ok": True, "account": acct.masked(), "welfare": welfare})
+                except Exception as exc:
+                    return self._error(500, f"获取福利列表失败: {exc}")
         return self._error(404, "not found", "invalid_request_error")
 
     def _handle_oauth_callback(self, query):
@@ -6909,37 +7292,96 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _route_codearts_status(self):
-        try:
-            session = codearts_route.load_session()
-        except Exception as exc:
-            return self._json(200, {
-                "ok": False,
-                "state": "unavailable",
-                "message": str(exc),
-                "hint": "Open CodeArts Agent, sign in, then reload.",
-            })
+        cp = get_codearts_pool()
+        session = None
+        if cp and cp.accounts:
+            for a in cp.accounts:
+                if a.is_available():
+                    session = a.to_session()
+                    break
+            if session is None and cp.accounts:
+                session = cp.accounts[0].to_session()
+
+        if session is None:
+            try:
+                session = codearts_route.load_session()
+            except Exception as exc:
+                return self._json(200, {
+                    "ok": False,
+                    "state": "unavailable",
+                    "message": str(exc),
+                    "total_accounts": len(cp.accounts) if cp else 0,
+                    "hint": "Open CodeArts Agent, sign in, then reload.",
+                })
         expired = codearts_route.is_expired(session)
         payload = session.masked()
         payload.update({
             "ok": not expired,
             "state": "expired" if expired else "ready",
+            "total_accounts": len(cp.accounts) if cp else 1,
+            "enabled_accounts": len([a for a in cp.accounts if a.enabled]) if cp else 1,
             "message": ("STS expired - reopen CodeArts Agent to renew"
                         if expired else "credentials ready"),
         })
         return self._json(200, payload)
 
-    def _route_codearts_credits(self):
-        try:
-            session = codearts_route.load_session()
-        except Exception as exc:
-            return self._error(502, "CodeArts login unavailable: %s" % exc,
-                               "credentials_error")
+    def _route_codearts_credits(self, account_id=None, force=False):
+        cp = get_codearts_pool()
+        session = None
+        if cp and cp.accounts:
+            if account_id:
+                acct = cp.get(account_id)
+                if acct:
+                    session = acct.to_session()
+            if session is None:
+                for a in cp.accounts:
+                    if a.is_available():
+                        session = a.to_session()
+                        break
+                if session is None and cp.accounts:
+                    session = cp.accounts[0].to_session()
+
+        if session is None:
+            try:
+                session = codearts_route.load_session()
+            except Exception as exc:
+                return self._json(200, {
+                    "ok": False,
+                    "error": "CodeArts login unavailable: %s" % exc,
+                    "metrics": []
+                })
+        if codearts_route.is_expired(session):
+            return self._json(200, {
+                "ok": False,
+                "error": "CodeArts STS expired - please sign in or refresh token",
+                "metrics": []
+            })
         try:
             data = codearts_route.fetch_credits(session)
         except Exception as exc:
             status, body = codearts_route.error_payload(exc)
-            return self._json(status, body)
-        return self._json(200, data or {})
+            err_msg = ""
+            if isinstance(body, dict) and "error" in body:
+                err_msg = body["error"].get("message") or ""
+            return self._json(200, {
+                "ok": False,
+                "error": err_msg or str(exc),
+                "metrics": []
+            })
+        if not isinstance(data, dict):
+            data = {}
+        if cp and not account_id:
+            try:
+                pool_summary = cp.fetch_all_credits(force=force)
+                data["pool_summary"] = pool_summary
+                data["total_remain"] = pool_summary.get("total_remain")
+                data["total_amount"] = pool_summary.get("total_amount")
+                data["total_used"] = pool_summary.get("total_used")
+                data["percent_remain"] = pool_summary.get("percent_remain")
+                data["accounts_credits"] = pool_summary.get("accounts")
+            except Exception as exc:
+                logger.warning("Failed to aggregate CodeArts pool credits: %s", exc)
+        return self._json(200, data)
 
     def _handle_qoder(self, path, query_or_payload):
         """Qoder management endpoints."""
@@ -6967,7 +7409,7 @@ class Handler(BaseHTTPRequestHandler):
                 if isinstance(query_or_payload, dict):
                     login_id = query_or_payload.get("login_id", [""])[0] if isinstance(query_or_payload.get("login_id"), list) else query_or_payload.get("login_id", "")
                 return self._route_qoder_oauth_poll(login_id)
-        if path == "/qoder/checkin":
+        if path in ("/qoder/checkin", "/qoder/checkin/single"):
             if self.command == "POST":
                 return self._route_qoder_checkin(query_or_payload)
         if path in ("/qoder/account/set", "/qoder/accounts/set", "/qoder/enabled"):
@@ -6996,7 +7438,7 @@ class Handler(BaseHTTPRequestHandler):
                     except: pass
                     try: page = int(p)
                     except: pass
-                return self._route_qoder_usage_recent(limit, page)
+                return self._route_qoder_usage_recent(limit, page, self._request_realm() or "")
         return self._error(404, "unknown qoder endpoint", "invalid_request_error")
 
     def _route_qoder_accounts_list(self):
@@ -7004,10 +7446,11 @@ class Handler(BaseHTTPRequestHandler):
             import qoder_accounts
             import qoder_route
             from dataclasses import asdict
+            realm = self._request_realm() or ""
             p = qoder_route.get_pool()
             slots_by_id = {s.id: s for s in p.snapshot()}
             accts = []
-            for a in qoder_accounts.list_accounts():
+            for a in qoder_accounts.list_accounts(region=realm):
                 d = asdict(a)
                 s = slots_by_id.get(a.id)
                 if s:
@@ -7021,7 +7464,7 @@ class Handler(BaseHTTPRequestHandler):
                     d["flash_free_exhausted"] = False
                     d["flash_free_reset_at"] = 0.0
                 accts.append(d)
-            return self._json(200, {"ok": True, "accounts": accts})
+            return self._json(200, {"ok": True, "accounts": accts, "realm": realm})
         except Exception as e:
             return self._error(500, "qoder accounts list failed: %s" % e)
 
@@ -7056,15 +7499,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def _route_qoder_models(self):
         try:
-            models = qoder_route.qoder_models()
-            return self._json(200, {"ok": True, "models": models})
+            realm = self._request_realm() or ""
+            models = qoder_route.qoder_models(realm=realm)
+            return self._json(200, {"ok": True, "models": models, "realm": realm})
         except Exception as e:
             return self._error(500, "qoder models failed: %s" % e)
 
     def _get_qoder_v1_models(self):
         """OpenAI-shaped model list for the /qoder/v1 surface."""
         try:
-            models = qoder_route.qoder_models()
+            realm = self._request_realm() or ""
+            models = qoder_route.qoder_models(realm=realm)
         except Exception:
             models = []
         return self._json(200, {"object": "list", "data": models})
@@ -7072,8 +7517,9 @@ class Handler(BaseHTTPRequestHandler):
     def _route_qoder_quota(self):
         try:
             import qoder_accounts
+            realm = self._request_realm() or ""
             results = []
-            for acct in qoder_accounts.list_accounts():
+            for acct in qoder_accounts.list_accounts(region=realm):
                 uid = acct.id
                 if not uid:
                     continue
@@ -7090,7 +7536,7 @@ class Handler(BaseHTTPRequestHandler):
                         "addon_remaining": quota.addon_quota.remaining if quota.addon_quota else 0,
                         "addon_total": quota.addon_quota.total if quota.addon_quota else 0,
                     }})
-            return self._json(200, {"ok": True, "quotas": results})
+            return self._json(200, {"ok": True, "quotas": results, "realm": realm})
         except Exception as e:
             return self._error(500, "qoder quota failed: %s" % e)
 
@@ -7099,24 +7545,28 @@ class Handler(BaseHTTPRequestHandler):
             import qoder_checkin
             from dataclasses import asdict
             aid = None
+            realm = ""
             if isinstance(payload, dict):
                 aid = payload.get("account_id") or payload.get("id") or payload.get("uid")
+                realm = str(payload.get("realm") or payload.get("region") or "")
+            realm = realm or (self._request_realm() or "")
             if aid:
                 # qoder_checkin exposes checkin_one/checkin_all; there is no
                 # do_checkin. Serialise the whole result so the dashboard can
                 # show the credited amount and streak, not just status text.
                 results = [asdict(qoder_checkin.checkin_one(str(aid)))]
             else:
-                results = [asdict(r) for r in qoder_checkin.checkin_all()]
-            return self._json(200, {"ok": True, "results": results})
+                results = [asdict(r) for r in qoder_checkin.checkin_all(region=realm)]
+            return self._json(200, {"ok": True, "results": results, "realm": realm})
         except Exception as e:
             return self._error(500, "qoder checkin failed: %s" % e)
 
     def _route_qoder_pool(self):
         try:
+            realm = self._request_realm() or ""
             p = qoder_route.get_pool()
             slots = []
-            for s in p.snapshot():
+            for s in p.snapshot(realm=realm):
                 slots.append({
                     "id": s.id,
                     "name": getattr(s, "name", s.id),
@@ -7128,13 +7578,14 @@ class Handler(BaseHTTPRequestHandler):
                     "flash_free_exhausted": getattr(s, "flash_free_exhausted", False),
                     "flash_free_reset_at": getattr(s, "flash_free_reset_at", 0.0),
                 })
-            return self._json(200, {"ok": True, "slots": slots})
+            return self._json(200, {"ok": True, "slots": slots, "realm": realm})
         except Exception as e:
             return self._error(500, "qoder pool failed: %s" % e)
 
     def _route_qoder_usage(self):
         try:
-            snap = qoder_route.qoder_usage_snapshot()
+            realm = self._request_realm() or ""
+            snap = qoder_route.qoder_usage_snapshot(realm=realm)
             accounts_map = {}
             try:
                 import qoder_accounts
@@ -7143,13 +7594,14 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             snap["accounts_map"] = accounts_map
+            snap["realm"] = realm
             return self._json(200, snap)
         except Exception as e:
             return self._error(500, "qoder usage failed: %s" % e)
 
-    def _route_qoder_usage_recent(self, limit, page):
+    def _route_qoder_usage_recent(self, limit, page, realm=""):
         try:
-            data = qoder_route.recent_qoder_usage(limit, page)
+            data = qoder_route.recent_qoder_usage(limit, page, realm=realm)
             accounts_map = {}
             try:
                 import qoder_accounts
@@ -7158,6 +7610,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             data["accounts_map"] = accounts_map
+            data["realm"] = realm
             return self._json(200, data)
         except Exception as e:
             return self._error(500, "qoder usage recent failed: %s" % e)
@@ -7165,20 +7618,28 @@ class Handler(BaseHTTPRequestHandler):
     def _route_qoder_oauth_start(self, payload):
         try:
             import qoder_accounts
-            region = "global"
+            import qoder_pool
+            region = ""
             if isinstance(payload, dict):
-                region = payload.get("region", "global")
-            sess = qoder_accounts.start_login(region)
+                region = payload.get("region") or payload.get("realm") or ""
+            if not region:
+                region = self._request_realm() or "global"
+            norm_region = qoder_pool.normalize_realm(region) or "global"
+            sess = qoder_accounts.start_login(norm_region)
             return self._json(200, {"login_id": sess.login_id,
-                                    "login_url": sess.login_url})
+                                    "login_url": sess.login_url,
+                                    "region": norm_region})
         except Exception as e:
             return self._error(500, "qoder oauth start failed: %s" % e)
 
     def _route_qoder_oauth_poll(self, login_id):
         try:
             import qoder_accounts
+            import qoder_route
             from dataclasses import asdict
             status, acct = qoder_accounts.poll_login(login_id, "")
+            if status == "ok" and acct:
+                qoder_route.reload_pool()
             return self._json(200, {"status": status,
                                     "account": asdict(acct) if acct else None})
         except Exception as e:
@@ -7792,7 +8253,7 @@ class Handler(BaseHTTPRequestHandler):
                 })
         except urllib.error.HTTPError as exc:
             wall_ms = int((time.time() - t0) * 1000)
-            detail = exc.read(400).decode("utf-8", "replace")
+            detail = read_http_error_body(exc)
             account.note_error(f"HTTP {exc.code}: {detail[:80]}", cooldown=60)
             log(f"account test: uid={account.uid[:8]} model={test_model} wall={wall_ms}ms error={exc.code}", level="WARN", tag="accounts")
             return self._json(200, {
@@ -7965,7 +8426,7 @@ class Handler(BaseHTTPRequestHandler):
                          account=getattr(exc, "account_uid", None))
             return self._rate_limited(exc)
         except urllib.error.HTTPError as exc:
-            detail = exc.read(600).decode("utf-8", "replace")
+            detail = read_http_error_body(exc)
             record_error(model, exc.code, detail,
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None))
@@ -8468,7 +8929,7 @@ class Handler(BaseHTTPRequestHandler):
             # --- 原 Trae/Qoder 自动降级逻辑注释结束 ---
             return self._rate_limited(exc)
         except urllib.error.HTTPError as exc:
-            detail = exc.read(600).decode("utf-8", "replace")
+            detail = read_http_error_body(exc)
             record_error(model, exc.code, detail,
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None))
@@ -8533,9 +8994,9 @@ class Handler(BaseHTTPRequestHandler):
         import qoder_claude
         want_stream = bool(payload.get("stream"))
         model = payload.get("model") or "auto"
+        realm = self._request_realm(payload.get("realm")) or ""
         t_start = time.time()
-        log("qoder-claude: model=%s stream=%s" % (model, want_stream))
-
+        log("qoder-claude: model=%s stream=%s realm=%s" % (model, want_stream, realm or "default"))
         if want_stream:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -8551,7 +9012,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
 
             try:
-                status, body = qoder_claude.call_qoder_claude(payload, on_event=on_event)
+                status, body = qoder_claude.call_qoder_claude(payload, on_event=on_event, realm=realm)
                 if status != 200:
                     log("qoder-claude: stream error status=%s" % status)
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
@@ -8570,7 +9031,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            status, body = qoder_claude.call_qoder_claude(payload, on_event=None)
+            status, body = qoder_claude.call_qoder_claude(payload, on_event=None, realm=realm)
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             if cors_origin_allowed(self.path):
@@ -8586,9 +9047,9 @@ class Handler(BaseHTTPRequestHandler):
         import qoder_codex
         want_stream = bool(payload.get("stream"))
         model = payload.get("model") or "auto"
+        realm = self._request_realm(payload.get("realm")) or ""
         t_start = time.time()
-        log("qoder-codex: model=%s stream=%s" % (model, want_stream))
-
+        log("qoder-codex: model=%s stream=%s realm=%s" % (model, want_stream, realm or "default"))
         if want_stream:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -8604,7 +9065,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
 
             try:
-                status, body = qoder_codex.call_qoder_codex(payload, on_event=on_event)
+                status, body = qoder_codex.call_qoder_codex(payload, on_event=on_event, realm=realm)
                 if status != 200:
                     log("qoder-codex: stream error status=%s" % status)
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
@@ -8623,7 +9084,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            status, body = qoder_codex.call_qoder_codex(payload, on_event=None)
+            status, body = qoder_codex.call_qoder_codex(payload, on_event=None, realm=realm)
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             if cors_origin_allowed(self.path):
@@ -8648,9 +9109,12 @@ class Handler(BaseHTTPRequestHandler):
         except ContentRejected as exc:
             return self._error(403, "upstream 403: %s" % (exc.detail or "content rejected"), "invalid_request_error")
         except urllib.error.HTTPError as exc:
-            detail = exc.read(600).decode("utf-8", "replace") if hasattr(exc, "read") else str(exc)
+            detail = read_http_error_body(exc)
             return self._error(exc.code, upstream_error_message(exc.code, detail))
         except Exception as exc:
+            message = str(exc)
+            if message.startswith("no usable account"):
+                return self._error(503, message + " - add or enable one at the dashboard (/)")
             return self._error(502, f"WorkBuddy CN upstream error after fallback: {exc}")
 
         try:
@@ -8673,9 +9137,9 @@ class Handler(BaseHTTPRequestHandler):
         """
         want_stream = bool(payload.get("stream"))
         orig_model = payload.get("model") or "DeepSeek-Flash"
+        realm = self._request_realm(payload.get("realm")) or ""
         t_start = time.time()
-        log("qoder: routing model=%s stream=%s" % (orig_model, want_stream))
-
+        log("qoder: routing model=%s stream=%s realm=%s" % (orig_model, want_stream, realm or "default"))
         is_ds = _is_qoder_deepseek(orig_model)
         is_qwen = _is_qoder_qwen_flash(orig_model)
         if is_ds:
@@ -8711,7 +9175,7 @@ class Handler(BaseHTTPRequestHandler):
             for idx, cand_model in enumerate(qoder_candidates):
                 cur_payload = dict(payload, model=cand_model)
                 try:
-                    status, body = qoder_route.call_qoder(cur_payload, on_delta=on_delta)
+                    status, body = qoder_route.call_qoder(cur_payload, on_delta=on_delta, realm=realm)
                 except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                     log("qoder: client disconnected during stream")
                     return
@@ -8733,7 +9197,7 @@ class Handler(BaseHTTPRequestHandler):
                             "created": int(time.time()),
                             "model": cand_model,
                             "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
-                            "error": {"message": str(err_detail)[:500],
+                            "error": {"message": str(err_detail),
                                       "type": "upstream_error"},
                         }
                         self.wfile.write(("data: " + json.dumps(err_chunk) + "\n\n").encode("utf-8"))
@@ -8762,7 +9226,7 @@ class Handler(BaseHTTPRequestHandler):
         for idx, cand_model in enumerate(qoder_candidates):
             cur_payload = dict(payload, model=cand_model)
             try:
-                status, body = qoder_route.call_qoder(cur_payload, on_delta=None)
+                status, body = qoder_route.call_qoder(cur_payload, on_delta=None, realm=realm)
             except Exception as exc:
                 log("qoder: non-stream error on model=%s: %s" % (cand_model, exc))
                 status, body = 502, "qoder upstream error: %s" % exc
@@ -8790,13 +9254,14 @@ class Handler(BaseHTTPRequestHandler):
                     return self._fallback_to_workbuddy_cn(payload, want_stream=False, t_start=t_start, wb_model=wb_fallback_model)
 
             # Not an exhaustion error or no fallback: return HTTP error
-            self.send_response(status if status else 500)
-            self.send_header("Content-Type", "application/json")
-            if cors_origin_allowed(self.path):
-                self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write((body or "").encode("utf-8"))
-            return
+            err_msg = body or ""
+            try:
+                parsed = json.loads(body)
+                if isinstance(parsed, dict) and "error" in parsed and isinstance(parsed["error"], dict):
+                    err_msg = parsed["error"].get("message", body)
+            except Exception:
+                pass
+            return self._error(status if status else 500, upstream_error_message(status, err_msg))
     def _route_to_codearts(self, payload):
         """Route a codearts-* request straight to the CodeArts (Snap) upstream.
 
@@ -8839,7 +9304,9 @@ class Handler(BaseHTTPRequestHandler):
                         elif status == 403:
                             cp.mark_restricted(account.id, 7200.0, str(exc))
                     log("codearts: stream setup failed: %s" % exc)
-                    return self._json(status, body)
+                    msg = body.get("error", {}).get("message", str(exc)) if isinstance(body, dict) else str(exc)
+                    kind = body.get("error", {}).get("type", "upstream_error") if isinstance(body, dict) else "upstream_error"
+                    return self._error(status, msg, err_type=kind)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream; charset=utf-8")
                 self.send_header("Cache-Control", "no-cache")
@@ -8889,7 +9356,9 @@ class Handler(BaseHTTPRequestHandler):
                     elif status == 403:
                         cp.mark_restricted(account.id, 7200.0, str(exc))
                 log("codearts: upstream error %s: %s" % (status, exc))
-                return self._json(status, body)
+                msg = body.get("error", {}).get("message", str(exc)) if isinstance(body, dict) else str(exc)
+                kind = body.get("error", {}).get("type", "upstream_error") if isinstance(body, dict) else "upstream_error"
+                return self._error(status, msg, err_type=kind)
             except Exception as exc:
                 log("codearts: unexpected error: %s" % exc)
                 return self._error(502, "CodeArts upstream error: %s" % exc)
@@ -9193,6 +9662,11 @@ def _bootstrap_runtime(args):
     from wb_scheduler import Scheduler
     SCHEDULER = Scheduler(POOL)
     SCHEDULER.start()
+    try:
+        import qoder_checkin
+        qoder_checkin.start_checkin_scheduler()
+    except Exception as exc:
+        log("could not start qoder checkin scheduler: %s" % exc)
     return api_key_generated
 
 def _report_first_run(args):
