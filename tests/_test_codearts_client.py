@@ -161,5 +161,28 @@ class StreamOnlyTests(unittest.TestCase):
         self.assertIn("glm-5.3", client.STREAM_ONLY_MODELS)
 
 
+class RegionHostTests(unittest.TestCase):
+    """国内/海外是两个不同上游主机；站点跟凭据走，混用会打到错误站点。"""
+
+    def test_cn_session_hits_cn_north_4(self):
+        self.assertEqual(
+            client.chat_host(session()),
+            "https://snap-access.cn-north-4.myhuaweicloud.com")
+
+    def test_intl_session_hits_ap_southeast_1(self):
+        intl = session()
+        intl.region = "intl"
+        self.assertEqual(
+            client.chat_host(intl),
+            "https://snap-access.ap-southeast-1.myhuaweicloud.com")
+
+    def test_unknown_region_falls_back_to_cn(self):
+        odd = session()
+        odd.region = "us-east-9"
+        self.assertEqual(client.normalize_region(odd.region), "cn")
+        self.assertEqual(client.chat_host(odd),
+                         "https://snap-access.cn-north-4.myhuaweicloud.com")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -39,12 +39,28 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(HERE)
 DEFAULT_ACCOUNT_PATH = os.path.join(PROJECT_ROOT, "accounts", "codearts_account.json")
 
-PORTAL_HOST = "https://codearts.huaweicloud.com/portal"
+# 站点 → 授权门户。官方扩展 getPortalHost() 就是按 scenario 在这两个之间切换：
+#   国内 https://codearts.huaweicloud.com/portal
+#   海外 https://codearts.ap-southeast-1.huaweicloud.com/portal
+PORTAL_HOSTS = {
+    "cn": "https://codearts.huaweicloud.com/portal",
+    "intl": "https://codearts.ap-southeast-1.huaweicloud.com/portal",
+}
+# STS 两个站点共用同一个全局端点 —— 官方扩展的 iamStsHost 也是写死 cn-north-4。
 IAM_STS_HOST = "https://sts.cn-north-4.myhuaweicloud.com"
+PORTAL_HOST = PORTAL_HOSTS["cn"]
+# 授权页语言跟着站点走，海外站用 en-us 才会出英文登录页。
+LOCALES = {"cn": "zh-cn", "intl": "en-us"}
 IAM_TOKEN_PATH = "/v1/oauth2/tokens"
 AUTH_REDIRECT_PATH = "/oauth/callback"
 CLIENT_ID = "codearts-agent"
 CODE_CHALLENGE_METHOD = "SHA-256"
+
+
+def normalize_region(region: str) -> str:
+    """只认 ``cn`` / ``intl``；未知值按国内站处理。"""
+    text = str(region or "").strip().lower()
+    return text if text in PORTAL_HOSTS else "cn"
 
 
 def b64url_encode(data: bytes) -> str:
@@ -77,22 +93,33 @@ def generate_pkce() -> Tuple[str, str]:
     return verifier, challenge
 
 
-def build_authorize_url(port: int, challenge: str) -> str:
+def build_authorize_url(port: int, challenge: str, region: str = "cn",
+                        prompt_login: bool = True) -> str:
     """拼接华为云 CodeArts Agent 官方授权页面 URL。
 
-    回调直接引导浏览器访问本项目的运行端口：
-    http://127.0.0.1:{port}/oauth/callback?code=...
+    ``region`` 决定门户域名（国内 / 海外 ap-southeast-1）；回调始终是
+    http://127.0.0.1:{port}/oauth/callback?code=...，由本机网关接收。
+
+    ``prompt=login`` 是标准 OIDC 参数，要求门户忽略既有登录态、重新认证。
+    网页端无法跨域删除 codearts.huaweicloud.com 的 Cookie，这是「在同一个
+    浏览器里换账号登录」唯一可行的做法；门户若忽略该参数也无副作用。
+    需要恢复旧行为时设 ``CODEARTS_FORCE_RELOGIN=0``。
     """
+    if os.environ.get("CODEARTS_FORCE_RELOGIN", "1") == "0":
+        prompt_login = False
+    site = normalize_region(region)
     params = {
         "theme": "2",
-        "locale": "zh-cn",
+        "locale": LOCALES[site],
         "uri_scheme": CLIENT_ID,
         "client_id": CLIENT_ID,
         "port": str(port),
         "code_challenge": challenge,
         "code_challenge_method": CODE_CHALLENGE_METHOD,
     }
-    return f"{PORTAL_HOST}/authorize?{urllib.parse.urlencode(params)}"
+    if prompt_login:
+        params["prompt"] = "login"
+    return f"{PORTAL_HOSTS[site]}/authorize?{urllib.parse.urlencode(params)}"
 
 
 # ==============================================================================
@@ -197,6 +224,25 @@ def create_dpop_proof(dpop_key_pair: Dict[str, Any], htm: str, htu: str) -> str:
 # ==============================================================================
 # 3. 内存中待处理的 OAuth 握手上下文管理
 # ==============================================================================
+def _close_stale_browsers(entries: List[Dict[str, Any]]) -> None:
+    """关闭被超时丢弃的登录所留下的隔离浏览器与 profile。"""
+    if not entries:
+        return
+    try:
+        import codearts_browser
+    except ImportError:
+        try:
+            from codearts import codearts_browser
+        except ImportError:
+            return
+    for entry in entries:
+        profile = entry.get("profile") or ""
+        if not profile:
+            continue
+        try:
+            codearts_browser.cleanup_profile(profile, entry.get("process"))
+        except Exception:
+            pass
 
 class _PendingOAuthManager:
     """管理并发起或等待回调的 OAuth 状态。"""
@@ -207,16 +253,19 @@ class _PendingOAuthManager:
         self._latest_state: Optional[str] = None
         self._last_result: Optional[Dict[str, Any]] = None
 
-    def start_login(self, port: int) -> Dict[str, Any]:
+    def start_login(self, port: int, region: str = "cn", embed: bool = False) -> Dict[str, Any]:
+        site = normalize_region(region)
         with self._lock:
-            # 清理超过 10 分钟的历史状态
+            # 清理超过 10 分钟的历史状态；被丢弃的登录若已开了隔离浏览器，
+            # 一并关掉并删 profile，避免用户放弃登录后留下浏览器窗口。
             now = time.time()
+            stale = [v for v in self._pending.values() if now - v["created_at"] >= 600]
             self._pending = {k: v for k, v in self._pending.items() if now - v["created_at"] < 600}
 
             verifier, challenge = generate_pkce()
             dpop_pair = generate_dpop_key_pair()
             state = secrets.token_hex(16)
-            login_url = build_authorize_url(port, challenge)
+            login_url = build_authorize_url(port, challenge, region=site)
 
             entry = {
                 "state": state,
@@ -225,16 +274,66 @@ class _PendingOAuthManager:
                 "dpop_pair": dpop_pair,
                 "port": port,
                 "created_at": now,
+                "region": site,
+                "profile": "",
+                "process": None,
             }
             self._pending[state] = entry
             self._latest_state = state
             self._last_result = {"status": "pending", "state": state}
 
-            return {
+            result = {
                 "login_url": login_url,
                 "state": state,
                 "port": port,
+                "region": site,
+                "embedded": bool(embed),
+                "browser": "",
+                "browser_launched": False,
+                "browser_error": "",
             }
+
+        if stale:
+            _close_stale_browsers(stale)
+
+        # embed=True：授权页由看板内嵌 iframe 承载，网关不再另起浏览器窗口。
+        if embed:
+            return result
+        # 否则用**独立浏览器 profile** 打开：默认浏览器已经带着华为云 Cookie，
+        # 授权页会自动用旧账号完成授权，登录不到新账号。找不到浏览器时退回让
+        # 看板自己打开 URL。
+        if os.environ.get("CODEARTS_NO_BROWSER") == "1":
+            result["browser_error"] = "已通过 CODEARTS_NO_BROWSER=1 禁用自动启动浏览器"
+            return result
+        try:
+            import codearts_browser
+        except ImportError:
+            from codearts import codearts_browser
+        launched = codearts_browser.launch(login_url)
+        with self._lock:
+            pending = self._pending.get(state)
+            if pending is not None:
+                pending["profile"] = launched.get("profile") or ""
+                pending["process"] = launched.get("process")
+        result["browser"] = launched.get("browser") or ""
+        result["browser_launched"] = bool(launched.get("ok"))
+        result["browser_error"] = launched.get("error") or ""
+        return result
+
+    def drop_profile(self, state: Optional[str] = None) -> bool:
+        """关闭隔离浏览器并删除一次性 profile（延迟执行，等结果页渲染）。"""
+        with self._lock:
+            entry = None
+            if state and state in self._pending:
+                entry = self._pending[state]
+            elif self._latest_state and self._latest_state in self._pending:
+                entry = self._pending[self._latest_state]
+            profile = (entry or {}).get("profile") or ""
+            proc = (entry or {}).get("process")
+        if not profile:
+            return False
+        _schedule_profile_cleanup(profile, proc)
+        return True
 
     def pop_pending(self, state: Optional[str] = None) -> Optional[Dict[str, Any]]:
         with self._lock:
@@ -262,9 +361,13 @@ class _PendingOAuthManager:
 _OAUTH_MGR = _PendingOAuthManager()
 
 
-def start_oauth_login(port: int) -> Dict[str, Any]:
-    """启动 OAuth 登录流程，返回供前端调用的登录 URL 及相关参数。"""
-    return _OAUTH_MGR.start_login(port)
+def start_oauth_login(port: int, region: str = "cn", embed: bool = False) -> Dict[str, Any]:
+    """启动 OAuth 登录流程，返回供前端调用的登录 URL 及相关参数。
+
+    ``region``：``cn`` 国内站 / ``intl`` 海外站（ap-southeast-1）。
+    ``embed``：True 时只返回 URL，由看板内嵌 iframe 承载授权页，不另起浏览器。
+    """
+    return _OAUTH_MGR.start_login(port, region, embed=embed)
 
 
 def get_oauth_poll_result() -> Optional[Dict[str, Any]]:
@@ -300,7 +403,8 @@ def _urlopen(req: urllib.request.Request, timeout: int = 30, proxy: str = ""):
 def exchange_code_for_token(code: str, port: int, verifier: str,
                            dpop_pair: Dict[str, Any],
                            timeout: int = 30,
-                           proxy: str = "") -> Dict[str, Any]:
+                           proxy: str = "",
+                           region: str = "cn") -> Dict[str, Any]:
     """使用授权码换取 STS 临时凭据及独立 refresh_token。"""
     token_url = f"{IAM_STS_HOST}{IAM_TOKEN_PATH}"
     redirect_uri = f"http://127.0.0.1:{port}{AUTH_REDIRECT_PATH}"
@@ -337,7 +441,7 @@ def exchange_code_for_token(code: str, port: int, verifier: str,
     except Exception as exc:
         raise RuntimeError(f"HuaweiCloud STS network request failed: {exc}") from exc
 
-    return _process_token_response(data, verifier, dpop_pair)
+    return _process_token_response(data, verifier, dpop_pair, region=region)
 
 
 def refresh_sts_token(account_path: str = DEFAULT_ACCOUNT_PATH, timeout: int = 30, proxy: str = "") -> Dict[str, Any]:
@@ -389,7 +493,8 @@ def refresh_sts_token(account_path: str = DEFAULT_ACCOUNT_PATH, timeout: int = 3
     except Exception as exc:
         raise RuntimeError(f"HuaweiCloud STS network request failed: {exc}") from exc
 
-    return _process_token_response(data, code_verifier, dpop_pair, save_path=account_path)
+    return _process_token_response(data, code_verifier, dpop_pair, save_path=account_path,
+                                   region=stored.get("region") or "cn")
 
 
 def refresh_sts_token_for_account(account: Any, timeout: int = 30, proxy: str = "") -> Dict[str, Any]:
@@ -458,7 +563,8 @@ def refresh_sts_token_for_account(account: Any, timeout: int = 30, proxy: str = 
     return data
 def _process_token_response(data: Dict[str, Any], verifier: str,
                            dpop_pair: Dict[str, Any],
-                           save_path: str = DEFAULT_ACCOUNT_PATH) -> Dict[str, Any]:
+                           save_path: str = DEFAULT_ACCOUNT_PATH,
+                           region: str = "cn") -> Dict[str, Any]:
     """处理华为云 Token 响应并保存为 accounts/codearts_account.json。"""
     creds = data.get("credentials") or {}
     access_key = creds.get("access_key_id") or creds.get("accessKey") or ""
@@ -509,6 +615,7 @@ def _process_token_response(data: Dict[str, Any], verifier: str,
         },
         "refresh_token": refresh_token,
         "source": "web_oauth",
+        "region": normalize_region(region),
         "updated_at": int(time.time()),
     }
 
@@ -546,6 +653,7 @@ def handle_oauth_callback(query_params: Dict[str, list], project_port: int) -> T
         desc_list = query_params.get("error_description") or []
         err = f"{error_list[0]}: {desc_list[0]}" if desc_list else error_list[0]
         _OAUTH_MGR.record_result({"status": "failed", "error": err, "ok": False})
+        _OAUTH_MGR.drop_profile()
         return False, _build_html_page(False, err), {"status": "failed", "error": err, "ok": False}
 
     code_list = query_params.get("code") or []
@@ -553,6 +661,7 @@ def handle_oauth_callback(query_params: Dict[str, list], project_port: int) -> T
     if not code:
         err = "Missing authorization code in callback parameters."
         _OAUTH_MGR.record_result({"status": "failed", "error": err, "ok": False})
+        _OAUTH_MGR.drop_profile()
         return False, _build_html_page(False, err), {"status": "failed", "error": err, "ok": False}
     pending = _OAUTH_MGR.pop_pending()
     if not pending:
@@ -561,11 +670,13 @@ def handle_oauth_callback(query_params: Dict[str, list], project_port: int) -> T
         return False, _build_html_page(False, err), {"error": err}
 
     try:
+        site = normalize_region(pending.get("region") or "cn")
         session_data = exchange_code_for_token(
             code=code,
             port=pending.get("port") or project_port,
             verifier=pending["verifier"],
-            dpop_pair=pending["dpop_pair"]
+            dpop_pair=pending["dpop_pair"],
+            region=site,
         )
         acc_label = session_data.get("account", {}).get("label") or "HuaweiCloudUser"
         result = {
@@ -575,6 +686,7 @@ def handle_oauth_callback(query_params: Dict[str, list], project_port: int) -> T
             "domainId": session_data.get("domainId"),
             "expiresAt": session_data.get("expires_at"),
             "source": "web_oauth",
+            "region": site,
         }
         _OAUTH_MGR.record_result(result)
         return True, _build_html_page(True, f"欢迎，{acc_label}！华为云 CodeArts Agent 凭据已成功导入网关。"), result
@@ -583,6 +695,40 @@ def handle_oauth_callback(query_params: Dict[str, list], project_port: int) -> T
         res = {"status": "failed", "ok": False, "error": err}
         _OAUTH_MGR.record_result(res)
         return False, _build_html_page(False, f"换取凭据失败: {err}"), res
+    finally:
+        # 一次性 profile 用完即弃：留下它等于在本机留一份可复用的华为云登录态。
+        # 延迟几秒再关：回调结果页要先送到浏览器并渲染，否则用户看不到成败。
+        _schedule_profile_cleanup(pending.get("profile") or "", pending.get("process"))
+
+
+def _schedule_profile_cleanup(profile: str, proc: Any, delay: float = 6.0) -> None:
+    """延迟关闭隔离浏览器并删除其一次性 profile。
+
+    回调响应体是由主网关在本函数返回后才写给浏览器的，立即结束进程会让
+    浏览器拿不到「登录成功/失败」页面。
+    """
+    if not profile:
+        return
+
+    def _run() -> None:
+        try:
+            import codearts_browser
+        except ImportError:
+            try:
+                from codearts import codearts_browser
+            except ImportError:
+                return
+        try:
+            codearts_browser.cleanup_profile(profile, proc)
+        except Exception:
+            pass
+
+    if delay <= 0:
+        _run()
+        return
+    timer = threading.Timer(delay, _run)
+    timer.daemon = True
+    timer.start()
 
 
 def _build_html_page(success: bool, message: str) -> str:

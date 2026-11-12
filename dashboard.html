@@ -479,6 +479,9 @@ a:hover{text-decoration:underline}
       <button class="main-nav-btn" id="btnNavCodearts" onclick="switchMainTab('codearts')">
         CodeArts 看板
       </button>
+      <button class="main-nav-btn" id="btnNavCodeartsLogin" onclick="switchMainTab('codearts-login')" style="display:none">
+        CodeArts 授权
+      </button>
       <button class="main-nav-btn" id="btnNavAntigravity" onclick="switchMainTab('antigravity')">
         反重力看板
       </button>
@@ -1241,6 +1244,7 @@ a:hover{text-decoration:underline}
         </div>
         <button class="sec" onclick="qoderRefreshQuota(this)">刷新额度</button>
         <button class="sec" onclick="qoderCheckinAll(this)">一键签到</button>
+        <button class="sec mini" id="btnQoderProbeFree" onclick="probeQoderFreeQuota(this)" title="依次探测池内账号今日免费模型（QoDuck / Flash）额度是否充足">⚡ 探测免费额度</button>
       </div>
       <div id="qoderAccounts"></div>
     </section>
@@ -1325,10 +1329,13 @@ a:hover{text-decoration:underline}
         </div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <button type="button" class="btn" onclick="startCodeartsOAuth()" style="padding:6px 12px;font-size:12px;background:var(--accent);color:#fff;border:none;border-radius:8px;cursor:pointer;display:inline-flex;align-items:center;gap:5px;box-shadow:var(--shadow-sm)">
-          🌐 网页登录 / OAuth 授权
+        <button type="button" class="btn" onclick="startCodeartsOAuth('cn')" style="padding:6px 12px;font-size:12px;background:var(--accent);color:#fff;border:none;border-radius:8px;cursor:pointer;display:inline-flex;align-items:center;gap:5px;box-shadow:var(--shadow-sm)" title="在当前浏览器新标签页打开国内站授权页 (codearts.huaweicloud.com)，URL 带 prompt=login 要求重新认证，可切换账号">
+          🇨🇳 国内版登录
         </button>
-        <button type="button" class="btn sec" onclick="refreshCodeartsToken()" style="padding:6px 12px;font-size:12px;display:inline-flex;align-items:center;gap:5px">
+        <button type="button" class="btn" onclick="startCodeartsOAuth('intl')" style="padding:6px 12px;font-size:12px;background:var(--accent);color:#fff;border:none;border-radius:8px;cursor:pointer;display:inline-flex;align-items:center;gap:5px;box-shadow:var(--shadow-sm)" title="在当前浏览器新标签页打开海外站授权页 (codearts.ap-southeast-1.huaweicloud.com)，URL 带 prompt=login 要求重新认证，可切换账号">
+          🌏 海外版登录
+        </button>
+        <button type="button" class="btn sec" onclick="refreshCodeartsToken()" title="刷新账号池中所有网页 OAuth 账号的 STS 令牌（桌面端账号不刷新，避免顶掉 IDE 登录）" style="padding:6px 12px;font-size:12px;display:inline-flex;align-items:center;gap:5px">
           🔄 刷新 STS 令牌
         </button>
         <button type="button" class="btn sec" id="btnCodeartsCheckin" onclick="codeartsCheckinAll(this)" style="padding:6px 12px;font-size:12px;display:inline-flex;align-items:center;gap:5px" title="一键领取所有账号的每日签到与福利权益">
@@ -1371,7 +1378,7 @@ a:hover{text-decoration:underline}
             <span id="caOauthCountdown" class="mono" style="font-size:20px;font-weight:700;color:var(--accent2);letter-spacing:-.5px">--:--:--</span>
             <span style="font-size:12px;color:var(--dim)">STS 剩余 · <b id="caOauthCredits" style="color:var(--fg)">1,000</b> 点</span>
           </div>
-          <span id="caOauthSlotBadge" class="badge mini" style="font-weight:600;background:rgba(16,185,129,.1);color:var(--accent2);border-color:rgba(16,185,129,.3)">3 并发插槽</span>
+          <span id="caOauthSlotBadge" class="badge mini" style="font-weight:600;background:rgba(16,185,129,.1);color:var(--accent2);border-color:rgba(16,185,129,.3)" title="华为云单账号最多 3 个并发会话（按 x-ot-session-id 统计），不是当前请求数">上限 3 并发</span>
         </div>
       </div>
 
@@ -1472,7 +1479,7 @@ a:hover{text-decoration:underline}
       <div class="card" style="position:relative">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
           <div class="k" style="margin:0">并发插槽总阵列</div>
-          <span class="badge mini" style="font-size:10px;background:rgba(16,185,129,.1);color:var(--accent2);border-color:rgba(16,185,129,.3)">单账号 3 并发</span>
+          <span class="badge mini" style="font-size:10px;background:rgba(16,185,129,.1);color:var(--accent2);border-color:rgba(16,185,129,.3)" title="上限 3，非当前请求数">单账号上限 3</span>
         </div>
         <div id="caSlotArrayVisual" style="display:flex;align-items:center;gap:6px;margin-top:6px;flex-wrap:wrap">
           <!-- 动态渲染插槽圆点 -->
@@ -1491,7 +1498,8 @@ a:hover{text-decoration:underline}
           <div style="font-size:12px;color:var(--dim);margin-top:2px">自动聚合独立网页 OAuth 授权、本机桌面 IDE 提取及永久 AK/SK · 单账号 3 并发守护与代理出口强隔离</div>
         </div>
         <div class="toolbar" style="margin:0;gap:8px">
-          <button type="button" class="btn mini" onclick="startCodeartsOAuth()" style="background:var(--accent);color:#fff">+ 网页登录 / OAuth 授权</button>
+          <button type="button" class="btn mini" onclick="startCodeartsOAuth('cn')" style="background:var(--accent);color:#fff" title="在当前浏览器新标签页打开国内站授权页，URL 带 prompt=login 要求重新认证，可切换账号">+ 🇨🇳 国内版登录</button>
+          <button type="button" class="btn mini" onclick="startCodeartsOAuth('intl')" style="background:var(--accent);color:#fff" title="在当前浏览器新标签页打开海外站授权页，URL 带 prompt=login 要求重新认证，可切换账号">+ 🌏 海外版登录</button>
           <button type="button" class="btn sec mini" onclick="scanCodeartsDesktop(this)">🖥️ 扫描/同步桌面端账号</button>
           <button type="button" class="btn sec mini" onclick="refreshAllCodeartsTokens(this)">🔄 批量刷新 STS 令牌</button>
           <button type="button" class="btn sec mini" onclick="codeartsCheckinAll(this)" title="一键领取所有账号的每日签到与福利权益">🎁 每日签到</button>
@@ -1638,6 +1646,48 @@ a:hover{text-decoration:underline}
         </div>
       </div>
     </section>
+  </div>
+
+  <!-- CodeArts 网页授权：默认在当前浏览器新标签页打开，授权 URL 带 prompt=login 强制重新认证 -->
+  <div id="pageCodeartsLogin" class="main-page" style="margin:0;padding:0">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:12px">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <h2 style="margin:0;font-size:16px;color:var(--fg)">CodeArts 网页授权</h2>
+        <span class="badge" id="caLoginRegionBadge">未开始</span>
+        <span class="badge" id="caLoginStateBadge">等待授权</span>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button type="button" class="btn mini" onclick="startCodeartsOAuth('cn')" style="background:var(--accent);color:#fff">🇨🇳 国内版登录</button>
+        <button type="button" class="btn mini" onclick="startCodeartsOAuth('intl')" style="background:var(--accent);color:#fff">🌏 海外版登录</button>
+        <button type="button" class="btn sec mini" onclick="reloadCodeartsLoginFrame()">↗ 重新发起登录</button>
+        <a id="caLoginExternalLink" href="#" target="_blank" rel="noopener noreferrer" title="授权链接：在当前浏览器打开，URL 已带 prompt=login，会要求重新认证" style="font-size:12px;color:var(--accent);text-decoration:none">授权链接（当前浏览器）↗</a>
+        <button type="button" class="btn sec mini" onclick="closeCodeartsLogin()">✕ 关闭授权</button>
+      </div>
+    </div>
+    <div style="background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:var(--dim);line-height:1.7">
+      登录页会在<b>当前浏览器的新标签页</b>打开，并在授权地址里带上 <b>prompt=login</b>，
+      要求华为重新认证，避免直接用浏览器里已登录的旧账号完成授权 —— 网页本身没有权限删除
+      其他域（codearts.huaweicloud.com）的 Cookie，只能用这种方式清掉登录态。
+      登录成功后网关会自动捕获凭据并刷新 CodeArts 看板。
+      <b style="color:var(--warn)">若门户忽略 prompt=login、仍直接拿回旧账号</b>，请点下方「隔离窗口登录」：
+      那会用一次性独立 profile 的浏览器打开，保证不带任何既有 Cookie。
+    </div>
+    <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:28px 24px;text-align:center;box-shadow:var(--shadow-sm)">
+      <div style="font-size:14px;font-weight:600;color:var(--fg);margin-bottom:8px">等待登录</div>
+      <div style="font-size:12px;color:var(--dim);line-height:1.8;margin-bottom:16px">
+        本页仅负责显示授权状态，不再内嵌华为云登录页。若标签页被误关，可直接重新发起登录。
+      </div>
+      <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+        <button type="button" class="btn mini" onclick="reloadCodeartsLoginFrame()" style="background:var(--accent);color:#fff">↗ 重新发起登录</button>
+        <button type="button" class="btn sec mini" onclick="startCodeartsOAuth('cn', true)">🇨🇳 隔离窗口登录</button>
+        <button type="button" class="btn sec mini" onclick="startCodeartsOAuth('intl', true)">🌏 隔离窗口登录</button>
+      </div>
+    </div>
+    <!-- 旧实现：授权页内嵌在本页标签的 iframe 里（已改为隔离浏览器窗口，保留备查）
+    <div style="width:100%;height:calc(100vh - 250px);min-height:640px;background:#fff;border-radius:12px;overflow:hidden;border:1px solid var(--line);box-shadow:var(--shadow-md)">
+      <iframe id="iframeCodeartsLogin" src="about:blank" style="width:100%;height:100%;border:none;display:block" title="CodeArts 华为云授权"></iframe>
+    </div>
+    -->
   </div>
 
   <div id="pageAntigravity" class="main-page" style="margin:0;padding:0">
@@ -4619,6 +4669,7 @@ function switchMainTab(tab){
   const btnSettings = document.getElementById('btnNavSettings');
   const btnQoder = document.getElementById('btnNavQoder');
   const btnCodearts = document.getElementById('btnNavCodearts');
+  const btnCodeartsLogin = document.getElementById('btnNavCodeartsLogin');
   const btnAntigravity = document.getElementById('btnNavAntigravity');
   const pageGateway = document.getElementById('pageGateway');
   const pageTrae = document.getElementById('pageTrae');
@@ -4627,6 +4678,7 @@ function switchMainTab(tab){
   const pageSettings = document.getElementById('pageSettings');
   const pageQoder = document.getElementById('pageQoder');
   const pageCodearts = document.getElementById('pageCodearts');
+  const pageCodeartsLogin = document.getElementById('pageCodeartsLogin');
   const pageAntigravity = document.getElementById('pageAntigravity');
   const tabs = [
     ['gateway', btnGateway, pageGateway],
@@ -4636,6 +4688,7 @@ function switchMainTab(tab){
     ['settings', btnSettings, pageSettings],
     ['qoder', btnQoder, pageQoder],
     ['codearts', btnCodearts, pageCodearts],
+    ['codearts-login', btnCodeartsLogin, pageCodeartsLogin],
     ['antigravity', btnAntigravity, pageAntigravity]
   ];
   tabs.forEach(([name, btn, page]) => {
@@ -4669,15 +4722,88 @@ let qoderModelRealm = 'cn'; // 模型清单页签: 'global' 海外 / 'cn' 国内
 let qoderModelsByRealm = { global: [], cn: [] }; // 两个区域各自的上游模型目录
 
 let _codeartsPollTimer = null;
-async function startCodeartsOAuth(){
+let _codeartsLoginUrl = '';
+let _codeartsLoginRegion = '';
+let _codeartsLoginIsolated = false;
+
+function setCodeartsLoginState(text, kind){
+  const el = document.getElementById('caLoginStateBadge');
+  if(!el) return;
+  el.textContent = text;
+  el.className = 'badge' + (kind === 'ok' ? ' ok' : (kind === 'warn' ? ' warn' : ''));
+}
+
+function reloadCodeartsLoginFrame(){
+  if(!_codeartsLoginRegion){
+    toast('还没有发起过授权，请先点国内版或海外版登录', 'warn');
+    return;
+  }
+  // 旧实现：复用旧 URL 在新标签页重新打开。
+  // 旧 state 可能已被回调消费，且一次性隔离 profile 已关闭，复用只会退回共享
+  // Cookie 的当前浏览器、又拿回上一个账号；重新发起一次隔离登录才正确。
+  startCodeartsOAuth(_codeartsLoginRegion, _codeartsLoginIsolated);
+}
+
+function closeCodeartsLogin(){
+  // 旧实现：清空内嵌 iframe
+  // const f = document.getElementById('iframeCodeartsLogin');
+  // if(f) f.src = 'about:blank';
+  _codeartsLoginUrl = '';
+  _codeartsLoginRegion = '';
+  _codeartsLoginIsolated = false;
+  if(_codeartsPollTimer){ clearInterval(_codeartsPollTimer); _codeartsPollTimer = null; }
+  const btn = document.getElementById('btnNavCodeartsLogin');
+  if(btn) btn.style.display = 'none';
+  setCodeartsLoginState('等待授权');
+  switchMainTab('codearts');
+}
+
+async function startCodeartsOAuth(region, isolated){
+  region = region === 'intl' ? 'intl' : 'cn';
+  isolated = isolated === true;
+  const regionLabel = region === 'intl' ? '海外版 (ap-southeast-1)' : '国内版 (cn-north-4)';
+  // 新标签页必须在用户点击的同步栈里预开：跨过 await 再 window.open 会被
+  // 浏览器判定为非用户手势而拦截。隔离模式由网关启动浏览器，不需要预开。
+  const loginWin = isolated ? null : window.open('about:blank', '_blank');
   try{
-    const res = await postJSON('/codearts/oauth/start', {});
+    // embed=false：网关启动一次性独立 profile 的浏览器窗口（不共享 Cookie）。
+    // embed=true ：只返回 URL，由当前浏览器的新标签页打开；授权 URL 里带了
+    //             prompt=login，要求华为重新认证，避免直接复用旧账号的登录态。
+    const res = await postJSON('/codearts/oauth/start', {region: region, embed: !isolated});
     if(!res || !res.login_url){
+      if(loginWin && !loginWin.closed) loginWin.close();
       toast('获取华为云授权链接失败', 'warn');
       return;
     }
-    window.open(res.login_url, '_blank');
-    toast('已打开华为云授权页，请在浏览器中完成登录…', 'ok');
+    _codeartsLoginUrl = res.login_url;
+    _codeartsLoginRegion = region;
+    _codeartsLoginIsolated = isolated;
+    const navBtn = document.getElementById('btnNavCodeartsLogin');
+    if(navBtn) navBtn.style.display = '';
+    const regionBadge = document.getElementById('caLoginRegionBadge');
+    if(regionBadge) regionBadge.textContent = regionLabel;
+    const link = document.getElementById('caLoginExternalLink');
+    if(link) link.href = res.login_url;
+    setCodeartsLoginState('等待授权');
+    if(isolated){
+      if(res.browser_launched){
+        toast('已在隔离浏览器窗口打开' + regionLabel + '授权页（不共享登录态）', 'ok');
+      }else{
+        const opened = window.open(res.login_url, '_blank');
+        if(!opened) toast('未能启动隔离浏览器，也无法打开标签页，请手动点击授权链接', 'warn');
+        else toast('未找到可隔离启动的浏览器，已在当前浏览器打开授权页（会共享登录态）', 'warn');
+      }
+    }else{
+      if(loginWin && !loginWin.closed){
+        try{ loginWin.opener = null; }catch(_){}
+        loginWin.location.href = res.login_url;
+        toast('已在新标签页打开' + regionLabel + '授权页（已请求华为重新登录）', 'ok');
+      }else{
+        const opened = window.open(res.login_url, '_blank');
+        if(!opened) toast('浏览器拦截了新标签页，请允许弹窗或手动点击授权链接', 'warn');
+        else toast('已在新标签页打开' + regionLabel + '授权页（已请求华为重新登录）', 'ok');
+      }
+    }
     if(_codeartsPollTimer) clearInterval(_codeartsPollTimer);
     _codeartsPollTimer = setInterval(async () => {
       try{
@@ -4685,11 +4811,19 @@ async function startCodeartsOAuth(){
         if(poll && poll.result && poll.result.status === 'success'){
           clearInterval(_codeartsPollTimer);
           _codeartsPollTimer = null;
+          setCodeartsLoginState('授权成功', 'ok');
           toast('CodeArts 授权成功！已绑定会话', 'ok');
           loadCodeartsData();
+          // 旧实现：授权完成就收起内嵌授权标签并回到看板
+          // setTimeout(closeCodeartsLogin, 1200);
+          // 新实现：授权页是隔离浏览器窗口，这里只清理登录状态，不强制切换页面
+          _codeartsLoginUrl = '';
+          _codeartsLoginRegion = '';
+          if(navBtn) navBtn.style.display = 'none';
         } else if(poll && poll.result && poll.result.status === 'failed'){
           clearInterval(_codeartsPollTimer);
           _codeartsPollTimer = null;
+          setCodeartsLoginState('授权失败', 'warn');
           toast('登录失败: ' + (poll.result.error || '未知错误'), 'warn');
         }
       }catch(e){
@@ -4697,20 +4831,26 @@ async function startCodeartsOAuth(){
       }
     }, 2000);
   }catch(e){
+
     toast('发起授权异常: ' + e.message, 'warn');
   }
 }
 
 async function refreshCodeartsToken(){
   try{
-    toast('正在通过 DPoP 刷新 STS 令牌…', 'ok');
+    toast('正在刷新账号池的 STS 令牌…', 'ok');
     const res = await postJSON('/codearts/oauth/refresh', {});
+    const total = (res && res.total != null) ? res.total : 1;
+    const okCount = (res && res.succeeded != null) ? res.succeeded
+      : ((res && res.ok) ? total : 0);
     if(res && res.ok){
-      toast('STS 令牌续期成功！', 'ok');
-      loadCodeartsData();
+      toast('账号池 STS 续期成功（' + okCount + '/' + total + '）', 'ok');
     }else{
-      toast('续期失败: ' + (res.error || '未知原因'), 'warn');
+      const failed = (res && res.results) ? res.results.find(function(r){ return !r.ok; }) : null;
+      const reason = (failed && failed.error) || (res && res.error) || '未知原因';
+      toast('STS 续期部分失败（' + okCount + '/' + total + '）：' + reason, 'warn');
     }
+    loadCodeartsData();
   }catch(e){
     toast('续期异常: ' + e.message, 'warn');
   }
@@ -4806,13 +4946,22 @@ function codeartsAccountRow(a, index){
   } else if(a.source === 'config'){
     sourceBadge = '<span class="badge mini" style="font-size:11px;background:rgba(234,179,8,.12);color:#eab308;border-color:rgba(234,179,8,.3)">🔑 永久 AK/SK</span>';
   }
+  // 站点徽标：cn 国内 / intl 海外。聊天与积分主机不同，混用会打到错误上游。
+  if(a.source !== 'desktop' || a.region === 'intl'){
+    sourceBadge += a.region === 'intl'
+      ? '<span class="badge mini" style="font-size:10px;margin-left:4px;background:rgba(56,189,248,.12);color:#38bdf8;border-color:rgba(56,189,248,.3)">🌏 海外</span>'
+      : '<span class="badge mini" style="font-size:10px;margin-left:4px;background:var(--panel2);color:var(--dim)">🇨🇳 国内</span>';
+  }
 
   const restricted = a.isRestricted || (a.status === 'restricted');
+  const credentialError = a.isCredentialError || (a.status === 'credential_error');
   let state = '<span class="badge ok">可用</span>';
   if(restricted){
     state = `<span class="badge bad" title="${esc(a.restrictedDetail || '账号异常')}">风控限制</span>`;
   } else if(!a.enabled){
     state = '<span class="badge off">已停用</span>';
+  } else if(credentialError){
+    state = `<span class="badge bad" title="STS 续期失败，需重新登录授权：${esc(a.credentialErrorDetail || '')}">凭据失效 ${a.credentialErrorRemaining || 0}s</span>`;
   } else if(a.status === 'cooling'){
     state = `<span class="badge warn">冷却 ${a.cooldownRemaining || 0}s</span>`;
   } else if(a.status === 'busy'){
@@ -4895,10 +5044,11 @@ function renderCodeartsAccounts(){
       <div style="text-align:center;padding:36px 16px;background:var(--panel);border:1px dashed var(--line);border-radius:12px">
         <div style="font-size:15px;font-weight:600;margin-bottom:8px;color:var(--fg)">当前 CodeArts 账号池为空</div>
         <div style="color:var(--dim);font-size:13px;margin-bottom:18px">
-          可一键扫描导入本机 CodeArts Agent 桌面端凭据，或点击网页登录进行 OAuth 授权
+          可一键扫描导入本机 CodeArts Agent 桌面端凭据，或点击「国内版 / 海外版登录」在独立浏览器窗口中完成 OAuth 授权
         </div>
-        <div style="display:inline-flex;gap:10px">
-          <button class="btn mini" onclick="startCodeartsOAuth()" style="background:var(--accent);color:#fff">+ 网页登录 / OAuth 授权</button>
+        <div style="display:inline-flex;gap:10px;flex-wrap:wrap;justify-content:center">
+          <button class="btn mini" onclick="startCodeartsOAuth('cn')" style="background:var(--accent);color:#fff" title="在当前浏览器新标签页打开国内站授权页，URL 带 prompt=login 要求重新认证，可切换账号">+ 🇨🇳 国内版登录</button>
+          <button class="btn mini" onclick="startCodeartsOAuth('intl')" style="background:var(--accent);color:#fff" title="在当前浏览器新标签页打开海外站授权页，URL 带 prompt=login 要求重新认证，可切换账号">+ 🌏 海外版登录</button>
           <button class="btn sec mini" onclick="scanCodeartsDesktop(this)">🖥️ 扫描/同步桌面端账号</button>
         </div>
       </div>`;
@@ -4914,7 +5064,7 @@ function renderCodeartsAccounts(){
     + '<th style="text-align:center;width:105px">并发 / 插槽</th>'
     + '<th style="text-align:center;width:210px">操作</th>'
     + '</tr></thead><tbody>' + list.map((a, i) => codeartsAccountRow(a, i)).join('') + '</tbody></table></div>'
-    + '<div class="legend"><span>并发插槽：华为云单账号上限 3 并发，独立请求头 <code>x-ot-session-id</code> 自动隔离</span></div>'
+    + '<div class="legend"><span>并发上限：华为云单账号最多 3 个并发会话（按 <code>x-ot-session-id</code> 统计）；「x / y」里 x 是当前运行数、y 是容量上限</span></div>'
     + '<div class="legend"><span>凭据同步：网页 OAuth 支持标准无感续期；桌面客户端提取模式在刷新时将重新解密本地 IDE 最新状态，避免锁出桌面端</span></div>';
 }
 
@@ -5235,11 +5385,13 @@ function updateCodeartsHubCards(status, accts, credits){
   const totalSlotsText = document.getElementById('caTotalSlotsText');
   const activeDispatchEl = document.getElementById('caActiveDispatchAccount');
   const enabledCount = accts.filter(a => a.enabled).length;
+  // totalSlots 是**容量上限**（启用账号 × 3），不是请求总数；文案写清「上限」，
+  // 否则 1 个客户端在跑、看板显示 3 很容易被读成 3 个并发请求。
   const totalSlots = accts.filter(a => a.enabled).reduce((sum, a) => sum + (a.maxConcurrency || 3), 0);
   const inFlightCount = accts.reduce((sum, a) => sum + (a.inFlight || 0), 0);
 
   if(poolBadge) poolBadge.textContent = `${enabledCount} / ${accts.length} 账号在线`;
-  if(totalSlotsText) totalSlotsText.textContent = `${inFlightCount} / ${totalSlots} 并发插槽`;
+  if(totalSlotsText) totalSlotsText.textContent = `${inFlightCount} / ${totalSlots} 并发上限`;
   if(activeDispatchEl){
     activeDispatchEl.textContent = primaryAcct ? (primaryAcct.label || primaryAcct.id) : '无可用账号';
   }
@@ -6014,9 +6166,14 @@ function renderQoderAccounts(usage){
     }else{
       stateBadge = '<span class="badge ok">可用</span>';
     }
-    const isFlashExhausted = Boolean((slot && slot.flash_free_exhausted) || a.flash_free_exhausted);
-    if(isFlashExhausted){
-      stateBadge += ' <span class="badge" style="background:#fef3c7;color:#92400e;border:1px solid #fde68a;" title="千问3.8 Flash 今日免费额度已用尽，将于次日 00:00 (UTC+8) 自动刷新恢复">⚡ Flash耗尽</span>';
+    const isFreeExhausted = Boolean((slot && slot.flash_free_exhausted) || a.flash_free_exhausted);
+    const probeRes = window.QODER_PROBE_FREE_CACHE && window.QODER_PROBE_FREE_CACHE[a.id];
+    if(isFreeExhausted){
+      stateBadge += ' <span class="badge" style="background:#fef3c7;color:#92400e;border:1px solid #fde68a;" title="今日免费额度已用尽（QoDuck / Flash），将于次日 00:00 (UTC+8) 自动刷新恢复">⚡ 免费已耗尽</span>';
+    } else if(probeRes && probeRes.status === 'available'){
+      stateBadge += ' <span class="badge ok mini" style="font-size:10px" title="今日免费额度充足">🟢 免费可用</span>';
+    } else if(probeRes && probeRes.status === 'queued'){
+      stateBadge += ' <span class="badge warn mini" style="font-size:10px" title="上游排队拥堵中（非额度耗尽）">⏳ 上游排队</span>';
     }
     const idAttr = esc(String(a.id || '').replace(/[^\w.@-]/g, ''));
     const nameAttr = esc(a.name || a.email || a.id);
@@ -6289,12 +6446,19 @@ function renderQoderModelsTable(models){
     let speedHtml = '<span style="color:var(--dim)">—</span>';
     const benchKey = 'qoder:' + m.id;
     const benchRes = window.BENCHMARK_RESULTS && (window.BENCHMARK_RESULTS[benchKey] || window.BENCHMARK_RESULTS[m.id]);
+    const isFreeModel = (m.price_factor === 0 || String(m.id).toLowerCase() === 'qoduck' || m.qoder_key === 'lmodel' || String(m.id).toLowerCase().includes('flash'));
     if(benchRes && benchRes.loading){
       speedHtml = '<span class="badge warn mini" style="display:inline-flex;align-items:center;gap:4px;font-size:11px"><span class="spin">⟳</span> 测速中...</span>';
+    } else if(benchRes && benchRes.isFreeExhausted){
+      speedHtml = '<div style="display:inline-flex;flex-direction:column;align-items:center;gap:2px">'
+        + '<span class="badge warn mini" style="background:#fef3c7;color:#92400e;border:1px solid #fde68a;" title="' + esc(benchRes.error) + '">⚡ 额度已尽</span>'
+        + '<span style="font-size:10px;color:var(--dim)">次日0点恢复 · <a href="javascript:void(0)" data-model="' + esc(m.id) + '" onclick="benchmarkQoderModel(this.dataset.model, this)" style="color:var(--accent);text-decoration:none">重测</a></span>'
+        + '</div>';
     } else if(benchRes && benchRes.speed != null){
+      const freeTag = isFreeModel ? '<span style="font-size:10px;color:#15803d;font-weight:600">🟢 额度充足</span> · ' : '';
       speedHtml = '<div style="display:inline-flex;flex-direction:column;align-items:center;gap:2px">'
         + '<span class="badge ok" style="font-weight:700;font-size:11px;background:rgba(38,187,130,.15);color:#26bb82">⚡ ' + benchRes.speed + ' tok/s</span>'
-        + '<span style="font-size:10px;color:var(--dim)">' + (benchRes.ttft != null ? ('TTFT ' + benchRes.ttft + 'ms') : '') + ' · <a href="javascript:void(0)" data-model="' + esc(m.id) + '" onclick="benchmarkQoderModel(this.dataset.model, this)" style="color:var(--accent);text-decoration:none">重测</a></span>'
+        + '<span style="font-size:10px;color:var(--dim)">' + freeTag + (benchRes.ttft != null ? ('TTFT ' + benchRes.ttft + 'ms') : '') + ' · <a href="javascript:void(0)" data-model="' + esc(m.id) + '" onclick="benchmarkQoderModel(this.dataset.model, this)" style="color:var(--accent);text-decoration:none">重测</a></span>'
         + '</div>';
     } else if(benchRes && benchRes.error){
       speedHtml = '<div style="display:inline-flex;flex-direction:column;align-items:center;gap:2px">'
@@ -8008,13 +8172,21 @@ async function benchmarkQoderModel(modelId, btn){
     toast('Qoder 模型 ' + modelId + ' 测速完成：' + speed + ' tok/s (首字 ' + ttftMs + 'ms)', 'ok');
   } catch(err){
     console.error('Qoder benchmark error for ' + modelId, err);
+    const errMsg = String(err.message || err || '测速失败');
+    const isExhausted = /免费额度|免费使用次数|免费次数|flash.*完毕|quota.*exhaust|次数已用尽/i.test(errMsg);
     const errObj = {
-      error: err.message || '测速失败',
+      error: errMsg,
+      isFreeExhausted: isExhausted,
       at: Date.now()
     };
     window.BENCHMARK_RESULTS[benchKey] = errObj;
     window.BENCHMARK_RESULTS[modelId] = errObj;
-    toast('Qoder 模型 ' + modelId + ' 测速失败: ' + err.message, 'bad');
+    if(isExhausted){
+      toast('Qoder 模型 ' + modelId + ' 今日免费额度已耗尽 (次日 00:00 自动刷新)', 'warn');
+      try { loadQoderAccounts(); } catch(_) {}
+    } else {
+      toast('Qoder 模型 ' + modelId + ' 测速失败: ' + errMsg, 'bad');
+    }
   } finally {
     renderQoderModelsTable(window.LAST_QODER_MODELS);
   }
@@ -8038,6 +8210,39 @@ async function benchmarkAllQoderModels(btn){
     btn.textContent = '⚡ 批量测速';
   }
   toast('Qoder 模型批量测速全部完成', 'ok');
+}
+
+async function probeQoderFreeQuota(btn){
+  if(btn){
+    btn.disabled = true;
+    btn.textContent = '⚡ 探测中...';
+  }
+  try {
+    toast('正在逐个探测 Qoder 账号池免费额度（QoDuck / Flash）…', 'ok');
+    const realm = qoderViewRealm || '';
+    const res = await postJSON('/qoder/accounts/probe_free', { realm: realm, model: 'qoduck' });
+    if(res && res.results){
+      window.QODER_PROBE_FREE_CACHE = window.QODER_PROBE_FREE_CACHE || {};
+      res.results.forEach(r => {
+        window.QODER_PROBE_FREE_CACHE[r.id] = r;
+      });
+      await loadQoderAccounts();
+      const s = res.summary || {};
+      let msg = '免费额度探测完成：共 ' + s.total + ' 个账号，' + s.available + ' 个额度充足';
+      if(s.exhausted > 0) msg += '，' + s.exhausted + ' 个已耗尽';
+      if(s.queued > 0) msg += '，' + s.queued + ' 个排队拥堵中';
+      toast(msg, s.exhausted > 0 ? 'warn' : 'ok');
+    } else {
+      toast('探测失败: ' + ((res && res.error) || '未知响应'), 'warn');
+    }
+  } catch(e) {
+    toast('探测异常: ' + e.message, 'bad');
+  } finally {
+    if(btn){
+      btn.disabled = false;
+      btn.textContent = '⚡ 探测免费额度';
+    }
+  }
 }
 
 async function benchmarkAntigravityModel(modelId, btn){

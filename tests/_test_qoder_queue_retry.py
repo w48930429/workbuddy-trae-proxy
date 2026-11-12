@@ -62,7 +62,8 @@ class QueueRetryTests(unittest.TestCase):
             on_delta(client.Delta(role="assistant", content="pong"))
             return True, None
 
-        with mock.patch.object(route, "stream_with_slot", fake_stream), \
+        with mock.patch.object(route, "QUEUE_MAX_WAITS", 2), \
+             mock.patch.object(route, "stream_with_slot", fake_stream), \
              mock.patch.object(route, "pick_slot_for_model",
                                return_value=(slot, True)), \
              mock.patch.object(route, "get_pool", return_value=mock.Mock(
@@ -89,7 +90,8 @@ class QueueRetryTests(unittest.TestCase):
             return False, client.UpstreamError(403, QUEUE_DETAIL)
 
         pool_mock = mock.Mock(size=lambda: 1, note_success=mock.Mock(), cool=mock.Mock())
-        with mock.patch.object(route, "stream_with_slot", fake_stream), \
+        with mock.patch.object(route, "QUEUE_MAX_WAITS", 2), \
+             mock.patch.object(route, "stream_with_slot", fake_stream), \
              mock.patch.object(route, "pick_slot_for_model",
                                side_effect=[(slot, True), (None, False)]), \
              mock.patch.object(route, "get_pool", return_value=pool_mock), \
@@ -101,11 +103,43 @@ class QueueRetryTests(unittest.TestCase):
                 {"model": "Qwen3.8-Flash", "messages": [], "stream": True},
                 on_delta=lambda chunk: None)
 
-        self.assertEqual(status, 403, body)
-        self.assertEqual(slept.call_count, route.QUEUE_MAX_WAITS)
-        # 等不到后才交给原路径：冷却 30s（retryAfterSeconds）并换号
+        # 排队属于临时不可用：即使走完等待也应回 429（可重试），不能回 403，
+        # 否则上层会当成封禁并触发跨厂商兜底。
+        self.assertEqual(status, 429, body)
+        # 该用例显式开启旧行为（QUEUE_MAX_WAITS=2），断言用字面量：
+        # with 块退出后 route.QUEUE_MAX_WAITS 已恢复默认 0。
+        self.assertEqual(slept.call_count, 2, "旧行为：原地等满 2 次")
+        # 单个账号内等满 2 次（1 次首发 + 2 次重试 = 3 次上游调用）；
+        # 换账号上限是独立开关（QUEUE_MAX_ACCOUNTS），这里只验证旧等待逻辑。
         pool_mock.cool.assert_called_once_with(slot.id, 30, mock.ANY)
-        self.assertEqual(len(attempts), route.QUEUE_MAX_WAITS + 1)
+        self.assertEqual(len(attempts), 3)
+
+    def test_default_fast_fail_returns_429_without_sleeping(self):
+        """默认 QUEUE_MAX_WAITS=0：排队错误立刻以 429 交回网关，不原地挂住。"""
+        slot = fake_slot()
+        attempts = []
+
+        def fake_stream(slot_arg, url, body, extra, on_delta):
+            attempts.append(1)
+            return False, client.UpstreamError(403, QUEUE_DETAIL)
+
+        pool_mock = mock.Mock(size=lambda: 1, note_success=mock.Mock(), cool=mock.Mock())
+        with mock.patch.object(route, "QUEUE_MAX_WAITS", 0), \
+             mock.patch.object(route, "stream_with_slot", fake_stream), \
+             mock.patch.object(route, "pick_slot_for_model",
+                               side_effect=[(slot, True), (None, False)]), \
+             mock.patch.object(route, "get_pool", return_value=pool_mock), \
+             mock.patch.object(route, "build_qoder_request_body",
+                               return_value={"model_config": {}}), \
+             mock.patch.object(route, "_get_template_base", return_value={}), \
+             mock.patch.object(route.time, "sleep") as slept:
+            status, body = route.call_qoder(
+                {"model": "Qwen3.8-Flash", "messages": [], "stream": True},
+                on_delta=lambda chunk: None)
+
+        self.assertEqual(status, 429, body)
+        self.assertEqual(slept.call_count, 0, "默认不应原地等待")
+        self.assertEqual(len(attempts), 1)
 
     def test_no_wait_when_content_already_emitted(self):
         """已开始出内容后遇到排队错误，直接按原逻辑失败，不吞输出。"""
@@ -129,7 +163,9 @@ class QueueRetryTests(unittest.TestCase):
                 {"model": "Qwen3.8-Flash", "messages": [], "stream": True},
                 on_delta=lambda chunk: None)
 
-        self.assertEqual(status, 403, body)
+        # 已开始出内容时同样不等待；但排队属于临时不可用，状态码统一为
+        # 429（可重试），不再回 403 让上层误判成封禁。
+        self.assertEqual(status, 429, body)
         self.assertEqual(len(attempts), 1)
         slept.assert_not_called()
 

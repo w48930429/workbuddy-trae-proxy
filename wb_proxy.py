@@ -29,6 +29,20 @@ MAX_PAYLOAD_BYTES = int(os.environ.get("WB_MAX_PAYLOAD_BYTES", 50 * 1024 * 1024)
 # forever.
 MAX_CONCURRENT_CHAT = int(os.environ.get("WB_MAX_CONCURRENT_CHAT", 32))
 CHAT_SLOT_WAIT_SECONDS = float(os.environ.get("WB_CHAT_SLOT_WAIT", 30))
+# CodeArts 单账号并发上限 3（上游按 x-ot-session-id 统计）。满员时排队等空位
+# 的时间上限；等不到就回 429（可重试），绝不以 400 把并发满报给客户端 ——
+# omp 等客户端会把 400 当成「模型不可用」并立刻换模型。
+# 默认 0：槽位满时立刻回 429 + Retry-After，由客户端自己退避重试。
+# 旧逻辑会原地 sleep 最多 20s，客户端在这段时间里完全没有输出，看起来就是
+# 「卡死」。需要旧行为时设 WB_CODEARTS_QUEUE_WAIT=20。
+CODEARTS_QUEUE_WAIT_SECONDS = float(os.environ.get("WB_CODEARTS_QUEUE_WAIT", 0))
+# 429 时建议客户端多久后重试：CodeArts 的并发会话通常几秒内就会释放。
+CODEARTS_RETRY_AFTER_SECONDS = int(os.environ.get("WB_CODEARTS_RETRY_AFTER", 3))
+# 跨厂商兜底（Qoder 失败 -> WorkBuddy CN）只在「这条路真的走不通」时启用：
+# 额度耗尽、封禁、鉴权失效属于持久失败；排队、限流、上游 5xx 是临时失败，
+# 转投别家只会把另一家也拖进同一个拥堵窗口，制造「一家在等，别家也不动」。
+# 需要恢复旧行为（任何失败都跨家兜底）时设 WB_QODER_CROSS_FAMILY_TRANSIENT=1。
+QODER_CROSS_FAMILY_ON_TRANSIENT = os.environ.get("WB_QODER_CROSS_FAMILY_TRANSIENT", "0") == "1"
 import socket
 import sys
 import threading
@@ -41,6 +55,7 @@ import wb_catalog
 import wb_settings
 import wb_webtools
 import wb_identity
+import wb_queue
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _TRAE_DIR = os.path.join(_HERE, "trae")
 if _TRAE_DIR not in sys.path:
@@ -5751,6 +5766,21 @@ def _is_qoder_exhausted(status: int, body: str) -> bool:
     return False
 
 
+def _retry_after_seconds(body, default=10, cap=300):
+    """从上游错误体里提取 retryAfterSeconds；提取不到就用默认值。
+
+    Qoder 的排队详情被 JSON 套了两层转义，值本身仍是纯数字，所以这里只做
+    一个宽松匹配，不做完整解析。
+    """
+    m = re.search(r"retryAfterSeconds[^0-9]{0,10}(\d{1,4})", body or "")
+    if m:
+        try:
+            return max(1, min(int(m.group(1)), cap))
+        except Exception:
+            pass
+    return default
+
+
 # ---------------------------------------------------------------------------
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -5836,11 +5866,13 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
         log(fmt % args)
-    def _json(self, code, obj):
+    def _json(self, code, obj, headers=None):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, str(value))
         # self.path is unset when parse_request() never ran (an over-long
         # request line is rejected before it), so fall back to "".
         if cors_origin_allowed(getattr(self, "path", "") or ""):
@@ -5977,7 +6009,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
         except Exception:
             pass
-    def _error(self, code, message, err_type="server_error"):
+    def _error(self, code, message, err_type="server_error", headers=None):
         # Every early rejection funnels through here, so draining the body in
         # one place covers all of them. Unblock any client still waiting on
         # "Expect: 100-continue" first, otherwise it never sends the body and
@@ -5989,7 +6021,14 @@ class Handler(BaseHTTPRequestHandler):
             log(f"【错误响应 HTTP {code}】[{err_type}] {localized_message}", level="ERROR", tag="error")
         except Exception:
             pass
-        self._json(code, {"error": {"message": localized_message, "type": err_type, "code": code}})
+        payload = {"error": {"message": localized_message, "type": err_type, "code": code}}
+        retry_after = (headers or {}).get("Retry-After")
+        if retry_after is not None:
+            try:
+                payload["error"]["retry_after"] = int(retry_after)
+            except (TypeError, ValueError):
+                pass
+        self._json(code, payload, headers=headers)
     def _rate_limited(self, exc):
         """429 with Retry-After, so clients back off instead of hammering.
 
@@ -6350,6 +6389,9 @@ class Handler(BaseHTTPRequestHandler):
             "accounts": len(POOL.accounts) if POOL else 0,
             "accounts_ready": POOL.count_ready() if POOL else 0,
             "api_key_required": auth_required(),
+            # 本地排队快照：active>0 表示有请求正在等槽位/上游排队，而不是
+            # 上游没回包。日志里的 [queued] 行与这里同源。
+            "queue": wb_queue.snapshot(),
         }
         if self._key_ok():
             info.update({
@@ -7106,18 +7148,59 @@ class Handler(BaseHTTPRequestHandler):
                 return self._route_codearts_credits(acct_id, force=force)
         if path == "/codearts/oauth/start":
             port = getattr(getattr(self, "server", None), "server_port", 28999)
-            info = codearts_oauth.start_oauth_login(port)
+            region = ""
+            embed = False
+            if isinstance(query_or_payload, dict):
+                raw_region = query_or_payload.get("region")
+                if isinstance(raw_region, list):
+                    raw_region = raw_region[0] if raw_region else ""
+                region = str(raw_region or "").strip().lower()
+                raw_embed = query_or_payload.get("embed")
+                if isinstance(raw_embed, list):
+                    raw_embed = raw_embed[0] if raw_embed else ""
+                embed = str(raw_embed).strip().lower() in ("1", "true", "yes")
+            info = codearts_oauth.start_oauth_login(port, region or "cn", embed=embed)
             return self._json(200, {"ok": True, **info})
         if path == "/codearts/oauth/poll":
             res = codearts_oauth.get_oauth_poll_result()
             return self._json(200, {"ok": True, "result": res})
         if path == "/codearts/oauth/refresh":
+            cp = get_codearts_pool()
             try:
+                # 多账号池：逐个刷新所有启用的网页 OAuth 账号。桌面端账号不在这里
+                # 刷新 —— 它的 refresh token 与 IDE 绑定且单次轮转，网关刷了会把
+                # 桌面端登录顶掉。
+                accounts = [a for a in (cp.accounts if cp else [])
+                            if a.enabled and a.source != "desktop"]
+                if accounts:
+                    results = []
+                    for acct in accounts:
+                        try:
+                            codearts_oauth.refresh_sts_token_for_account(acct, proxy=acct.proxy)
+                            acct.clear_credential_error()
+                            results.append({"id": acct.id, "label": acct.label, "ok": True})
+                        except Exception as exc:
+                            acct.mark_credential_error(
+                                codearts_accounts.CREDENTIAL_ERROR_COOLDOWN, str(exc))
+                            results.append({"id": acct.id, "label": acct.label,
+                                            "ok": False, "error": str(exc)})
+                    if cp:
+                        cp.save()
+                    succeeded = sum(1 for r in results if r.get("ok"))
+                    return self._json(200, {
+                        "ok": succeeded == len(results),
+                        "succeeded": succeeded,
+                        "total": len(results),
+                        "results": results,
+                    })
+                # 旧逻辑：池里没有可刷新的网页账号时，回退刷新旧版单账号文件。
                 updated = codearts_oauth.refresh_sts_token()
-                cp = get_codearts_pool()
                 if cp:
                     cp.load()
-                return self._json(200, {"ok": True, "account": updated.get("account", {}).get("label")})
+                return self._json(200, {
+                    "ok": True, "account": updated.get("account", {}).get("label"),
+                    "succeeded": 1, "total": 1, "results": [],
+                })
             except Exception as exc:
                 return self._error(500, "Refresh failed: %s" % exc, "oauth_error")
         if path == "/codearts/accounts":
@@ -7290,6 +7373,15 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_oauth_callback(self, query):
         port = getattr(getattr(self, "server", None), "server_port", 28999)
         ok, html, result = codearts_oauth.handle_oauth_callback(query, project_port=port)
+        if ok:
+            # OAuth 授权写入的是旧版单账号文件；必须同步进多账号池，否则池里
+            # 同账号仍保留失效的 refresh token（load() 对已存在账号只做跳过）。
+            try:
+                cp = get_codearts_pool()
+                if cp:
+                    cp.sync_legacy_account()
+            except Exception as exc:
+                log("codearts: failed to sync new web login into pool: %s" % exc)
         body = html.encode("utf-8")
         status = 200 if ok else 400
         self.send_response(status)
@@ -7426,6 +7518,22 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/qoder/account/delete", "/qoder/accounts/delete"):
             if self.command == "POST":
                 return self._route_qoder_account_delete(query_or_payload)
+        if path in ("/qoder/accounts/probe_free", "/qoder/probe_free"):
+            if self.command in ("GET", "POST"):
+                realm = ""
+                model = "qoduck"
+                if isinstance(query_or_payload, dict):
+                    r_val = query_or_payload.get("realm") or query_or_payload.get("region")
+                    if isinstance(r_val, list) and r_val:
+                        r_val = r_val[0]
+                    realm = str(r_val or "").strip()
+                    m_val = query_or_payload.get("model")
+                    if isinstance(m_val, list) and m_val:
+                        m_val = m_val[0]
+                    if m_val:
+                        model = str(m_val).strip()
+                res = qoder_route.probe_free_quota(realm=realm, model=model)
+                return self._json(200, res)
         if path == "/qoder/enabled":
             if self.command == "GET":
                 return self._json(200, {"ok": True, "enabled": _qoder_enabled()})
@@ -8530,7 +8638,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "keep-alive")
+            self.send_header("Connection", "close")
             self.send_header("X-Accel-Buffering", "no")
             if cors_origin_allowed(self.path):
                 self.send_header("Access-Control-Allow-Origin", "*")
@@ -9009,7 +9117,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "keep-alive")
+            self.send_header("Connection", "close")
             if cors_origin_allowed(self.path):
                 self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
@@ -9062,7 +9170,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "keep-alive")
+            self.send_header("Connection", "close")
             if cors_origin_allowed(self.path):
                 self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
@@ -9151,6 +9259,22 @@ class Handler(BaseHTTPRequestHandler):
 
         from qoder import qoder_pool
         norm_start_realm = qoder_pool.normalize_realm(start_realm)
+
+        def _transient_failure(status, body):
+            """排队/限流/上游抖动：临时失败，不应转投别家厂商。
+
+            转投 WorkBuddy 会把另一家也拉进同一个拥堵窗口，客户端看到的就是
+            「一家在等，别家也不动」。只有额度耗尽/封禁/鉴权这类持久失败才值
+            得跨家兜底。
+            """
+            if qoder_pool.is_queued_detail(body or ""):
+                return True
+            if status in (408, 429, 500, 502, 503, 504):
+                low = (body or "").lower()
+                permanent = ("quota", "credit", "exhausted", "balance",
+                             "余额", "额度", "no_available_account", "支付")
+                return not any(marker in low for marker in permanent)
+            return False
 
         is_qoduck = _is_qoder_qoduck(orig_model)
         is_ds = _is_qoder_deepseek(orig_model)
@@ -9253,6 +9377,16 @@ class Handler(BaseHTTPRequestHandler):
                             % (idx, cand_model, cand_realm, status, next_model, next_realm))
                         continue
                     if wb_fallback_model:
+                        transient = _transient_failure(status, body)
+                        if transient and not QODER_CROSS_FAMILY_ON_TRANSIENT:
+                            log("qoder: all Qoder attempts failed (%s, status=%s) with a transient "
+                                "queue/throttle error; skipping cross-vendor fallback to keep "
+                                "WorkBuddy out of the same queue" % (attempts, status),
+                                level="WARN", tag="queue")
+                            return self._error(
+                                status if status else 500, upstream_error_message(status, body),
+                                "rate_limit_error" if status == 429 else "server_error",
+                                headers={"Retry-After": str(_retry_after_seconds(body))} if status == 429 else None)
                         log("qoder: all Qoder attempts failed (%s), falling back to WorkBuddy CN '%s'"
                             % (attempts, wb_fallback_model))
                         return self._fallback_to_workbuddy_cn(payload, want_stream=True, t_start=t_start, wb_model=wb_fallback_model)
@@ -9293,6 +9427,16 @@ class Handler(BaseHTTPRequestHandler):
                         % (idx, cand_model, cand_realm, status, next_model, next_realm))
                     continue
                 if wb_fallback_model:
+                    transient = _transient_failure(status, body)
+                    if transient and not QODER_CROSS_FAMILY_ON_TRANSIENT:
+                        log("qoder: all Qoder attempts failed (%s, status=%s) with a transient "
+                            "queue/throttle error; skipping cross-vendor fallback to keep "
+                            "WorkBuddy out of the same queue" % (attempts, status),
+                            level="WARN", tag="queue")
+                        return self._error(
+                            status if status else 500, upstream_error_message(status, body),
+                            "rate_limit_error" if status == 429 else "server_error",
+                            headers={"Retry-After": str(_retry_after_seconds(body))} if status == 429 else None)
                     log("qoder: all Qoder attempts failed (%s), falling back to WorkBuddy CN '%s'"
                         % (attempts, wb_fallback_model))
                     return self._fallback_to_workbuddy_cn(payload, want_stream=False, t_start=t_start, wb_model=wb_fallback_model)
@@ -9309,8 +9453,16 @@ class Handler(BaseHTTPRequestHandler):
     def _route_to_codearts(self, payload):
         """Route a codearts-* request straight to the CodeArts (Snap) upstream.
 
-        CodeArts is the fifth upstream. Supports multi-account pool with proxy_slot
-        egress isolation, with automatic fallback to single-session hierarchy.
+        多账号池 + 出口隔离。并发规则（踩过的坑，别改回去）：
+
+          * 华为云按 ``x-ot-session-id`` 限制**单账号 3 并发**，超了回 400 +
+            ``TM.00001041``。客户端（omp 等）会把 400 当成「这个模型坏了」，
+            立刻换模型 —— 所以并发满绝不能以 400 抛出去。
+          * 只要池里有启用账号，**不许**回退到 ``load_session()`` 单会话路径：
+            那条路用同一套凭据，却不计入 in_flight、也不看冷却，会把 3 个并发
+            瞬间放大成几十次重复请求（线上日志：2 个客户端请求 → 99 次上游失败）。
+          * 选号与占位是原子的（``acquire_account``）；满员时排队等
+            ``CODEARTS_QUEUE_WAIT_SECONDS``，等不到回 429（可重试）。
         """
         model = payload.get("model") or ""
         want_stream = bool(payload.get("stream"))
@@ -9318,106 +9470,204 @@ class Handler(BaseHTTPRequestHandler):
         log("codearts: model=%s stream=%s" % (model, want_stream))
 
         cp = get_codearts_pool()
-        account, session = None, None
-        if cp and cp.accounts:
-            account, session = cp.pick_account()
+        pooled = bool(cp and any(a.enabled for a in cp.accounts))
+        tried_account_ids = set()
+        deadline = t_start + CODEARTS_QUEUE_WAIT_SECONDS
 
-        if session is None:
-            # Fall back to single-session hierarchy (codearts_account.json -> config.json -> desktop IDE)
-            try:
-                session = codearts_route.load_session()
-            except Exception as exc:
-                log("codearts: no usable login: %s" % exc)
-                return self._error(
-                    502, "CodeArts login unavailable: %s - open CodeArts Agent and "
-                         "sign in, then retry (the gateway reads its session, it "
-                         "never renews it)" % exc, "credentials_error")
-
-        proxy = account.proxy if account else ""
-        account_slot = account.slot() if account else contextlib.nullcontext()
-
-        with account_slot:
-            if want_stream:
+        while True:
+            account, session = None, None
+            if pooled:
+                account, session = cp.acquire_account(exclude_ids=tried_account_ids)
+            else:
+                # 池里没有任何启用账号时才回退单会话链路（web json -> config -> IDE）。
                 try:
-                    upstream = codearts_route.stream(payload, session=session, proxy=proxy)
-                except codearts_route.CodeArtsError as exc:
+                    session = codearts_route.load_session()
+                except Exception as exc:
+                    log("codearts: no usable login: %s" % exc)
+                    return self._error(
+                        502, "CodeArts login unavailable: %s - open CodeArts Agent and "
+                             "sign in, then retry (the gateway reads its session, it "
+                             "never renews it)" % exc, "credentials_error")
+
+            if session is None:
+                # 先区分「凭据失效」与「并发满载」：取号时 STS 续期被上游拒绝，
+                # 等多少秒都不会腾出空槽位，回 429 只会让客户端无限退避重试。
+                cred_err = cp.credential_error_snapshot() if cp else None
+                cred_age = time.time() - float(cred_err.get("at") or 0) if cred_err else 1e9
+                if cred_err and cred_age < codearts_accounts.CREDENTIAL_ERROR_COOLDOWN:
+                    log("codearts: credential refresh failed (account=%s): %s"
+                        % (cred_err.get("label") or "unknown",
+                           cred_err.get("message") or ""), level="WARN")
+                    return self._error(
+                        502,
+                        "CodeArts 账号凭据已失效（%s）：%s。请在 CodeArts 看板重新登录授权；"
+                        "这不是并发限流，重试不会自行恢复。"
+                        % (cred_err.get("label") or "unknown",
+                           cred_err.get("message") or "STS refresh rejected"),
+                        "credentials_error")
+                remaining = deadline - time.time()
+                if remaining > 0:
+                    queued_at = wb_queue.enter("codearts")
+                    log("[queued] upstream=codearts reason=no-slot active=%d waiting<=%.1fs"
+                        % (wb_queue.active(), min(remaining, 1.0)), level="WARN", tag="queue")
+                    time.sleep(min(remaining, 1.0))
+                    waited_ms = wb_queue.leave("codearts", queued_at, outcome="retry")
+                    log("[queued] upstream=codearts released waited=%dms" % waited_ms,
+                        level="WARN", tag="queue")
+                    tried_account_ids.clear()
+                    continue
+                log("codearts: no free slot after %.0fs, answering 429 fast" % CODEARTS_QUEUE_WAIT_SECONDS)
+                log("[queued] upstream=codearts action=fast-fail reason=no-slot retry_after=%ds"
+                    % CODEARTS_RETRY_AFTER_SECONDS, level="WARN", tag="queue")
+                return self._error(
+                    429, "CodeArts 并发已满（单账号上限 3 个会话），请稍后重试", "rate_limit_error",
+                    headers={"Retry-After": str(CODEARTS_RETRY_AFTER_SECONDS)})
+
+            if account:
+                tried_account_ids.add(account.id)
+            proxy = account.proxy if account else ""
+            account_slot = account.reserved_slot() if account else contextlib.nullcontext()
+
+            with account_slot:
+                if want_stream:
+                    try:
+                        upstream = codearts_route.stream(payload, session=session, proxy=proxy)
+                    except (codearts_route.CodeArtsError, Exception) as exc:
+                        status, body = codearts_route.error_payload(exc)
+                        err_code = getattr(exc, "code", "") or ""
+                        err_msg = str(getattr(exc, "message", "") or exc or "")
+                        is_concurrency = (err_code == "TM.00001041" or "TM.00001041" in err_msg or "并发会话数已达上限" in err_msg)
+                        if account and cp:
+                            if is_concurrency:
+                                # 并发满是**临时的**：拉黑账号只会把请求推回单会话
+                                # 路径继续硬打上游。这里什么都不做，下面的等待重试
+                                # 会等到槽位腾出来后重试同一账号。
+                                pass
+                            elif status == 429:
+                                cp.mark_cooldown(account.id, 60.0)
+                            elif status == 403:
+                                cp.mark_restricted(account.id, 7200.0, str(exc))
+                        log("codearts: stream setup failed (account=%s, status=%s, code=%s): %s" % (
+                            account.label if account else "single", status, err_code, exc))
+                        other_accounts = bool(cp) and any(
+                            a.enabled and a.id not in tried_account_ids for a in cp.accounts)
+                        if (status in (429, 403, 502, 503) or is_concurrency) and other_accounts:
+                            log("codearts: failing over to next available account in pool...")
+                            continue
+                        if is_concurrency and time.time() < deadline:
+                            queued_at = wb_queue.enter("codearts")
+                            log("[queued] upstream=codearts reason=upstream-concurrency active=%d"
+                                % wb_queue.active(), level="WARN", tag="queue")
+                            time.sleep(1.0)
+                            wb_queue.leave("codearts", queued_at, outcome="retry")
+                            tried_account_ids.clear()
+                            continue
+                        if is_concurrency:
+                            log("[queued] upstream=codearts action=fast-fail reason=upstream-concurrency "
+                                "retry_after=%ds" % CODEARTS_RETRY_AFTER_SECONDS,
+                                level="WARN", tag="queue")
+                            return self._error(
+                                429, "CodeArts 并发已满（单账号上限 3 个会话），请稍后重试",
+                                "rate_limit_error",
+                                headers={"Retry-After": str(CODEARTS_RETRY_AFTER_SECONDS)})
+                        msg = body.get("error", {}).get("message", str(exc)) if isinstance(body, dict) else str(exc)
+                        kind = body.get("error", {}).get("type", "upstream_error") if isinstance(body, dict) else "upstream_error"
+                        return self._error(status, msg, err_type=kind)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Connection", "close")
+                    if cors_origin_allowed(self.path):
+                        self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    try:
+                        for raw in upstream:
+                            line = raw.decode("utf-8", "replace")
+                            if not line.strip():
+                                continue
+                            # 旧逻辑：原样透传上游行。
+                            # 上游 SSE 事件之间只有单个 \n，且 "data:" 后没有空格；
+                            # 标准 SSE 客户端会把连续的 data 行合并成一个事件，再整体 JSON.parse
+                            # 失败，报错形如 "JSON Parse error: Unable to parse JSON string"。
+                            # self.wfile.write(line.encode("utf-8"))
+                            # self.wfile.flush()
+                            # 新逻辑：规范化为标准 SSE 事件（data: 后补空格、事件之间空行分隔）。
+                            text = line.rstrip("\r\n")
+                            if text.startswith("data:"):
+                                frame = "data: %s\n\n" % text[5:].lstrip()
+                            else:
+                                frame = text + "\n\n"
+                            self.wfile.write(frame.encode("utf-8"))
+                            self.wfile.flush()
+                        self.wfile.write(b"\n")
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                        log("codearts: client disconnected during stream")
+                        return
+                    except Exception as exc:
+                        log("codearts: stream aborted: %s" % exc)
+                        try:
+                            err = json.dumps({"error": {"message": str(exc),
+                                                        "type": "upstream_error"}})
+                            self.wfile.write(("data: %s\n\n" % err).encode("utf-8"))
+                            self.wfile.write(b"data: [DONE]\n\n")
+                            self.wfile.flush()
+                        except Exception:
+                            pass
+                        return
+                    finally:
+                        try:
+                            upstream.close()
+                        except Exception:
+                            pass
+                    log("codearts: stream done, %dms" % int((time.time() - t_start) * 1000))
+                    return
+
+                try:
+                    result = codearts_route.complete(payload, session=session, proxy=proxy)
+                except (codearts_route.CodeArtsError, Exception) as exc:
                     status, body = codearts_route.error_payload(exc)
+                    err_code = getattr(exc, "code", "") or ""
+                    err_msg = str(getattr(exc, "message", "") or exc or "")
+                    is_concurrency = (err_code == "TM.00001041" or "TM.00001041" in err_msg or "并发会话数已达上限" in err_msg)
                     if account and cp:
-                        if status == 429:
+                        if is_concurrency:
+                            # 并发满不是账号故障，不拉黑；下面按截止时间等待重试。
+                            pass
+                        elif status == 429:
                             cp.mark_cooldown(account.id, 60.0)
                         elif status == 403:
                             cp.mark_restricted(account.id, 7200.0, str(exc))
-                    log("codearts: stream setup failed: %s" % exc)
+                    log("codearts: upstream error %s (account=%s, code=%s): %s" % (
+                        status, account.label if account else "single", err_code, exc))
+                    other_accounts = bool(cp) and any(
+                        a.enabled and a.id not in tried_account_ids for a in cp.accounts)
+                    if (status in (429, 403, 502, 503) or is_concurrency) and other_accounts:
+                        log("codearts: failing over to next available account in pool...")
+                        continue
+                    if is_concurrency and time.time() < deadline:
+                        queued_at = wb_queue.enter("codearts")
+                        log("[queued] upstream=codearts reason=upstream-concurrency active=%d"
+                            % wb_queue.active(), level="WARN", tag="queue")
+                        time.sleep(1.0)
+                        wb_queue.leave("codearts", queued_at, outcome="retry")
+                        tried_account_ids.clear()
+                        continue
+                    if is_concurrency:
+                        log("[queued] upstream=codearts action=fast-fail reason=upstream-concurrency "
+                            "retry_after=%ds" % CODEARTS_RETRY_AFTER_SECONDS,
+                            level="WARN", tag="queue")
+                        return self._error(
+                            429, "CodeArts 并发已满（单账号上限 3 个会话），请稍后重试",
+                            "rate_limit_error",
+                            headers={"Retry-After": str(CODEARTS_RETRY_AFTER_SECONDS)})
                     msg = body.get("error", {}).get("message", str(exc)) if isinstance(body, dict) else str(exc)
                     kind = body.get("error", {}).get("type", "upstream_error") if isinstance(body, dict) else "upstream_error"
                     return self._error(status, msg, err_type=kind)
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-                self.send_header("Cache-Control", "no-cache")
-                self.send_header("Connection", "close")
-                if cors_origin_allowed(self.path):
-                    self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                try:
-                    for raw in upstream:
-                        line = raw.decode("utf-8", "replace")
-                        if not line.strip():
-                            continue
-                        # 旧逻辑：原样透传上游行。
-                        # 上游 SSE 事件之间只有单个 \n，且 "data:" 后没有空格；
-                        # 标准 SSE 客户端会把连续的 data 行合并成一个事件，再整体 JSON.parse
-                        # 失败，报错形如 "JSON Parse error: Unable to parse JSON string"。
-                        # self.wfile.write(line.encode("utf-8"))
-                        # self.wfile.flush()
-                        # 新逻辑：规范化为标准 SSE 事件（data: 后补空格、事件之间空行分隔）。
-                        text = line.rstrip("\r\n")
-                        if text.startswith("data:"):
-                            frame = "data: %s\n\n" % text[5:].lstrip()
-                        else:
-                            frame = text + "\n\n"
-                        self.wfile.write(frame.encode("utf-8"))
-                        self.wfile.flush()
-                    self.wfile.write(b"\n")
-                    self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-                    log("codearts: client disconnected during stream")
-                    return
                 except Exception as exc:
-                    log("codearts: stream aborted: %s" % exc)
-                    try:
-                        err = json.dumps({"error": {"message": str(exc),
-                                                    "type": "upstream_error"}})
-                        self.wfile.write(("data: %s\n\n" % err).encode("utf-8"))
-                        self.wfile.write(b"data: [DONE]\n\n")
-                        self.wfile.flush()
-                    except Exception:
-                        pass
-                    return
-                finally:
-                    try:
-                        upstream.close()
-                    except Exception:
-                        pass
-                log("codearts: stream done, %dms" % int((time.time() - t_start) * 1000))
-                return
-
-            try:
-                result = codearts_route.complete(payload, session=session, proxy=proxy)
-            except codearts_route.CodeArtsError as exc:
-                status, body = codearts_route.error_payload(exc)
-                if account and cp:
-                    if status == 429:
-                        cp.mark_cooldown(account.id, 60.0)
-                    elif status == 403:
-                        cp.mark_restricted(account.id, 7200.0, str(exc))
-                log("codearts: upstream error %s: %s" % (status, exc))
-                msg = body.get("error", {}).get("message", str(exc)) if isinstance(body, dict) else str(exc)
-                kind = body.get("error", {}).get("type", "upstream_error") if isinstance(body, dict) else "upstream_error"
-                return self._error(status, msg, err_type=kind)
-            except Exception as exc:
-                log("codearts: unexpected error: %s" % exc)
-                return self._error(502, "CodeArts upstream error: %s" % exc)
-            return self._json(200, result)
+                    log("codearts: unexpected error: %s" % exc)
+                    return self._error(502, "CodeArts upstream error: %s" % exc)
+                return self._json(200, result)
 
     def _proxy_to_antigravity(self, method="GET", payload=None):
         """Forward requests to Antigravity proxy service on 127.0.0.1:43810."""
@@ -9711,6 +9961,12 @@ def _bootstrap_runtime(args):
     POOL.apply_proxy_slots()
     POOL.apply_reserve_credits()
     CODEARTS_POOL = codearts_accounts.CodeArtsAccountPool(ACCOUNTS_DIR)
+    # 后台按 safelyRenewTokenInterval 收敛出的窗口主动续期，避免长时间无请求时
+    # STS 静默过期、下一次请求才发现 refresh token 已经被别的消费者用掉。
+    try:
+        CODEARTS_POOL.start_background_renewal()
+    except Exception as exc:
+        log("codearts: could not start STS renewal thread: %s" % exc)
     apply_daily_token_limit()
     load_persisted_realm()
     global SCHEDULER

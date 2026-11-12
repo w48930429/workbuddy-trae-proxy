@@ -59,6 +59,9 @@ class CodeArtsSession:
     domain_id: str = ""
     account_label: str = ""
     source: str = "desktop"
+    # 站点：``cn`` 国内 / ``intl`` 海外（ap-southeast-1）。聊天与积分接口的
+    # 主机按站点区分，STS 两者共用 cn-north-4（华为云官方扩展同样只写死这一个）。
+    region: str = "cn"
 
     @property
     def has_sts(self):
@@ -75,6 +78,7 @@ class CodeArtsSession:
             "expiresAt": self.expires_at,
             "domainId": (self.domain_id[:8] + "…") if self.domain_id else "",
             "source": self.source,
+            "region": self.region or "cn",
         }
 
 
@@ -187,6 +191,7 @@ def _parse_session(plain, source="desktop"):
         domain_id=str(data.get("domainId") or "").strip(),
         account_label=str((account or {}).get("label") or "").strip(),
         source=source,
+        region=str(data.get("region") or "cn").strip() or "cn",
     )
 
 
@@ -257,6 +262,7 @@ def load_config_ak_sk(config_path=CONFIG_PATH):
                 secret_key=sk,
                 account_label=ca_cfg.get("account") or "ConfigAKSK",
                 source="config_ak_sk",
+                region=str(ca_cfg.get("region") or "cn").strip() or "cn",
             )
     except Exception:
         pass

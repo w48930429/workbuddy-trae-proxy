@@ -92,8 +92,20 @@ function sanitizeObject(schema: JsonObject): JsonObject {
   if (typeof s.exclusiveMinimum === 'number') s.minimum = s.exclusiveMinimum;
   if (typeof s.exclusiveMaximum === 'number') s.maximum = s.exclusiveMaximum;
 
-  // 5. const → enum
-  if (s.const !== undefined) s.enum = [s.const];
+  // 5. const → enum，并同步推断正确的 type：const 约束的是标量时，必须保留真实类型，
+  //    否则后续补全逻辑会把 type 默认成 object，导致 Google 判定 schema 非法
+  //    （实测 omp 的 eval 工具 language 参数为 {const: "js"}，转换后会变成
+  //    {type: "object", enum: ["js"], properties: {}}, 上游返回 400 INVALID_ARGUMENT）
+  //    仅对标量 const 生成 enum；对象 / 数组 const 不适用枚举约束，直接丢弃，
+  //    否则会生成 {type: "object", enum: [<对象>]} 这类非法 schema，触发上游 400
+  const constValue = s.const;
+  if ((s.type === undefined || s.type === null) && typeof constValue !== 'object' && constValue !== null) {
+    s.enum = [constValue];
+    if (typeof constValue === 'string') s.type = 'string';
+    else if (typeof constValue === 'number') s.type = 'number';
+    else if (typeof constValue === 'boolean') s.type = 'boolean';
+    else if (constValue === null) s.type = 'null';
+  }
 
   // 6. 补全缺失的 type
   if (s.type === undefined || s.type === null) {

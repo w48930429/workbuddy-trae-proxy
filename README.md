@@ -104,6 +104,8 @@ graph TD
 | `codearts_session.py` | 只读读取本机 IDE 登录态（DPAPI → OSCrypt/AES-GCM） |
 | `codearts_client.py` | 身份头、稳定 session id、`error_code` 归一化、仅流式模型适配 |
 | `codearts_route.py` | OpenAI 兼容封装、`codearts-` 前缀映射、模型底座清单 |
+| `codearts_browser.py` | 网页登录用的一次性隔离浏览器实例（独立 `--user-data-dir`，授权后关闭并删除） |
+| `codearts_oauth.py` | PKCE + DPoP 授权、STS 换取/续期、多账号池同步与网页登录回调 |
 
 网关接入点：`wb_proxy.py` 的 `_route_to_codearts` / `_handle_codearts`（`/codearts/status`、`/codearts/models`、`/codearts/credits`），`/v1/models` 追加 10 个 `codearts-` 前缀条目，看板新增「CodeArts 看板」页签。
 
@@ -326,6 +328,32 @@ export OPENAI_API_KEY="你在看板设置中添加并绑定的API_Key"
 ---
 
 ## 六、版本更新记录 (Changelog)
+### 2026-11-10 修 CodeArts「用着用着自动跳到别的模型」：并发满不再回 400
+
+- **现象**：只开一个客户端（omp）用 `codearts-*` 模型，过一会儿就自动换到别的模型。看板却显示还有额度、账号也「可用」。
+- **根因（有日志证据）**：上游按 `x-ot-session-id` 限**单账号 3 并发**，超了回 `400` + `TM.00001041`；网关随后做了三件错事：
+  1. 把并发满当账号故障，`mark_cooldown(15s)` 拉黑账号；
+  2. 池里「没有可用账号」时回退到 `load_session()` 单会话路径，而那条路用的是**同一套凭据**、不计 `in_flight`、也不看冷却 → 请求绕过限流继续硬打上游；
+  3. 反复重试后把 `400` 抛给客户端，omp 把它当成「模型不可用」，立即换模型。
+  `wt-proxy-28087.err.log` 的实测形状：一段窗口里 **2 个客户端请求 → 99 次上游失败 + 100 次 failover**；全日志 2626 次失败中 2495 次走的是 `account=single`（回退路径）；861 次 400 之后紧接着是另一个模型的请求。
+- **修复**：
+  - 并发满不再拉黑账号（`TM.00001041` 是临时状态，不是账号故障）。
+  - **池里有启用账号时禁止回退 `load_session()`**，只有池里一个启用账号都没有时才走单会话链路。
+  - 选号与占位合并成原子的 `CodeArtsAccountPool.acquire_account()`（锁内 `in_flight += 1`），彻底堵掉「两个线程同时通过 `<3` 判断 → 计数到 4」的竞态；新增 `acquire_slot/release_slot/reserve_slot`。
+  - 满员时排队等空位，最多 `WB_CODEARTS_QUEUE_WAIT`（默认 20s），等不到才回 **429**（可重试），并统一改成 429 而不是 400。
+  - 看板文案把「3 并发插槽」改成「上限 3 并发」「`x / y` 并发上限」，明确 `x` 是当前运行数、`y` 是容量，避免把容量当成调用数。
+- **测试**：新增 `tests/_test_codearts_concurrency.py`（真实 HTTP 服务 + 假上游）：4 个并发 → 3×200 + 1×429 且上游峰值 ≤ 3；排队模式 → 4×200 且上游只被调用 4 次（不再重试风暴）。`_test_codearts_failover.py` 改为断言「并发满不冷却、全满回 429、繁忙时绝不回退单会话」，并加 6 线程抢占只应拿到 3 个槽位。
+
+### 2026-11-10 CodeArts 网页授权内嵌看板标签页，并区分国内 / 海外双站点
+
+- **内嵌标签，不弹窗**：点「🇨🇳 国内版登录 / 🌏 海外版登录」后，看板顶部出现 **CodeArts 授权** 标签并自动切过去，华为云授权页用 `iframe#iframeCodeartsLogin` 直接嵌在本页里（与反重力看板同一套做法）。标签内有站点徽标、授权状态、重载、在新窗口打开、关闭授权；轮询到成功后自动收起标签并回到 CodeArts 看板刷新账号。
+  - 实测两个门户与 `auth.huaweicloud.com/authui/login.html` 都不下发 `X-Frame-Options` / `frame-ancestors`，登录页可在 iframe 内正常渲染与交互。
+  - **代价**：iframe 共用当前浏览器的华为云 Cookie。若浏览器已登录旧账号，需在页面内先退出，或用「在新窗口打开」走隔离浏览器登录全新账号（标签内已写明该提示）。
+- **`embed` 开关**：`POST /codearts/oauth/start` 接受 `{"region":"cn"|"intl","embed":true}`；`embed=true` 时网关**只返回 URL、绝不启动浏览器进程**，响应含 `embedded`。看板一律用 `embed=true`。
+- **隔离浏览器仍保留**（`codearts/codearts_browser.py`）：不带 `embed` 调用时，用 `--user-data-dir=<临时目录> --no-first-run --no-default-browser-check --new-window <授权URL>` 起全新 profile 的 Edge/Chrome/Brave，无历史 Cookie，可登录新账号；回调结果页渲染约 6 秒后结束进程并删 profile，放弃的登录 10 分钟后清理，残留目录按 24 小时 TTL 修剪。找不到浏览器时返回 `browser_error` 由调用方兜底。
+- **国内 / 海外双站点**：国内 `https://codearts.huaweicloud.com/portal`（`locale=zh-cn`）、海外 `https://codearts.ap-southeast-1.huaweicloud.com/portal`（`locale=en-us`）。站点随凭据持久化（`region: cn|intl`），聊天、积分、福利接口按站点分流到 `snap-access.cn-north-4` / `snap-access.ap-southeast-1`；STS 令牌端点两站共用 `sts.cn-north-4`（与官方扩展一致）。两站账号可同池共存，互不覆盖。
+- **接口**：`POST /codearts/oauth/start` 响应含 `region`、`embedded`、`browser`、`browser_launched`、`browser_error`。调试可用 `CODEARTS_NO_BROWSER=1` 关闭自动启动浏览器。
+- 新增 `tests/_test_codearts_browser.py`（隔离 profile 参数、无浏览器降级、进程关闭后删除 profile、TTL 清理）；`_test_codearts_oauth.py` 覆盖 embed 模式不启动浏览器、启动/回调清理、双站点 URL 与凭据站点持久化；`_test_codearts_client.py` 覆盖按站点选上游主机。
 
 ### 2026-10-29 接入 CodeArts 为第五上游（纯 Python 复刻）
 

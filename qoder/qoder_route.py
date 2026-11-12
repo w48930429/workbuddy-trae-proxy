@@ -32,7 +32,15 @@ _seq_counter = 0
 
 # 上游排队限流（code 10605 / isQueued）：同账号原地等待重试。免费档账号被
 # 排进 p3 队列时，换号只是把同样的排队换个账号再挨一次，只有等待有意义。
-QUEUE_MAX_WAITS = 2           # 单个请求内最多原地等待次数
+# 旧逻辑：单个请求内最多原地等待 2 次、每次最多 60s，客户端全程没有输出，
+# 看起来就是卡死。默认 0：把排队错误立刻交回网关，由网关回 429 +
+# Retry-After，客户端自己决定重试节奏。需要旧行为时设 QODER_QUEUE_MAX_WAITS=2。
+# QUEUE_MAX_WAITS = 2
+QUEUE_MAX_WAITS = int(os.environ.get("QODER_QUEUE_MAX_WAITS", "0"))
+# 排队是模型级队列（queueType p3/p4），换账号偶尔能躲开（付费档不排队）。
+# 默认最多撞 2 个账号就收手：账号多的时候逐个试会退化成十几次上游往返，
+# 客户端依然觉得慢。
+QUEUE_MAX_ACCOUNTS = int(os.environ.get("QODER_QUEUE_MAX_ACCOUNTS", "2"))
 QUEUE_DEFAULT_WAIT_SECONDS = 30  # 详情里没有 retryAfterSeconds 时的兜底等待
 QUEUE_MAX_WAIT_SECONDS = 60    # 单次等待上限（详情可能给到 300）
 
@@ -691,10 +699,13 @@ def ensure_catalog(slot: pool.Slot):
 
 
 def is_flash_promo_model(model_key: str) -> bool:
-    """判断是否为参与限时免费活动的千问 3.8 Flash 模型。"""
+    """判断是否为限免/0倍率活动模型（千问 3.8 Flash、QoDuck 等）。"""
     mk = (model_key or "").lower()
-    return mk in ("qfmodel", "qmodel_38flash", "qwen3.8-flash", "qwen-flash", "qwen") or ("qwen" in mk and "flash" in mk)
-
+    if mk in ("qfmodel", "qmodel_38flash", "qwen3.8-flash", "qwen-flash", "qwen") or ("qwen" in mk and "flash" in mk):
+        return True
+    if mk in ("qoduck", "lmodel") or "qoduck" in mk:
+        return True
+    return False
 
 def _safe_pool_size(p: pool.Pool, realm: str = "") -> int:
     try:
@@ -891,6 +902,7 @@ def call_qoder(payload: dict, on_delta=None, proxy: str = "", realm: str = "") -
     collected_content = []
     collected_usage = {}
     waited = 0
+    queue_failed_accounts = 0
 
     while True:
         slot, ok = pick_slot_for_model(p, mapped, tried, realm=realm)
@@ -936,17 +948,22 @@ def call_qoder(payload: dict, on_delta=None, proxy: str = "", realm: str = "") -
             emitted_any, err = stream_with_slot(slot, qurl, body, extra, on_delta_raw)
             if err is None:
                 break
-            # 排队限流（10605 / isQueued）：等上游指定的 retryAfterSeconds 后
-            # 原地重试同一账号，不冷却也不换号 —— 免费档被排进 p3 队列时
-            # 这是唯一能拿到响应的路径。已开始出内容就不再等，直接走失败路径。
-            if (not emitted_any and pool.is_queued_error(err)
-                    and waited < QUEUE_MAX_WAITS):
+            # 排队限流（10605 / isQueued）：旧逻辑会原地等待最多 2 次 × 60s，
+            # 客户端在这段时间里完全没有输出，看起来就是卡死。现在默认不等待
+            # （QUEUE_MAX_WAITS=0）：立刻把排队错误交回网关，由网关回 429 +
+            # Retry-After，客户端自己决定何时重试。已开始出内容就不再等。
+            if not emitted_any and pool.is_queued_error(err):
                 delay = pool.retry_after_seconds(err) or QUEUE_DEFAULT_WAIT_SECONDS
-                waited += 1
-                log("qoder: %s queued on '%s', retry in %ds (%d/%d)"
-                    % (model, slot.id, delay, waited, QUEUE_MAX_WAITS))
-                time.sleep(min(delay, QUEUE_MAX_WAIT_SECONDS))
-                continue
+                if waited < QUEUE_MAX_WAITS:
+                    waited += 1
+                    log("[queued] upstream=qoder model=%s account=%s retry_in=%ds (%d/%d)"
+                        % (model, slot.id, delay, waited, QUEUE_MAX_WAITS))
+                    time.sleep(min(delay, QUEUE_MAX_WAIT_SECONDS))
+                    continue
+                log("[queued] upstream=qoder model=%s account=%s action=fast-fail retry_after=%ds"
+                    % (model, slot.id, delay))
+                queue_failed_accounts += 1
+                break
             # token 失效 → 尝试凭证轮换（dt- ↔ drt-）后重试同一账号，每账号一次
             if (not emitted_any and pool.is_token_expired(err)
                     and slot.id not in refreshed):
@@ -977,6 +994,10 @@ def call_qoder(payload: dict, on_delta=None, proxy: str = "", realm: str = "") -
         last_err = err
         if emitted_any:
             break
+        if pool.is_queued_error(err) and queue_failed_accounts >= QUEUE_MAX_ACCOUNTS:
+            log("[queued] upstream=qoder model=%s action=stop-failover after %d queued account(s)"
+                % (model, queue_failed_accounts))
+            break
 
         # 千问3.8 Flash 每日免费额度用尽：标记该账号 Flash 额度耗尽，记录日志，并换号重试
         if pool.is_flash_free_exhausted(err):
@@ -997,6 +1018,11 @@ def call_qoder(payload: dict, on_delta=None, proxy: str = "", realm: str = "") -
     status = pool.error_status(last_err, etype)
     if pool.is_flash_free_exhausted(last_err) or etype == "flash_free_quota_exhausted":
         status = 429
+    # 上游排队（10605 / isQueued）是临时不可用，必须回 429 让客户端退避重试。
+    # 若按上游原始的 403 抛出去，网关会把它当成封禁/持久失败，进而触发跨厂商
+    # 兜底，把另一家也拖进同一个拥堵窗口。
+    if pool.is_queued_error(last_err):
+        status = 429
     record_qoder_usage(model, last_slot_id, on_delta is not None, "failed",
                        int((time.time() - _t0) * 1000), 0, 0, 0, str(last_err))
     return status, json.dumps({"error": {"type": etype, "message": msg}})
@@ -1009,8 +1035,9 @@ def _friendly_error(err: Exception, p: Optional[pool.Pool] = None,
         hrs = rem_s // 3600
         mins = (rem_s % 3600) // 60
         time_str = f"{hrs}小时{mins}分" if hrs > 0 else f"{mins}分钟"
+        model_name = "QoDuck (lmodel)" if model_key in ("lmodel", "qoduck") else "千问3.8 Flash"
         return (
-            f"当前 Qoder 账号千问3.8 Flash 当日免费额度已用尽（上游提示：{getattr(err, 'detail', '') or str(err)}）。"
+            f"当前 Qoder 账号 {model_name} 当日免费额度已用尽（上游提示：{getattr(err, 'detail', '') or str(err)}）。"
             f"免费活动额度将于次日 00:00 (UTC+8) 自动刷新恢复（约剩余 {time_str}）。"
             "如需继续使用，请在控制台添加新账号或切换至其他模型。",
             "flash_free_quota_exhausted",
@@ -1100,7 +1127,142 @@ def qoder_models(proxy: str = "", realm: str = "") -> list[dict]:
                 break
             except Exception:
                 continue
+
+    # ── 常驻免费模型 QoDuck 补齐（即使上游动态目录隐藏它，底层依然完全支持调用）──
+    has_lmodel = any(m.get("qoder_key") == "lmodel" or str(m.get("id")).lower() in ("qoduck", "lmodel") for m in models)
+    if not has_lmodel:
+        models.insert(0, {
+            "id": "QoDuck",
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "qoder",
+            "region": "cn",
+            "regions": ["cn", "global"],
+            "qoder_key": "lmodel",
+            "is_reasoning": False,
+            "context_window": 131072,
+            "price_factor": 0.0,
+            "max_output_tokens": 16384,
+        })
     return models
+
+
+def probe_free_quota(realm: str = "", model: str = "qoduck", proxy: str = "") -> dict:
+    """针对池内账号探测免费模型（如 QoDuck / Qwen3.8-Flash）的当日额度可用性。"""
+    p = get_pool(proxy)
+    target_realm = pool.normalize_realm(realm)
+    slots = _safe_pool_snapshot(p, realm=target_realm) if target_realm else _safe_pool_snapshot(p)
+    slots = [s for s in slots if s.enabled]
+
+    mapped = map_model(model, "chat")
+    template_base = _get_template_base()
+    results = []
+    avail_count = 0
+    exhaust_count = 0
+    queued_count = 0
+
+    for slot in slots:
+        ep = client.get_endpoints(slot.region)
+        qurl = ep.chat_stream_url
+
+        if slot.flash_free_exhausted:
+            exhaust_count += 1
+            results.append({
+                "id": slot.id,
+                "name": slot.name,
+                "region": slot.region,
+                "status": "exhausted",
+                "exhausted": True,
+                "cached": True,
+                "reset_at": slot.flash_free_reset_at,
+                "error": slot.last_error or "今日免费额度已耗尽",
+            })
+            continue
+
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": "1"}],
+            "max_tokens": 1,
+            "temperature": 0.1,
+        }
+        body = build_qoder_request_body(payload, template_base, proxy)
+        nid = cosy.new_uuid()
+        body["request_id"] = nid
+        body["chat_record_id"] = nid
+        body["request_set_id"] = cosy.new_uuid()
+        body["session_id"] = cosy.new_uuid()
+        body["aliyun_user_type"] = slot.sess.identity.user_type if slot.sess and slot.sess.identity else "personal_standard"
+        biz = body.get("business")
+        if isinstance(biz, dict):
+            biz["id"] = cosy.new_uuid()
+            biz["begin_at"] = cosy.unix_ms()
+
+        extra = {
+            "x-model-key": mapped,
+            "x-model-source": "system",
+        }
+
+        t0 = time.time()
+        emitted_any, err = stream_with_slot(slot, qurl, body, extra, lambda delta: None)
+        latency_ms = int((time.time() - t0) * 1000)
+
+        if err is None:
+            slot.clear_flash_free_exhausted()
+            avail_count += 1
+            results.append({
+                "id": slot.id,
+                "name": slot.name,
+                "region": slot.region,
+                "status": "available",
+                "exhausted": False,
+                "latency_ms": latency_ms,
+            })
+        elif pool.is_flash_free_exhausted(err):
+            p.mark_flash_free_exhausted(slot.id, str(err))
+            exhaust_count += 1
+            results.append({
+                "id": slot.id,
+                "name": slot.name,
+                "region": slot.region,
+                "status": "exhausted",
+                "exhausted": True,
+                "reset_at": slot.flash_free_reset_at,
+                "error": str(err),
+            })
+        elif pool.is_queued_error(err):
+            queued_count += 1
+            results.append({
+                "id": slot.id,
+                "name": slot.name,
+                "region": slot.region,
+                "status": "queued",
+                "exhausted": False,
+                "error": "上游排队中（并发资源限制，非额度耗尽）",
+                "latency_ms": latency_ms,
+            })
+        else:
+            results.append({
+                "id": slot.id,
+                "name": slot.name,
+                "region": slot.region,
+                "status": "error",
+                "exhausted": False,
+                "error": str(err),
+                "latency_ms": latency_ms,
+            })
+
+    return {
+        "ok": True,
+        "model": model,
+        "mapped_model": mapped,
+        "results": results,
+        "summary": {
+            "total": len(slots),
+            "available": avail_count,
+            "exhausted": exhaust_count,
+            "queued": queued_count,
+        }
+    }
 
 
 # ── 自测 ──────────────────────────────────────────────────────────────────

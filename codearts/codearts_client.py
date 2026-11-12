@@ -35,11 +35,28 @@ try:
 except ImportError:
     import codearts_signer as signer
 
-CHAT_HOST = "https://snap-access.cn-north-4.myhuaweicloud.com"
+# 上游按站点分主机：国内 cn-north-4、海外 ap-southeast-1（官方扩展的
+# snapEngineApiHost / intlSnapEngineApiHost 就是这么分流的）。
+CHAT_HOSTS = {
+    "cn": "https://snap-access.cn-north-4.myhuaweicloud.com",
+    "intl": "https://snap-access.ap-southeast-1.myhuaweicloud.com",
+}
 CHAT_PATH = "/api/v2/chat/completions"
 CREDITS_PATH = "/snap-manager/v1/statistics/plugin"
 WELFARE_DELIVERY_PATH = "/v1/ops/delivery"
 WELFARE_CLAIM_PATH = "/v1/ops/claim"
+
+
+def normalize_region(region):
+    """只认 ``cn`` / ``intl``；未知值按国内站处理。"""
+    text = str(region or "").strip().lower()
+    return text if text in CHAT_HOSTS else "cn"
+
+
+def chat_host(session):
+    """按会话站点返回上游主机。站点跟着凭据走，不跟全局配置走。"""
+    return CHAT_HOSTS[normalize_region(getattr(session, "region", "cn"))]
+
 
 # 客户端版本：上游按这些头做路由/埋点/限流，缺省值对齐 CodeArts Agent 26.9.902。
 PLUGIN_NAME = "codemate_vscode"
@@ -187,7 +204,7 @@ def parse_response(resp):
 
 def call_chat(payload, session, timeout=600, proxy=""):
     """非流式对话。返回上游 JSON。"""
-    request = build_signed_request(CHAT_HOST + CHAT_PATH, payload, session,
+    request = build_signed_request(chat_host(session) + CHAT_PATH, payload, session,
                                    "POST", chat_headers(payload.get("model"), session))
     return parse_response(_urlopen(request, timeout, proxy))
 
@@ -200,7 +217,7 @@ def stream_chat(payload, session, timeout=600, proxy=""):
     客户端会收到一个 0 字节的 SSE 流并误以为是空回答。
     """
     body = dict(payload, stream=True)
-    request = build_signed_request(CHAT_HOST + CHAT_PATH, body, session,
+    request = build_signed_request(chat_host(session) + CHAT_PATH, body, session,
                                    "POST", chat_headers(body.get("model"), session))
     response = _urlopen(request, timeout, proxy)
     if isinstance(response, _ErrorResponse):
@@ -215,7 +232,7 @@ def stream_chat(payload, session, timeout=600, proxy=""):
 def fetch_credits(session, timeout=30, proxy=""):
     """积分套餐与用量。没有 ``usageTotalPackageCredit`` 表示当前不是积分套餐。"""
     headers = {"X-Language": "zh-cn", "app-id": APP_ID}
-    request = build_signed_request(CHAT_HOST + CREDITS_PATH, None, session,
+    request = build_signed_request(chat_host(session) + CREDITS_PATH, None, session,
                                    "GET", headers)
     return parse_response(_urlopen(request, timeout, proxy))
 
@@ -228,7 +245,7 @@ def fetch_welfare_delivery(session, channel="IDE", timeout=15, proxy=""):
         "X-Language": "zh-cn",
         "Content-Type": "application/json",
     }
-    url = f"{CHAT_HOST}{WELFARE_DELIVERY_PATH}?channel={channel}"
+    url = f"{chat_host(session)}{WELFARE_DELIVERY_PATH}?channel={channel}"
     request = build_signed_request(url, None, session, "GET", headers)
     return parse_response(_urlopen(request, timeout, proxy))
 
@@ -248,7 +265,7 @@ def claim_welfare(session, campaign_id, benefit_id=None, channel="IDE", timeout=
     }
     if benefit_id:
         payload["benefitId"] = benefit_id
-    url = f"{CHAT_HOST}{WELFARE_CLAIM_PATH}"
+    url = f"{chat_host(session)}{WELFARE_CLAIM_PATH}"
     request = build_signed_request(url, payload, session, "POST", headers)
     return parse_response(_urlopen(request, timeout, proxy))
 

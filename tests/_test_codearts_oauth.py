@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -122,15 +123,79 @@ class AuthorizeUrlTests(unittest.TestCase):
         url = codearts_oauth.build_authorize_url(39999, "abc")
         self.assertIn("port=39999", url)
 
+    def test_intl_authorize_url_uses_overseas_portal(self):
+        """海外版必须打 ap-southeast-1 门户 —— 国内门户里没有海外站账号。"""
+        url = codearts_oauth.build_authorize_url(28999, "abc", region="intl")
+        self.assertTrue(url.startswith(
+            "https://codearts.ap-southeast-1.huaweicloud.com/portal/authorize?"))
+        self.assertIn("locale=en-us", url)
+        self.assertIn("client_id=codearts-agent", url)
+
+    def test_cn_authorize_url_keeps_chinese_locale(self):
+        url = codearts_oauth.build_authorize_url(28999, "abc", region="cn")
+        self.assertTrue(url.startswith("https://codearts.huaweicloud.com/portal/authorize?"))
+        self.assertIn("locale=zh-cn", url)
+
+    def test_unknown_region_falls_back_to_cn(self):
+        self.assertEqual(codearts_oauth.normalize_region("us-east-9"), "cn")
+        self.assertEqual(codearts_oauth.normalize_region(""), "cn")
+        self.assertEqual(codearts_oauth.normalize_region("INTL"), "intl")
+
 
 class OAuthLifecycleTests(unittest.TestCase):
     def test_start_and_poll_session(self):
-        info = codearts_oauth.start_oauth_login(28999)
+        # 单元测试绝不启动真实浏览器：只验证授权 URL / 轮询状态。
+        with patch.dict(os.environ, {"CODEARTS_NO_BROWSER": "1"}):
+            info = codearts_oauth.start_oauth_login(28999)
         self.assertTrue(info["login_url"])
         self.assertEqual(info["port"], 28999)
+        self.assertFalse(info["browser_launched"])
+        self.assertIn("CODEARTS_NO_BROWSER", info["browser_error"])
 
         poll = codearts_oauth.get_oauth_poll_result()
         self.assertEqual(poll["status"], "pending")
+
+    def test_embed_mode_never_launches_a_browser(self):
+        """内嵌标签模式下网关不得再弹浏览器窗口，只交回 URL。"""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CODEARTS_NO_BROWSER", None)
+            with patch("codearts_browser.launch") as mock_launch:
+                info = codearts_oauth.start_oauth_login(28999, region="intl", embed=True)
+        mock_launch.assert_not_called()
+        self.assertTrue(info["embedded"])
+        self.assertFalse(info["browser_launched"])
+        self.assertEqual(info["browser_error"], "")
+        self.assertIn("ap-southeast-1", info["login_url"])
+
+    def test_start_login_launches_isolated_browser_and_cleans_up(self):
+        """授权页必须在隔离浏览器里打开，回调后要排定 profile/进程清理。"""
+        launched = {"ok": True, "browser": r"C:\browser\msedge.exe",
+                    "profile": r"C:\tmp\profile-1", "process": object()}
+        scheduled = []
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CODEARTS_NO_BROWSER", None)
+            with patch("codearts_browser.launch", return_value=launched):
+                with patch("codearts_oauth._schedule_profile_cleanup",
+                           side_effect=lambda p, proc, delay=6.0: scheduled.append((p, proc))):
+                    info = codearts_oauth.start_oauth_login(28999)
+                    self.assertTrue(info["browser_launched"])
+                    self.assertEqual(info["browser"], r"C:\browser\msedge.exe")
+                    ok, _html, _res = codearts_oauth.handle_oauth_callback(
+                        {"code": ["abc"]}, project_port=28999)
+        self.assertFalse(ok)  # token 交换会失败（未 mock 网络），但清理必须被排定
+        self.assertEqual(scheduled, [(r"C:\tmp\profile-1", launched["process"])])
+
+    def test_scheduled_cleanup_with_zero_delay_runs_now(self):
+        cleaned = []
+        with patch("codearts_browser.cleanup_profile",
+                   side_effect=lambda p, proc=None: cleaned.append((p, proc)) or True):
+            codearts_oauth._schedule_profile_cleanup(r"C:\tmp\profile-2", "proc", delay=0)
+        self.assertEqual(cleaned, [(r"C:\tmp\profile-2", "proc")])
+
+    def test_scheduled_cleanup_noop_without_profile(self):
+        with patch("codearts_browser.cleanup_profile") as mock_clean:
+            codearts_oauth._schedule_profile_cleanup("", None, delay=0)
+        mock_clean.assert_not_called()
 
     def test_callback_error_query(self):
         query = {"error": ["access_denied"], "error_description": ["User cancelled"]}
@@ -146,6 +211,44 @@ class OAuthLifecycleTests(unittest.TestCase):
         self.assertIn("Missing authorization code", html)
         self.assertEqual(result["status"], "failed")
 
+
+class RegionPersistenceTests(unittest.TestCase):
+    """登录站点必须落在凭据里 —— 否则海外账号会被打到国内上游。"""
+
+    def _token_data(self):
+        return {
+            "credentials": {
+                "access_key_id": "HSTAINTL0001",
+                "secret_access_key": "sk-intl",
+                "security_token": "sts-intl",
+                "expiration": "2026-11-09T12:00:00Z",
+            },
+            "refresh_token": "",
+        }
+
+    def test_token_response_records_intl_region(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "codearts_account.json")
+            saved = codearts_oauth._process_token_response(
+                self._token_data(), "verifier", {"publicKeyJwk": {}, "privateKeyJwk": {}},
+                save_path=path, region="intl")
+            self.assertEqual(saved["region"], "intl")
+            session = codearts_session.load_session_file(path)
+            self.assertEqual(session.region, "intl")
+
+    def test_token_response_defaults_to_cn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "codearts_account.json")
+            saved = codearts_oauth._process_token_response(
+                self._token_data(), "verifier", {"publicKeyJwk": {}, "privateKeyJwk": {}},
+                save_path=path)
+            self.assertEqual(saved["region"], "cn")
+
+    def test_start_login_remembers_requested_region(self):
+        with patch.dict(os.environ, {"CODEARTS_NO_BROWSER": "1"}):
+            info = codearts_oauth.start_oauth_login(28999, region="intl")
+        self.assertEqual(info["region"], "intl")
+        self.assertIn("ap-southeast-1", info["login_url"])
 
 class SessionTierTests(unittest.TestCase):
     def test_priority_web_oauth(self):
