@@ -1,5 +1,6 @@
 # 核心机密数据（千万不能上传到公共仓库）
 accounts/*.json
+accounts/*.bak*
 !accounts/README.txt
 data/
 
