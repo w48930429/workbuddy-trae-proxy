@@ -4,6 +4,7 @@ import { AccountPool } from './pool/account-pool.js';
 import { TokenRefresher } from './pool/refresher.js';
 import { QuotaManager } from './pool/quota-manager.js';
 import { RequestExecutor } from './pool/breaker.js';
+import { AppealRechecker } from './pool/appeal-rechecker.js';
 import { createServer } from './gateway/server.js';
 
 async function main() {
@@ -16,10 +17,12 @@ async function main() {
   const refresher = new TokenRefresher(pool, config);
   const quotaManager = new QuotaManager(pool, config);
   const executor = new RequestExecutor(pool, refresher, config, quotaManager);
+  const appealRechecker = new AppealRechecker(pool, config);
 
-  // 启动后台 Token 自动保活协程与额度监控协程
+  // 启动后台 Token 自动保活、额度监控、申诉自动复检协程
   refresher.start();
   quotaManager.startBackgroundWorker();
+  appealRechecker.start();
 
   // 启动 Web 服务
   const server = await createServer(config, pool, refresher, executor, quotaManager);
@@ -47,6 +50,7 @@ async function main() {
 
   const handleShutdown = async (signal: string) => {
     console.log(`\nReceived ${signal}, gracefully shutting down...`);
+    appealRechecker.stop();
     refresher.stop();
     await server.close();
     process.exit(0);

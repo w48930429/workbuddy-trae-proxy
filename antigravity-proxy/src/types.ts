@@ -45,11 +45,11 @@ export interface Account {
   availableModels?: string[];
   availableModelsAt?: number;
   modelPool?: 'legacy' | 'new';
-  // 临时不支持模型黑名单：upstreamModel -> 过期时间戳(ms)。
-  // 上游 404 或 200 软提示"模型已下线"时写入，避免反复撞同一个账号。
   unsupportedModels?: Record<string, number>;
+  // Google 申诉链接（账号被 TOS 封禁时，Google 返回的申诉表单地址，如 https://forms.gle/...）。
+  // 用于申诉自动复检：复检成功时自动恢复账号为 active 并清空 lastError，失败则保持 dead 等待申诉生效。
+  appealUrl?: string;
 }
-
 export interface AppConfig {
   port: number;
   host: string;
