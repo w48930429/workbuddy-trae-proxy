@@ -437,9 +437,12 @@ export function registerAnthropicRoutes(
       }
       const statusCode = err instanceof UpstreamRequestError ? err.statusCode : 503;
       const message = err instanceof UpstreamRequestError ? err.message : `Antigravity upstream unavailable: ${err.message}`;
+      if (statusCode === 429) {
+        reply.header('retry-after', '3');
+      }
       return reply.status(statusCode).send({
         type: 'error',
-        error: { type: statusCode === 400 ? 'invalid_request_error' : 'api_error', message }
+        error: { type: statusCode === 400 ? 'invalid_request_error' : (statusCode === 429 ? 'rate_limit_error' : 'api_error'), message }
       });
     }
 

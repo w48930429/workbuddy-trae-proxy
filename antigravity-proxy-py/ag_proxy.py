@@ -26,7 +26,15 @@ from admin.routes import build_admin_router
 
 # 全局上下文对象
 config = load_config()
-pool = AccountPool(initial_strategy=config.get('routingStrategy', 'zero-waste'))
+pool = AccountPool(
+    initial_strategy=config.get('routingStrategy', 'zero-waste'),
+    options={
+        'rpmLimit': config.get('accountRpmLimit', 0) or 0,
+        'requireAccountProxy': config.get('requireAccountProxy') is True,
+        'defaultProxyUrl': config.get('defaultProxyUrl'),
+        'baseCooldownMs': int(config.get('cooldownSeconds', 60) or 60) * 1000,
+    },
+)
 refresher = TokenRefresher(pool, config)
 quota_manager = QuotaManager(pool, config)
 executor = RequestExecutor(pool, refresher, config, quota_manager)

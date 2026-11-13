@@ -4,6 +4,7 @@ export type UpstreamErrorKind =
   | 'quota'
   | 'rate_limit'
   | 'location'
+  | 'forbidden'
   | 'transient'
   | 'invalid_request'
   | 'unknown';
@@ -95,10 +96,69 @@ export function classifyUpstreamError(statusCode: number, body: string): Classif
   if (statusCode === 408 || statusCode === 425 || statusCode >= 500) {
     return { kind: 'transient', reason: fields.reason, message };
   }
+  if (statusCode === 403) {
+    // 既不是 TOS 终局，也不是地域错误：可能是临时权限/项目配置问题。
+    // 只冷却，不永久 dead（旧逻辑把所有 403 都标 dead）。
+    return { kind: 'forbidden', reason: fields.reason, message };
+  }
   if (statusCode >= 400 && statusCode < 500) {
     return { kind: 'invalid_request', reason: fields.reason, message };
   }
   return { kind: 'unknown', reason: fields.reason, message };
+}
+
+/**
+ * 按失败类型给出该账号的冷却时长（毫秒）。0 表示不冷却（账号保持可用）。
+ *
+ * 与 magpie 的分级冷却对齐：
+ * - policy_blocked：调用方标记 dead，不走这里
+ * - location：30 分钟（地域问题通常不是账号本身坏了）
+ * - quota：至少 15 分钟，尊重上游 Retry-After
+ * - rate_limit：至少 60 秒，尊重 Retry-After
+ * - authentication：5 分钟（刷新失败后不要立刻再撞）
+ * - transient：30 秒（5xx/超时）
+ * - forbidden：5 分钟
+ * - invalid_request：0（请求本身的问题，换号无意义）
+ */
+export function cooldownMsFor(
+  kind: UpstreamErrorKind,
+  options: { retryAfterMs?: number; baseCooldownMs?: number } = {}
+): number {
+  const retry = Number.isFinite(options.retryAfterMs) ? Math.max(0, options.retryAfterMs as number) : 0;
+  const base = Math.max(0, options.baseCooldownMs ?? 60_000);
+  switch (kind) {
+    case 'policy_blocked':
+      return 0;
+    case 'location':
+      return Math.max(30 * 60_000, retry);
+    case 'quota':
+      return Math.max(15 * 60_000, retry);
+    case 'rate_limit':
+      return Math.max(60_000, base, retry);
+    case 'authentication':
+      return Math.max(5 * 60_000, retry);
+    case 'transient':
+      return Math.max(30_000, retry);
+    case 'forbidden':
+      return Math.max(5 * 60_000, retry);
+    case 'invalid_request':
+      return 0;
+    case 'unknown':
+    default:
+      return Math.max(base, retry);
+  }
+}
+
+/**
+ * 是否允许把这个请求换给同厂商的另一个账号重试。
+ *
+ * 本地只有 Google 一个厂商，所以“同厂商不扩散”在这里等价于：
+ * - 终局封禁（TOS/风控）不再换号，直接把真实错误交给客户端；
+ * - 请求本身不合法也没有换号意义。
+ * 其余错误（限流、额度、地域、临时 5xx）换号是安全的。
+ */
+export function shouldFailoverOn(kind: UpstreamErrorKind): boolean {
+  return kind !== 'policy_blocked' && kind !== 'invalid_request';
 }
 
 function parseDelay(value: unknown): number | undefined {

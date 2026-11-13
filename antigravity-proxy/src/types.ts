@@ -1,3 +1,12 @@
+declare global {
+  interface PromiseConstructor {
+    withResolvers<T>(): {
+      promise: Promise<T>;
+      resolve: (value: T | PromiseLike<T>) => void;
+      reject: (reason?: unknown) => void;
+    };
+  }
+}
 export type AccountStatus = 'active' | 'cooldown' | 'dead' | 'disabled';
 export type AccountTier = 'free' | 'pro' | 'ultra';
 export type RoutingStrategy = 'zero-waste' | 'sequential-drain' | 'round-robin';
@@ -63,6 +72,12 @@ export interface AppConfig {
   oauthClientId?: string;
   oauthClientSecret?: string;
   defaultProxyUrl?: string;       // 全局默认出口代理，如 http://127.0.0.1:7897
+  // 单账号每分钟请求上限（滚动 60 秒窗口）。0 或未设置表示不限。
+  // 官方客户端量级远低于网关的并发，设成 10~20 可显著降低“被当成自动化”的特征。
+  accountRpmLimit?: number;
+  // 是否要求每个账号必须配置独立 proxyUrl（默认 false）。
+  // 开启后，没有独立出口的账号不参与调度，避免多账号共用同一出口 IP。
+  requireAccountProxy?: boolean;
 }
 
 export interface OpenAIMessage {

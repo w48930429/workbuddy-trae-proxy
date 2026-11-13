@@ -3,9 +3,13 @@ import { Account, AppConfig, GoogleCloudCodePayload } from '../types.js';
 import { AccountPool } from './account-pool.js';
 import { TokenRefresher } from './refresher.js';
 
-import { classifyUpstreamError } from './error-policy.js';
+import { classifyUpstreamError, retryAfterMs, shouldFailoverOn, ClassifiedUpstreamError } from './error-policy.js';
 import { QuotaManager } from './quota-manager.js';
 import { pickUpstreamModelForAccount, ThinkingEffort } from '../gateway/models.js';
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, Math.max(0, ms)));
+}
 
 /**
  * 上游把"模型已下线/无权调用"包装在 HTTP 200 的正文里返回：
@@ -276,8 +280,16 @@ export class RequestExecutor {
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       const account = this.pool.acquireAccount(triedAccountIds, family, sessionKey, requestedModel, effort);
-
       if (!account) {
+        // 如果额度并未全灭，只是并发占满或临时冷却，等待片刻重试，避免瞬间并发峰值直接拒连
+        if (attempt < maxRetries && !this.pool.isFamilyExhausted(family)) {
+          const waitMs = 600 * attempt;
+          console.log(`[Executor] 账号池活跃账号暂时满载或冷却，等待 ${waitMs}ms 后进行第 ${attempt + 1}/${maxRetries} 次重试...`);
+          const { promise, resolve } = Promise.withResolvers<void>();
+          setTimeout(resolve, waitMs);
+          await promise;
+          continue;
+        }
         // 跨家族自动切换：请求的模型家族已全灭，但另一个家族还有额度时，
         // 自动把请求改道到另一个家族的模型，而不是直接报错。
         // 详见 CROSS_FAMILY_FALLBACK_ENABLED 处注释：当前已关闭该行为。
@@ -337,36 +349,41 @@ export class RequestExecutor {
           console.warn('[Executor] 全部候选账号均因上下文超限失败，回报 400 让客户端压缩上下文。');
           throw lastOverflowError;
         }
-        if (family === 'claude') {
-          let nearestDiff = Infinity;
-          for (const acc of this.pool.getAllAccounts()) {
-            if (acc.quota?.claudeResetTime) {
-              const diff = new Date(acc.quota.claudeResetTime).getTime() - Date.now();
-              if (diff > 0 && diff < nearestDiff) {
-                nearestDiff = diff;
+        // 仅在真实全灭时（所有 active 账号 5h+weekly 额度均耗尽且未到重置时间），才报额度耗尽！
+        const familyExhausted = this.pool.isFamilyExhausted(family);
+        if (familyExhausted) {
+          if (family === 'claude') {
+            let nearestDiff = Infinity;
+            for (const acc of this.pool.getAllAccounts()) {
+              if (acc.status === 'active' && acc.quota?.claudeResetTime && ((acc.quota.claude5hFraction ?? 1) <= 0.01 || (acc.quota.claudeWeeklyFraction ?? 1) <= 0.005)) {
+                const diff = new Date(acc.quota.claudeResetTime).getTime() - Date.now();
+                if (diff > 0 && diff < nearestDiff) {
+                  nearestDiff = diff;
+                }
               }
             }
-          }
-          const timeHint = nearestDiff !== Infinity
-            ? ` (最近回满倒计时: ${Math.floor(nearestDiff / 3600000)}小时${Math.floor((nearestDiff % 3600000) / 60000)}分)`
-            : '';
-          throw new Error(`当前账号池所有账号的 Claude/GPT 5小时额度均已耗尽${timeHint}。Gemini 额度依然充足可用，建议在客户端切换为 gemini-3.8-flash 等模型，或等待额度自动回满。`);
-        } else if (family === 'gemini') {
-          let nearestDiff = Infinity;
-          for (const acc of this.pool.getAllAccounts()) {
-            if (acc.quota?.geminiResetTime) {
-              const diff = new Date(acc.quota.geminiResetTime).getTime() - Date.now();
-              if (diff > 0 && diff < nearestDiff) {
-                nearestDiff = diff;
+            const timeHint = nearestDiff !== Infinity
+              ? ` (最近回满倒计时: ${Math.floor(nearestDiff / 3600000)}小时${Math.floor((nearestDiff % 3600000) / 60000)}分)`
+              : '';
+            throw new Error(`当前账号池所有账号的 Claude/GPT 5小时额度均已耗尽${timeHint}。Gemini 额度依然充足可用，建议在客户端切换为 gemini-3.8-flash 等模型，或等待额度自动回满。`);
+          } else if (family === 'gemini') {
+            let nearestDiff = Infinity;
+            for (const acc of this.pool.getAllAccounts()) {
+              if (acc.status === 'active' && acc.quota?.geminiResetTime && ((acc.quota.gemini5hFraction ?? 1) <= 0.01 || (acc.quota.geminiWeeklyFraction ?? 1) <= 0.005)) {
+                const diff = new Date(acc.quota.geminiResetTime).getTime() - Date.now();
+                if (diff > 0 && diff < nearestDiff) {
+                  nearestDiff = diff;
+                }
               }
             }
+            const timeHint = nearestDiff !== Infinity
+              ? ` (最近回满倒计时: ${Math.floor(nearestDiff / 3600000)}小时${Math.floor((nearestDiff % 3600000) / 60000)}分)`
+              : '';
+            throw new Error(`当前账号池所有账号的 Gemini 5小时额度均已耗尽${timeHint}。Claude / GPT 额度依然充足可用，建议在客户端切换为 claude-3-7-sonnet 等模型，或等待额度自动回满。`);
           }
-          const timeHint = nearestDiff !== Infinity
-            ? ` (最近回满倒计时: ${Math.floor(nearestDiff / 3600000)}小时${Math.floor((nearestDiff % 3600000) / 60000)}分)`
-            : '';
-          throw new Error(`当前账号池所有账号的 Gemini 5小时额度均已耗尽${timeHint}。Claude / GPT 额度依然充足可用，建议在客户端切换为 claude-3-7-sonnet 等模型，或等待额度自动回满。`);
         }
-        throw new Error('All accounts in the pool are busy, in cooldown, or exhausted.');
+        // 额度尚未耗尽，只是并发占满、临时冷却或重试候选用尽：准确报 429 rate limit，避免误报为额度耗尽！
+        throw new UpstreamRequestError(429, `当前 ${family === 'gemini' ? 'Gemini' : 'Claude/GPT'} 账号池繁忙（可用账号全部并发满载或暂时冷却中），请稍后重试。`);
       }
 
       triedAccountIds.add(account.id);
@@ -432,18 +449,25 @@ export class RequestExecutor {
         // 处理 429 限频 / 额度耗尽
         if (res.statusCode === 429) {
           const errBody = await res.body.text();
-          console.warn(`[Executor] 账号 ${account.email} 触发 429 限频/额度枯竭 (第 ${attempt}/${maxRetries} 次尝试)，正在无感自动换号...:`, errBody.substring(0, 120));
-          this.pool.releaseAccount(account.id, { code: 429, message: errBody }, family);
+          const classified = classifyUpstreamError(429, errBody);
+          const retry = retryAfterMs(res.headers as any, errBody, this.config.cooldownSeconds * 1000);
+          console.warn(`[Executor] 账号 ${account.email} 触发 429 (${classified.kind})，冷却 ${Math.round(retry / 1000)}s 后换号 (第 ${attempt}/${maxRetries} 次):`, errBody.substring(0, 120));
+          this.pool.releaseAccount(account.id, { code: 429, message: errBody }, family, classified, retry);
           if (this.quotaManager) {
             this.quotaManager.fetchQuotaForAccount(account).catch(() => {});
           }
-          // 自动进入下一轮循环，换取下一个可用账号
+          // 指数退避（1s/2s/4s，最多 8s），避免在多个账号上瞬间连撞；
+          // 同时尊重上游 Retry-After，但不让客户端等超过 8 秒。
+          if (attempt < maxRetries) {
+            await sleep(Math.min(retry, 1000 * Math.pow(2, attempt - 1), 8000));
+          }
           continue;
         }
 
         // 处理 401 Token 失效
         if (res.statusCode === 401) {
           const errBody = await res.body.text();
+          const classified = classifyUpstreamError(401, errBody);
           console.warn(`[Executor] Account ${account.email} hit 401 Unauthorized:`, errBody);
           // 尝试立即刷新 Token 一次
           const refreshOk = await this.refresher.refreshSingleAccount(account);
@@ -451,24 +475,33 @@ export class RequestExecutor {
             // 刷新成功，重试当前账号
             triedAccountIds.delete(account.id);
           } else {
-            this.pool.releaseAccount(account.id, { code: 401, message: 'Token refresh failed' });
+            this.pool.releaseAccount(
+              account.id,
+              { code: 401, message: errBody || 'Token refresh failed' },
+              family,
+              classified
+            );
           }
           continue;
         }
         // 处理 403 封禁或无权限
         if (res.statusCode === 403) {
           const errBody = await res.body.text();
-          // 上游错误分类（ag e8f9d23）：终局性封禁直接隔离、地域错误单独标记，
-          // 避免后台反复探测 Google 已判死的账号。
+          // 上游错误分类：终局性封禁/地域/临时权限分开处置。
           const classified = classifyUpstreamError(res.statusCode, errBody);
           if (classified.kind === 'policy_blocked') {
             console.error(`[Executor] Account ${account.email} hit 403 TERMINAL (${classified.reason}):`, errBody.substring(0, 120));
           } else if (classified.kind === 'location') {
             console.error(`[Executor] Account ${account.email} hit 403 LOCATION:`, errBody.substring(0, 120));
           } else {
-            console.error(`[Executor] Account ${account.email} hit 403 Forbidden:`, errBody);
+            console.error(`[Executor] Account ${account.email} hit 403 ${classified.kind}:`, errBody.substring(0, 120));
           }
-          this.pool.releaseAccount(account.id, { code: 403, message: errBody });
+          this.pool.releaseAccount(account.id, { code: 403, message: errBody }, family, classified);
+          // 同厂商不扩散：TOS/封禁类错误不再把同一请求交给其他 Google 账号，
+          // 直接把真实错误返回客户端，避免整个账号池被同一特征连锁标记。
+          if (!shouldFailoverOn(classified.kind)) {
+            throw new UpstreamRequestError(403, errBody);
+          }
           continue;
         }
 
@@ -485,7 +518,9 @@ export class RequestExecutor {
         // 处理 503 容量不足智能降级转移
         if (res.statusCode === 503) {
           const errBody = await res.body.text();
-          console.warn(`[Executor] Google Upstream 503:`, errBody);
+          const classified = classifyUpstreamError(503, errBody);
+          const retry = retryAfterMs(res.headers as any, errBody, this.config.cooldownSeconds * 1000);
+          console.warn(`[Executor] Google Upstream 503 (${classified.kind}):`, errBody);
           // 503 是上游"本次真的没容量"，不是账号问题。换号可能有效（不同账号走不同后端），
           // 但若三个账号都被 503 挡下，必须把这个真实原因回报客户端 —— 否则只剩一句
           // "Failed to fulfill request after 3 attempts with rotating accounts"，
@@ -499,14 +534,15 @@ export class RequestExecutor {
             this.pool.releaseAccount(account.id);
             continue;
           }
-          this.pool.releaseAccount(account.id, { code: 503, message: errBody });
+          this.pool.releaseAccount(account.id, { code: 503, message: errBody }, family, classified, retry);
           continue;
         }
 
         // 400 分两种：上下文超限（换号可能有用——不同账号/tier 的 per-request 输入上限不同）
         // 和其它请求不合法（换号无意义）。上下文超限时先换号重试，全部候选都超限才报给客户端。
         const errBody = await res.body.text();
-        this.pool.releaseAccount(account.id);
+        const classified = classifyUpstreamError(res.statusCode, errBody);
+        this.pool.releaseAccount(account.id, { code: res.statusCode, message: errBody }, family, classified);
         if (isContextOverflow(res.statusCode, errBody)) {
           lastOverflowError = new ContextOverflowError(res.statusCode, errBody);
           if (attempt < maxRetries) {
@@ -525,7 +561,17 @@ export class RequestExecutor {
         }
         // 网络层异常（如 Connect Timeout、Socket 掉线等），自动换号继续尝试，不立即中断
         console.error(`[Executor] Network or connection error for account ${account.email} (attempt ${attempt}/${maxRetries}):`, err.message);
-        this.pool.releaseAccount(account.id, { code: 500, message: `Network error: ${err.message}` });
+        const transient: ClassifiedUpstreamError = {
+          kind: 'transient',
+          reason: 'network_error',
+          message: String(err.message || err)
+        };
+        this.pool.releaseAccount(
+          account.id,
+          { code: 500, message: `Network error: ${err.message}` },
+          family,
+          transient
+        );
         if (attempt === maxRetries) {
           throw err;
         }

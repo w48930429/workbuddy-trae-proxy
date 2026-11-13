@@ -9547,11 +9547,16 @@ class Handler(BaseHTTPRequestHandler):
                                 cp.mark_cooldown(account.id, 60.0)
                             elif status == 403:
                                 cp.mark_restricted(account.id, 7200.0, str(exc))
+                            elif status == 401:
+                                cp.mark_credential_error(
+                                    account.id,
+                                    codearts_accounts.CREDENTIAL_ERROR_COOLDOWN,
+                                    str(exc))
                         log("codearts: stream setup failed (account=%s, status=%s, code=%s): %s" % (
                             account.label if account else "single", status, err_code, exc))
                         other_accounts = bool(cp) and any(
                             a.enabled and a.id not in tried_account_ids for a in cp.accounts)
-                        if (status in (429, 403, 502, 503) or is_concurrency) and other_accounts:
+                        if (status in (401, 429, 403, 502, 503) or is_concurrency) and other_accounts:
                             log("codearts: failing over to next available account in pool...")
                             continue
                         if is_concurrency and time.time() < deadline:
@@ -9638,11 +9643,16 @@ class Handler(BaseHTTPRequestHandler):
                             cp.mark_cooldown(account.id, 60.0)
                         elif status == 403:
                             cp.mark_restricted(account.id, 7200.0, str(exc))
+                        elif status == 401:
+                            cp.mark_credential_error(
+                                account.id,
+                                codearts_accounts.CREDENTIAL_ERROR_COOLDOWN,
+                                str(exc))
                     log("codearts: upstream error %s (account=%s, code=%s): %s" % (
                         status, account.label if account else "single", err_code, exc))
                     other_accounts = bool(cp) and any(
                         a.enabled and a.id not in tried_account_ids for a in cp.accounts)
-                    if (status in (429, 403, 502, 503) or is_concurrency) and other_accounts:
+                    if (status in (401, 429, 403, 502, 503) or is_concurrency) and other_accounts:
                         log("codearts: failing over to next available account in pool...")
                         continue
                     if is_concurrency and time.time() < deadline:

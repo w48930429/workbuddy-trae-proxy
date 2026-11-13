@@ -6,9 +6,13 @@ import secrets
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Set
 
+from .error_policy import cooldown_ms_for
+
 
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data'))
 ACCOUNTS_FILE = os.path.join(DATA_DIR, 'accounts.json')
+AFFINITY_FILE = os.path.join(DATA_DIR, 'affinity.json')
+RPM_WINDOW_MS = 60_000
 
 
 def current_time_ms() -> int:
@@ -27,7 +31,8 @@ def parse_iso_time_ms(iso_str: Optional[str]) -> int:
 
 
 class AccountPool:
-    def __init__(self, initial_strategy: str = 'zero-waste'):
+    def __init__(self, initial_strategy: str = 'zero-waste', options: Optional[Dict[str, Any]] = None):
+        options = options or {}
         self.accounts: Dict[str, Dict[str, Any]] = {}
         self.routing_strategy: str = initial_strategy
         self.start_time: int = current_time_ms()
@@ -40,9 +45,17 @@ class AccountPool:
         self.total_tokens: int = 0
         self.has_token_usage: bool = False
         self.session_bindings: Dict[str, Dict[str, Any]] = {}  # sessionKey -> {accountId, lastUsedAt}
+        # 每账号的滚动 60 秒请求时间戳（只在内存，不落盘）。
+        self.request_windows: Dict[str, List[int]] = {}
+        self.rpm_limit: int = max(0, int(options.get('rpmLimit') or 0))
+        self.require_account_proxy: bool = options.get('requireAccountProxy') is True
+        self.default_proxy_url: Optional[str] = options.get('defaultProxyUrl')
+        self.base_cooldown_ms: int = max(1000, int(options.get('baseCooldownMs') or 60000))
 
         os.makedirs(DATA_DIR, exist_ok=True)
         self.load_accounts()
+        self.load_affinity()
+        self.log_proxy_isolation()
 
     def load_accounts(self) -> None:
         if not os.path.exists(ACCOUNTS_FILE):
@@ -76,6 +89,76 @@ class AccountPool:
                 json.dump(list(self.accounts.values()), f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"[AccountPool] Failed to save accounts.json: {e}")
+
+    def load_affinity(self) -> None:
+        """会话粘滞绑定落盘，重启后仍把同一会话固定在同一账号。"""
+        try:
+            if not os.path.exists(AFFINITY_FILE):
+                return
+            with open(AFFINITY_FILE, 'r', encoding='utf-8') as f:
+                raw = json.load(f)
+            if not isinstance(raw, dict):
+                return
+            for key, val in raw.items():
+                if not isinstance(val, dict):
+                    continue
+                account_id = str(val.get('accountId') or '')
+                if not key or account_id not in self.accounts:
+                    continue
+                last_used = int(val.get('lastUsedAt') or 0)
+                self.session_bindings[key] = {'accountId': account_id, 'lastUsedAt': last_used}
+            print(f"[AccountPool] Loaded {len(self.session_bindings)} session binding(s) from affinity.json.")
+        except Exception as e:
+            print(f"[AccountPool] Failed to load affinity.json (ignored): {e}")
+
+    def save_affinity(self) -> None:
+        try:
+            out = {
+                key: val for key, val in self.session_bindings.items()
+                if isinstance(val, dict) and val.get('accountId') in self.accounts
+            }
+            with open(AFFINITY_FILE, 'w', encoding='utf-8') as f:
+                json.dump(out, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[AccountPool] Failed to save affinity.json: {e}")
+
+    def rpm_ok(self, acc: Dict[str, Any], now: int) -> bool:
+        """单账号滚动 60 秒窗口是否还有额度。0 表示不启用 RPM 限制。"""
+        if self.rpm_limit <= 0:
+            return True
+        stamps = [t for t in self.request_windows.get(acc['id'], []) if now - t < RPM_WINDOW_MS]
+        self.request_windows[acc['id']] = stamps
+        return len(stamps) < self.rpm_limit
+
+    def note_request(self, acc_id: str, now: int) -> None:
+        if self.rpm_limit <= 0:
+            return
+        stamps = [t for t in self.request_windows.get(acc_id, []) if now - t < RPM_WINDOW_MS]
+        stamps.append(now)
+        self.request_windows[acc_id] = stamps
+
+    def log_proxy_isolation(self) -> None:
+        """多账号共用同一出口时给出告警；不阻断调度，只把风险写进日志。"""
+        groups: Dict[str, List[str]] = {}
+        for acc in self.accounts.values():
+            key = str(acc.get('proxyUrl') or self.default_proxy_url or 'direct').strip()
+            groups.setdefault(key, []).append(str(acc.get('email') or acc.get('id')))
+        for key, emails in groups.items():
+            if len(emails) <= 1:
+                continue
+            masked = key.replace('//' + key.split('//', 1)[-1].split('@', 1)[0] + '@', '//***@') if '@' in key else key
+            print(f"[AccountPool] {len(emails)} 个账号共用出口 {masked}: {', '.join(emails)}（建议为每个账号配置独立 proxyUrl）")
+        if self.require_account_proxy:
+            no_proxy = [a for a in self.accounts.values() if not a.get('proxyUrl')]
+            if no_proxy:
+                print(f"[AccountPool] requireAccountProxy=true，{len(no_proxy)} 个账号没有独立 proxyUrl，将不参与调度。")
+
+    def clear_session_bindings(self, account_id: str) -> None:
+        keys = [k for k, v in self.session_bindings.items() if v.get('accountId') == account_id]
+        for key in keys:
+            self.session_bindings.pop(key, None)
+        if keys:
+            self.save_affinity()
 
     def get_all_accounts(self) -> List[Dict[str, Any]]:
         return list(self.accounts.values())
@@ -144,11 +227,14 @@ class AccountPool:
             return None
         acc.update(updates)
         self.save_accounts()
+        if 'proxyUrl' in updates:
+            self.log_proxy_isolation()
         return acc
 
     def remove_account(self, acc_id: str) -> bool:
         if acc_id in self.accounts:
             del self.accounts[acc_id]
+            self.clear_session_bindings(acc_id)
             self.save_accounts()
             return True
         return False
@@ -175,6 +261,12 @@ class AccountPool:
             if acc.get('status') != 'active':
                 continue
             if acc.get('activeConcurrency', 0) >= acc.get('maxConcurrency', 5):
+                continue
+            # 出口隔离：要求独立代理时，没有 proxyUrl 的账号不参与调度。
+            if self.require_account_proxy and not acc.get('proxyUrl'):
+                continue
+            # 单账号 RPM 限制：60 秒窗口内达到上限就跳过。
+            if not self.rpm_ok(acc, now):
                 continue
 
             # 额度感知过滤
@@ -206,6 +298,10 @@ class AccountPool:
             for acc in self.accounts.values():
                 if acc['id'] not in exclude_ids and acc.get('status') == 'active':
                     if acc.get('activeConcurrency', 0) < acc.get('maxConcurrency', 5):
+                        if self.require_account_proxy and not acc.get('proxyUrl'):
+                            continue
+                        if not self.rpm_ok(acc, now):
+                            continue
                         if not acc.get('quota'):
                             candidates.append(acc)
 
@@ -255,6 +351,7 @@ class AccountPool:
 
             if session_key:
                 self.session_bindings[session_key] = {'accountId': chosen['id'], 'lastUsedAt': now}
+                self.save_affinity()
 
         elif self.routing_strategy == 'sequential-drain':
             # 流水线顺序耗尽模式：打满一个再切下一个
@@ -276,13 +373,16 @@ class AccountPool:
         chosen['lastUsedAt'] = now
         chosen['totalRequests'] = chosen.get('totalRequests', 0) + 1
         self.total_requests_served += 1
+        self.note_request(chosen['id'], now)
         return chosen
 
     def release_account(
         self,
         acc_id: str,
         error: Optional[Dict[str, Any]] = None,
-        family: Optional[str] = None
+        family: Optional[str] = None,
+        classified: Optional[Dict[str, Any]] = None,
+        retry_after_ms: Optional[int] = None
     ) -> None:
         acc = self.accounts.get(acc_id)
         if not acc:
@@ -295,21 +395,69 @@ class AccountPool:
             code = error.get('code', 500)
             msg = str(error.get('message', ''))
             now = current_time_ms()
+            acc['lastError'] = f"[HTTP {code}] {msg[:200]}"
 
-            if code == 429:
-                # 冷却 60 秒
+            if classified:
+                # 新逻辑：按失败类型分级冷却（与 Node 版 / magpie 对齐）。
+                self._apply_error_policy(acc, classified, family, retry_after_ms)
+            elif code == 429:
+                # 旧逻辑（保留）：没有分类信息时按 HTTP code 处理。
                 acc['status'] = 'cooldown'
-                acc['cooldownUntil'] = now + 60 * 1000
+                acc['cooldownUntil'] = now + self.base_cooldown_ms
                 acc['lastError'] = f"429 Rate Limited: {msg[:100]}"
-                print(f"[AccountPool] Account {acc['email']} entered 60s cooldown due to 429")
+                print(f"[AccountPool] Account {acc['email']} entered {self.base_cooldown_ms // 1000}s cooldown due to 429")
+                self.save_accounts()
+                self.clear_session_bindings(acc_id)
             elif code == 401:
                 acc['lastError'] = f"401 Unauthorized: {msg[:100]}"
             elif code == 403:
                 acc['status'] = 'disabled'
                 acc['lastError'] = f"403 Forbidden: {msg[:100]}"
                 print(f"[AccountPool] Account {acc['email']} marked as disabled due to 403")
+                self.clear_session_bindings(acc_id)
+                self.save_accounts()
         else:
             acc.pop('lastError', None)
+
+    def _apply_error_policy(
+        self,
+        acc: Dict[str, Any],
+        classified: Dict[str, Any],
+        family: Optional[str],
+        retry_after_ms: Optional[int]
+    ) -> None:
+        """按分类结果设置冷却/终局状态，语义与 Node 版 applyErrorPolicy 一致。"""
+        kind = classified.get('kind')
+        now = current_time_ms()
+
+        if kind == 'policy_blocked':
+            acc['status'] = 'disabled'
+            acc['lastError'] = f"403 TERMINAL ({classified.get('reason') or 'TOS_VIOLATION'}): {str(classified.get('message') or '')[:160]}"
+            print(f"[AccountPool] Account {acc.get('email')} marked DISABLED (TOS/risk): {str(classified.get('message') or '')[:160]}")
+            self.clear_session_bindings(acc['id'])
+            self.save_accounts()
+            return
+
+        if kind == 'quota' and family:
+            q = acc.get('quota')
+            if isinstance(q, dict):
+                if family == 'claude':
+                    q['claude5hFraction'] = 0.0
+                else:
+                    q['gemini5hFraction'] = 0.0
+            print(f"[AccountPool] Account {acc.get('email')} {family} 5h quota exhausted; account stays active for the other family.")
+            self.save_accounts()
+            return
+
+        ms = cooldown_ms_for(kind or 'unknown', retry_after_ms, self.base_cooldown_ms)
+        if ms > 0:
+            acc['status'] = 'cooldown'
+            acc['cooldownUntil'] = now + ms
+            print(f"[AccountPool] Account {acc.get('email')} {kind} → cooldown {ms // 1000}s")
+
+        if kind != 'invalid_request':
+            self.clear_session_bindings(acc['id'])
+        self.save_accounts()
 
     def get_routing_strategy(self) -> str:
         return self.routing_strategy

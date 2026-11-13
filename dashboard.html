@@ -1329,10 +1329,10 @@ a:hover{text-decoration:underline}
         </div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <button type="button" class="btn" onclick="startCodeartsOAuth('cn')" style="padding:6px 12px;font-size:12px;background:var(--accent);color:#fff;border:none;border-radius:8px;cursor:pointer;display:inline-flex;align-items:center;gap:5px;box-shadow:var(--shadow-sm)" title="在当前浏览器新标签页打开国内站授权页 (codearts.huaweicloud.com)，URL 带 prompt=login 要求重新认证，可切换账号">
+        <button type="button" class="btn" onclick="startCodeartsOAuth('cn')" style="padding:6px 12px;font-size:12px;background:var(--accent);color:#fff;border:none;border-radius:8px;cursor:pointer;display:inline-flex;align-items:center;gap:5px;box-shadow:var(--shadow-sm)" title="打开独立全新浏览器窗口登录国内站新账号 (codearts.huaweicloud.com，不共享既有登录态)">
           🇨🇳 国内版登录
         </button>
-        <button type="button" class="btn" onclick="startCodeartsOAuth('intl')" style="padding:6px 12px;font-size:12px;background:var(--accent);color:#fff;border:none;border-radius:8px;cursor:pointer;display:inline-flex;align-items:center;gap:5px;box-shadow:var(--shadow-sm)" title="在当前浏览器新标签页打开海外站授权页 (codearts.ap-southeast-1.huaweicloud.com)，URL 带 prompt=login 要求重新认证，可切换账号">
+        <button type="button" class="btn" onclick="startCodeartsOAuth('intl')" style="padding:6px 12px;font-size:12px;background:var(--accent);color:#fff;border:none;border-radius:8px;cursor:pointer;display:inline-flex;align-items:center;gap:5px;box-shadow:var(--shadow-sm)" title="打开独立全新浏览器窗口登录海外站新账号 (codearts.ap-southeast-1.huaweicloud.com，不共享既有登录态)">
           🌏 海外版登录
         </button>
         <button type="button" class="btn sec" onclick="refreshCodeartsToken()" title="刷新账号池中所有网页 OAuth 账号的 STS 令牌（桌面端账号不刷新，避免顶掉 IDE 登录）" style="padding:6px 12px;font-size:12px;display:inline-flex;align-items:center;gap:5px">
@@ -1498,8 +1498,8 @@ a:hover{text-decoration:underline}
           <div style="font-size:12px;color:var(--dim);margin-top:2px">自动聚合独立网页 OAuth 授权、本机桌面 IDE 提取及永久 AK/SK · 单账号 3 并发守护与代理出口强隔离</div>
         </div>
         <div class="toolbar" style="margin:0;gap:8px">
-          <button type="button" class="btn mini" onclick="startCodeartsOAuth('cn')" style="background:var(--accent);color:#fff" title="在当前浏览器新标签页打开国内站授权页，URL 带 prompt=login 要求重新认证，可切换账号">+ 🇨🇳 国内版登录</button>
-          <button type="button" class="btn mini" onclick="startCodeartsOAuth('intl')" style="background:var(--accent);color:#fff" title="在当前浏览器新标签页打开海外站授权页，URL 带 prompt=login 要求重新认证，可切换账号">+ 🌏 海外版登录</button>
+          <button type="button" class="btn mini" onclick="startCodeartsOAuth('cn')" style="background:var(--accent);color:#fff" title="打开独立全新浏览器窗口登录国内站新账号 (不共享既有登录态)">+ 🇨🇳 国内版登录</button>
+          <button type="button" class="btn mini" onclick="startCodeartsOAuth('intl')" style="background:var(--accent);color:#fff" title="打开独立全新浏览器窗口登录海外站新账号 (不共享既有登录态)">+ 🌏 海外版登录</button>
           <button type="button" class="btn sec mini" onclick="scanCodeartsDesktop(this)">🖥️ 扫描/同步桌面端账号</button>
           <button type="button" class="btn sec mini" onclick="refreshAllCodeartsTokens(this)">🔄 批量刷新 STS 令牌</button>
           <button type="button" class="btn sec mini" onclick="codeartsCheckinAll(this)" title="一键领取所有账号的每日签到与福利权益">🎁 每日签到</button>
@@ -4760,7 +4760,7 @@ function closeCodeartsLogin(){
 
 async function startCodeartsOAuth(region, isolated){
   region = region === 'intl' ? 'intl' : 'cn';
-  isolated = isolated === true;
+  isolated = isolated !== false;
   const regionLabel = region === 'intl' ? '海外版 (ap-southeast-1)' : '国内版 (cn-north-4)';
   // 新标签页必须在用户点击的同步栈里预开：跨过 await 再 window.open 会被
   // 浏览器判定为非用户手势而拦截。隔离模式由网关启动浏览器，不需要预开。
@@ -5047,8 +5047,8 @@ function renderCodeartsAccounts(){
           可一键扫描导入本机 CodeArts Agent 桌面端凭据，或点击「国内版 / 海外版登录」在独立浏览器窗口中完成 OAuth 授权
         </div>
         <div style="display:inline-flex;gap:10px;flex-wrap:wrap;justify-content:center">
-          <button class="btn mini" onclick="startCodeartsOAuth('cn')" style="background:var(--accent);color:#fff" title="在当前浏览器新标签页打开国内站授权页，URL 带 prompt=login 要求重新认证，可切换账号">+ 🇨🇳 国内版登录</button>
-          <button class="btn mini" onclick="startCodeartsOAuth('intl')" style="background:var(--accent);color:#fff" title="在当前浏览器新标签页打开海外站授权页，URL 带 prompt=login 要求重新认证，可切换账号">+ 🌏 海外版登录</button>
+          <button class="btn mini" onclick="startCodeartsOAuth('cn')" style="background:var(--accent);color:#fff" title="打开独立全新浏览器窗口登录国内站新账号 (不共享既有登录态)">+ 🇨🇳 国内版登录</button>
+          <button class="btn mini" onclick="startCodeartsOAuth('intl')" style="background:var(--accent);color:#fff" title="打开独立全新浏览器窗口登录海外站新账号 (不共享既有登录态)">+ 🌏 海外版登录</button>
           <button class="btn sec mini" onclick="scanCodeartsDesktop(this)">🖥️ 扫描/同步桌面端账号</button>
         </div>
       </div>`;

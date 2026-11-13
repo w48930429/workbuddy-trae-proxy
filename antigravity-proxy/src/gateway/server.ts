@@ -275,8 +275,11 @@ export async function createServer(
       }
       const statusCode = err instanceof UpstreamRequestError ? err.statusCode : 503;
       const message = err instanceof UpstreamRequestError ? err.message : `Antigravity upstream unavailable: ${err.message}`;
+      if (statusCode === 429) {
+        reply.header('Retry-After', '3');
+      }
       return reply.status(statusCode).send({
-        error: { message, type: statusCode === 400 ? 'invalid_request_error' : 'api_error' }
+        error: { message, type: statusCode === 400 ? 'invalid_request_error' : (statusCode === 429 ? 'rate_limit_error' : 'api_error') }
       });
     }
 

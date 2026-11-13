@@ -160,7 +160,7 @@ class CodeArtsAccount:
             self.credential_error_until = 0.0
             self.credential_error_detail = ""
 
-    def is_expired(self, now_dt: Optional[datetime.datetime] = None) -> bool:
+    def is_expired(self, now_dt: Optional[Any] = None) -> bool:
         if not self.expires_at:
             return False
         try:
@@ -169,7 +169,12 @@ class CodeArtsAccount:
             return False
         if stamp.tzinfo is None:
             stamp = stamp.replace(tzinfo=datetime.timezone.utc)
-        current = now_dt or datetime.datetime.now(datetime.timezone.utc)
+        if isinstance(now_dt, (int, float)):
+            current = datetime.datetime.fromtimestamp(now_dt, tz=datetime.timezone.utc)
+        elif isinstance(now_dt, datetime.datetime):
+            current = now_dt if now_dt.tzinfo else now_dt.replace(tzinfo=datetime.timezone.utc)
+        else:
+            current = datetime.datetime.now(datetime.timezone.utc)
         return stamp <= current
 
     def is_available(self, now: Optional[float] = None) -> bool:
@@ -182,6 +187,8 @@ class CodeArtsAccount:
         if self.is_cooling(t) or self.is_restricted(t):
             return False
         if self.is_credential_error(t):
+            return False
+        if self.has_sts and self.is_expired(t) and not (self.refresh_token and self.login_context) and self.source != "desktop":
             return False
         if self.in_flight >= MAX_CONCURRENCY_PER_ACCOUNT:
             return False
@@ -249,6 +256,17 @@ class CodeArtsAccount:
 
     def needs_renew(self, threshold: Optional[float] = None) -> bool:
         """STS 是否已过期或剩余不足阈值（默认 300s）。"""
+        if self.source == "desktop":
+            if not self.expires_at:
+                return True
+            try:
+                stamp = datetime.datetime.fromisoformat(self.expires_at.replace("Z", "+00:00"))
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+                remaining = (stamp - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+                return remaining < (threshold if threshold is not None else 300.0)
+            except Exception:
+                return True
         if not (self.has_sts and self.refresh_token and self.login_context):
             return False
         if not self.expires_at:
@@ -275,6 +293,25 @@ class CodeArtsAccount:
             # 双重检查：等锁期间别的线程可能已经刷新过，不能再用旧 token 刷一次。
             if not self.needs_renew(threshold):
                 return
+            if self.source == "desktop":
+                try:
+                    from codearts import codearts_session
+                    ds = codearts_session.load_desktop_session()
+                    if ds and ds.access_key and not codearts_session.is_expired(ds):
+                        self.access_key = ds.access_key
+                        self.secret_key = ds.secret_key
+                        self.security_token = ds.security_token
+                        self.expires_at = ds.expires_at
+                        self.refresh_token = ds.refresh_token
+                        self.clear_credential_error()
+                        if save:
+                            save()
+                        print("[CodeArtsPool] re-read fresh desktop session for %s (expires_at=%s)"
+                              % (self.label, self.expires_at), flush=True)
+                        return
+                except Exception as exc:
+                    print(f"[CodeArtsPool] failed reading desktop session: {exc}", flush=True)
+                raise RuntimeError("desktop session expired; please sign in via CodeArts IDE or Web OAuth")
             from codearts import codearts_oauth
             codearts_oauth.refresh_sts_token_for_account(self, proxy=self.proxy)
             self.clear_credential_error()

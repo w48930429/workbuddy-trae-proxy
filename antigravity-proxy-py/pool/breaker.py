@@ -1,11 +1,17 @@
 import os
 import json
 import re
+import asyncio
 from typing import Optional, Dict, Any, Set
 from datetime import datetime
 import httpx
 
 from .account_pool import AccountPool, current_time_ms
+from .error_policy import (
+    classify_upstream_error,
+    retry_after_ms,
+    should_failover_on,
+)
 from .refresher import TokenRefresher
 from .quota_manager import QuotaManager
 
@@ -265,28 +271,59 @@ class RequestExecutor:
                 await client.aclose()
 
                 if res.status_code == 429:
-                    print(f"[Executor] 账号 {account.get('email')} 触发 429 限频/额度枯竭 (第 {attempt}/{max_retries} 次尝试)，正在无感自动换号...: {err_body[:120]}")
-                    self.pool.release_account(account['id'], {'code': 429, 'message': err_body}, family)
+                    classified = classify_upstream_error(429, err_body)
+                    default_cooldown = int(self.config.get('cooldownSeconds', 60)) * 1000
+                    retry = retry_after_ms(res.headers, err_body, default_cooldown)
+                    print(f"[Executor] 账号 {account.get('email')} 触发 429 ({classified.get('kind')})，冷却 {retry // 1000}s 后换号 (第 {attempt}/{max_retries} 次): {err_body[:120]}")
+                    self.pool.release_account(
+                        account['id'],
+                        {'code': 429, 'message': err_body},
+                        family,
+                        classified,
+                        retry,
+                    )
                     if self.quota_manager:
                         asyncio.create_task(self.quota_manager.fetch_quota_for_account(account))
+                    # 指数退避（1s/2s/4s，最多 8s），避免在多个账号上瞬间连撞；
+                    # 同时尊重上游 Retry-After，但不让客户端等超过 8 秒。
+                    if attempt < max_retries:
+                        await asyncio.sleep(min(retry, 1000 * (2 ** (attempt - 1)), 8000) / 1000)
                     continue
 
                 if res.status_code == 401:
+                    classified = classify_upstream_error(401, err_body)
                     print(f"[Executor] Account {account.get('email')} hit 401 Unauthorized: {err_body}")
                     refresh_ok = await self.refresher.refresh_single_account(account)
                     if refresh_ok:
                         tried_account_ids.discard(account['id'])
                     else:
-                        self.pool.release_account(account['id'], {'code': 401, 'message': 'Token refresh failed'})
+                        self.pool.release_account(
+                            account['id'],
+                            {'code': 401, 'message': err_body or 'Token refresh failed'},
+                            family,
+                            classified,
+                        )
                     continue
 
                 if res.status_code == 403:
-                    print(f"[Executor] Account {account.get('email')} hit 403 Forbidden: {err_body}")
-                    self.pool.release_account(account['id'], {'code': 403, 'message': err_body})
+                    classified = classify_upstream_error(403, err_body)
+                    print(f"[Executor] Account {account.get('email')} hit 403 {classified.get('kind')}: {err_body[:120]}")
+                    self.pool.release_account(
+                        account['id'],
+                        {'code': 403, 'message': err_body},
+                        family,
+                        classified,
+                    )
+                    # 同厂商不扩散：TOS/封禁类错误不再把同一请求交给其他 Google 账号。
+                    if not should_failover_on(classified.get('kind')):
+                        raise UpstreamRequestError(403, err_body)
                     continue
 
                 if res.status_code == 503:
-                    print(f"[Executor] Google Upstream 503: {err_body}")
+                    classified = classify_upstream_error(503, err_body)
+                    default_cooldown = int(self.config.get('cooldownSeconds', 60)) * 1000
+                    retry = retry_after_ms(res.headers, err_body, default_cooldown)
+                    print(f"[Executor] Google Upstream 503 ({classified.get('kind')}): {err_body[:120]}")
                     last_capacity_error = UpstreamRequestError(res.status_code, err_body)
                     if 'MODEL_CAPACITY_EXHAUSTED' in err_body and 'gpt-oss' in (payload.get('model') or ''):
                         print("[Executor] GPT-OSS capacity exhausted, automatically falling back to gemini-3.8-flash-high...")
@@ -294,10 +331,22 @@ class RequestExecutor:
                         tried_account_ids.discard(account['id'])
                         self.pool.release_account(account['id'])
                         continue
-                    self.pool.release_account(account['id'], {'code': 503, 'message': err_body})
+                    self.pool.release_account(
+                        account['id'],
+                        {'code': 503, 'message': err_body},
+                        family,
+                        classified,
+                        retry,
+                    )
                     continue
 
-                self.pool.release_account(account['id'])
+                classified = classify_upstream_error(res.status_code, err_body)
+                self.pool.release_account(
+                    account['id'],
+                    {'code': res.status_code, 'message': err_body},
+                    family,
+                    classified,
+                )
                 if is_context_overflow(res.status_code, err_body):
                     last_overflow_error = ContextOverflowError(res.status_code, err_body)
                     if attempt < max_retries:
@@ -311,7 +360,12 @@ class RequestExecutor:
                 if isinstance(err, UpstreamRequestError):
                     raise
                 print(f"[Executor] Network or connection error for account {account.get('email')} (attempt {attempt}/{max_retries}): {err}")
-                self.pool.release_account(account['id'], {'code': 500, 'message': f"Network error: {err}"})
+                self.pool.release_account(
+                    account['id'],
+                    {'code': 500, 'message': f"Network error: {err}"},
+                    family,
+                    {'kind': 'transient', 'reason': 'network_error', 'message': str(err)},
+                )
                 if attempt == max_retries:
                     raise
 

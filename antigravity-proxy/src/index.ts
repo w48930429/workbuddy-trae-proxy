@@ -13,7 +13,12 @@ async function main() {
   console.log('====================================================');
 
   const config = loadConfig();
-  const pool = new AccountPool(config.routingStrategy || 'zero-waste');
+  const pool = new AccountPool(config.routingStrategy || 'zero-waste', {
+    rpmLimit: config.accountRpmLimit || 0,
+    requireAccountProxy: config.requireAccountProxy === true,
+    defaultProxyUrl: config.defaultProxyUrl,
+    baseCooldownMs: (config.cooldownSeconds || 60) * 1000
+  });
   const refresher = new TokenRefresher(pool, config);
   const quotaManager = new QuotaManager(pool, config);
   const executor = new RequestExecutor(pool, refresher, config, quotaManager);

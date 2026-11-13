@@ -20,7 +20,11 @@ export const DEFAULT_CONFIG: AppConfig = {
   routingStrategy: (process.env.ROUTING_STRATEGY as any) || 'zero-waste',
   oauthClientId: process.env.OAUTH_CLIENT_ID || DEFAULT_OAUTH_CLIENT_ID,
   oauthClientSecret: process.env.OAUTH_CLIENT_SECRET || DEFAULT_OAUTH_CLIENT_SECRET,
-  defaultProxyUrl: process.env.DEFAULT_PROXY_URL || 'http://127.0.0.1:7897'
+  defaultProxyUrl: process.env.DEFAULT_PROXY_URL || 'http://127.0.0.1:7897',
+  // 默认不启用 RPM 限制，保持现有吞吐；建议在 config.json 里按官方客户端量级设为 10~20。
+  accountRpmLimit: 0,
+  // 默认不强制账号独立出口；开启后没有 proxyUrl 的账号会被跳过。
+  requireAccountProxy: false
 };
 
 export function loadConfig(): AppConfig {

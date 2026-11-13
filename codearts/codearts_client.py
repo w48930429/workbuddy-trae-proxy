@@ -180,7 +180,7 @@ def _classify_error(status, text):
         # A dead login is not a bad request: 401 is what tells the caller to
         # re-authenticate rather than retry the same payload.
         raise CodeArtsCredentialError(
-            401, "CodeArts login expired - reopen the IDE to renew: " + message,
+            401, "CodeArts login expired - please re-authenticate via Web OAuth or reopen IDE: " + message,
             code, text)
     raise CodeArtsError(effective, message, code, text)
 

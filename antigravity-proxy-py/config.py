@@ -22,7 +22,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     'routingStrategy': os.environ.get('ROUTING_STRATEGY', 'zero-waste'),
     'oauthClientId': os.environ.get('OAUTH_CLIENT_ID', ''),
     'oauthClientSecret': os.environ.get('OAUTH_CLIENT_SECRET', ''),
-    'defaultProxyUrl': os.environ.get('DEFAULT_PROXY_URL', 'http://127.0.0.1:20081')
+    'defaultProxyUrl': os.environ.get('DEFAULT_PROXY_URL', 'http://127.0.0.1:20081'),
+    # 单账号每分钟请求上限（滚动 60 秒）。0 表示不限；建议按官方客户端量级设为 10~20。
+    'accountRpmLimit': 0,
+    # 是否要求每个账号必须配置独立 proxyUrl（默认 false）。
+    'requireAccountProxy': False,
 }
 
 
